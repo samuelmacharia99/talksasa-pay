@@ -1,0 +1,9 @@
+.git
+deploy/dev-secrets
+secrets
+web
+node_modules
+*.md
+!docs
+bin
+dist

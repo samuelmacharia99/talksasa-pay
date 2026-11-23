@@ -1,0 +1,51 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: ci-only-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      PGPASSWORD: ci-only-password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Create roles (mirrors deploy/postgres/init-roles.sh)
+        run: |
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE talksasa_owner LOGIN PASSWORD 'ci-owner' CREATEDB;
+          CREATE ROLE talksasa_app LOGIN PASSWORD 'ci-app';
+          GRANT talksasa_app TO talksasa_owner;
+          SQL
+      - name: sqlc generated code is up to date
+        run: docker run --rm -v "$PWD:/src" -w /src sqlc/sqlc:1.29.0 diff
+      - name: Lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.11.0
+      - name: Test (race, with database)
+        env:
+          TSP_TEST_DATABASE_URL: postgres://talksasa_owner:ci-owner@localhost:5432/postgres?sslmode=disable
+          TSP_REQUIRE_DB_TESTS: "1"
+        run: go test -race -count=1 ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

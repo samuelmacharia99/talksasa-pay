@@ -1,0 +1,24 @@
+# Secrets: never commit. Encrypted bundles (*.enc.yaml) are the only secrets in git.
+deploy/dev-secrets/
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+secrets/*.yaml
+!secrets/*.enc.yaml
+
+# Build output
+/bin/
+/dist/
+coverage.out
+*.test
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Node (web/)
+node_modules/
+.next/
