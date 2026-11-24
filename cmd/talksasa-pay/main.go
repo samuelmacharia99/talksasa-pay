@@ -1,6 +1,7 @@
 // Command talksasa-pay is the single binary for the Talksasa Pay service.
 //
 //	talksasa-pay api                 serve the HTTP API
+//	talksasa-pay worker              run background jobs (webhooks, expiry, retention)
 //	talksasa-pay migrate up|down|version
 //	talksasa-pay admin ...           operator commands (products, API keys, audit)
 //	talksasa-pay keygen --version N  print a new master keyring line
@@ -28,6 +29,7 @@ const usage = `usage: talksasa-pay <command> [args]
 
 commands:
   api          serve the HTTP API
+  worker       run background jobs (webhook delivery, request expiry, retention)
   migrate      up | down | version   (uses TSP_MIGRATE_DATABASE_URL[_FILE])
   admin        operator commands; run "talksasa-pay admin" for details
   keygen       print a new master keyring line: keygen --version N
@@ -50,6 +52,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "api":
 		err = runAPI(ctx, stderr)
+	case "worker":
+		err = runWorker(ctx, stderr)
 	case "migrate":
 		err = runMigrate(args[1:], stderr)
 	case "admin":

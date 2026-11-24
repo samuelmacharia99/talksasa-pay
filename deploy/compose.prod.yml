@@ -105,6 +105,8 @@ services:
       TSP_METRICS_ADDR: ":9464"
       TSP_ADMIN_ADDR: ":8089"
       TSP_ADMIN_SETUP_BASE_URL: "https://${TSP_ADMIN_DOMAIN:?}/setup/"
+      # Rendered into pay_url; the worker must use the same value.
+      TSP_PAY_BASE_URL: "https://${TSP_PAY_DOMAIN:?}/"
       # Caddy (product API callers) and the two Next.js servers may pass the
       # end user's IP. Nothing else can.
       TSP_TRUSTED_PROXIES: "${TSP_NET:-172.30.20}.2/32,${TSP_NET:-172.30.20}.20/32,${TSP_NET:-172.30.20}.21/32"
@@ -120,6 +122,42 @@ services:
         ipv4_address: ${TSP_NET:-172.30.20}.10
     healthcheck:
       test: ["CMD", "/talksasa-pay", "healthcheck", "--url", "http://127.0.0.1:8088/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  # Background jobs: webhook delivery, payment request expiry, retention.
+  # Talks only to Postgres (and outbound to product webhook URLs). Its
+  # /healthz and /metrics listener is bound to the host's loopback only.
+  worker:
+    <<: *app
+    command: ["worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    environment:
+      TSP_ENV: ${TSP_ENV}
+      TSP_LOG_LEVEL: ${TSP_LOG_LEVEL:-info}
+      TSP_WORKER_HEALTH_ADDR: ":9465"
+      TSP_PAY_BASE_URL: "https://${TSP_PAY_DOMAIN:?}/"
+      TSP_ADMIN_SETUP_BASE_URL: "https://${TSP_ADMIN_DOMAIN:?}/setup/"
+      TSP_MPESA_PAYBILL: ${TSP_MPESA_PAYBILL:?}
+      TSP_DATABASE_URL_FILE: /run/secrets/database_url
+      TSP_MASTER_KEYS_FILE: /run/secrets/master_keys
+      TSP_API_KEY_PEPPER_FILE: /run/secrets/api_key_pepper
+    secrets: [database_url, master_keys, api_key_pepper]
+    ports:
+      - "127.0.0.1:${TSP_WORKER_METRICS_PORT:-9465}:9465"
+    networks:
+      default:
+        ipv4_address: ${TSP_NET:-172.30.20}.11
+    # Running jobs get TSP_WORKER_SHUTDOWN_TIMEOUT (25s) to finish on stop.
+    stop_grace_period: 40s
+    healthcheck:
+      test: ["CMD", "/talksasa-pay", "healthcheck", "--url", "http://127.0.0.1:9465/healthz"]
       interval: 10s
       timeout: 3s
       retries: 3

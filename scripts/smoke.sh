@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end smoke test against the local Docker stack (make smoke).
 #
-# Builds and starts postgres + migrate + api, then checks health, API-key
+# Builds and starts postgres + migrate + api + worker, then checks health, API-key
 # auth, revocation, metrics isolation, container hardening, audit chain and
 # ledger balances, and that the issued API key never appears in any log.
 # It creates a throwaway product with a random prefix; it never deletes data.
@@ -34,6 +34,9 @@ check "GET /healthz" "$(status $API/healthz)" 200
 check "GET /readyz (database reachable)" "$(status $API/readyz)" 200
 check "metrics served on internal port" "$(status $METRICS/metrics)" 200
 check "metrics NOT served on public port" "$(status $API/metrics)" 404
+check "worker container healthy" "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q worker)")" healthy
+check "worker /healthz reports running" \
+  "$(docker compose exec -T worker /talksasa-pay healthcheck --url http://127.0.0.1:9465/healthz >/dev/null 2>&1 && echo ok || echo down)" ok
 
 echo "== security headers"
 hdrs=$(curl -s -D - -o /dev/null $API/healthz)
@@ -42,7 +45,7 @@ for h in X-Content-Type-Options X-Frame-Options Content-Security-Policy Strict-T
 done
 
 echo "== container hardening"
-for svc in api admin pay; do
+for svc in api worker admin pay; do
   cid=$(docker compose ps -q "$svc")
   user=$(docker inspect -f '{{.Config.User}}' "$cid")
   check "$svc runs as non-root" "$([[ -n "$user" && "${user%%:*}" != 0 && "$user" != root ]] && echo yes || echo no)" yes
@@ -101,8 +104,8 @@ check "ledger balances verify" "$(admin ledger check)" "Ledger balances verified
 
 echo "== secret leakage"
 secret=${key##*_}
-docker compose logs --no-color api migrate >"$WORK/stack.log" 2>&1
-check "API key secret absent from api/migrate logs" "$(grep -c "$secret" "$WORK/stack.log" || true)" 0
+docker compose logs --no-color api worker migrate >"$WORK/stack.log" 2>&1
+check "API key secret absent from api/worker/migrate logs" "$(grep -c "$secret" "$WORK/stack.log" || true)" 0
 check "API key secret absent from CLI logs" "$(grep -c "$secret" "$WORK/cli.log" || true)" 0
 whsec=$(grep -oE 'whsec_[a-z2-7]+' "$WORK/product.out" | head -1)
 check "webhook secret printed once at creation" "$([[ -n $whsec ]] && echo yes || echo no)" yes
