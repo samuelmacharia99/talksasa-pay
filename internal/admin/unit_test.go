@@ -149,9 +149,9 @@ func TestOTPAuthURI(t *testing.T) {
 func TestRBACMatrix(t *testing.T) {
 	want := map[store.AdminRole]map[Permission]bool{
 		store.AdminRoleViewer:   {PermRead: true},
-		store.AdminRoleFinance:  {PermRead: true},
+		store.AdminRoleFinance:  {PermRead: true, PermResolvePayments: true},
 		store.AdminRoleApprover: {PermRead: true},
-		store.AdminRoleAdmin:    {PermRead: true, PermManageProducts: true, PermManageUsers: true},
+		store.AdminRoleAdmin:    {PermRead: true, PermManageProducts: true, PermManageUsers: true, PermResolvePayments: true},
 	}
 	for _, role := range store.AllAdminRoleValues() {
 		for _, perm := range AllPermissions {

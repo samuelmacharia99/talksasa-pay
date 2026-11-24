@@ -473,6 +473,68 @@ paths:
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/TransactionDetail" } } } }
         "404": { $ref: "#/components/responses/Problem" }
+  /transactions/{id}/resolve:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Confirm or fail an M-Pesa payment in needs_review (finance, admin)
+      description: |
+        Safaricom reported success for an STK push but never sent the receipt.
+        Look the payment up on the M-Pesa portal, then either confirm it with
+        its receipt (the transaction succeeds and is applied to the bill) or
+        mark it failed (no money arrived). Audited with the reason.
+        409 `not_resolvable` if the transaction is not needs_review;
+        409 `receipt_taken` if the receipt is already recorded elsewhere.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action, reason]
+              properties:
+                action: { type: string, enum: [confirm, fail] }
+                receipt: { type: string, maxLength: 64, description: "Required for confirm: the M-Pesa receipt, e.g. SKL4ABCD12" }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+      responses:
+        "200": { description: Resolved, content: { application/json: { schema: { $ref: "#/components/schemas/TransactionDetail" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /payment-requests/{id}/stk-pushes:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: M-Pesa prompts sent for a payment request, newest first
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/STKPush" } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /mpesa/callbacks:
+    get:
+      summary: Safaricom callbacks received, newest first (bodies are not listed)
+      parameters:
+        - { name: unprocessed, in: query, schema: { type: boolean }, description: "Only callbacks not yet processed (or failing)" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/MpesaCallback" } }
+                  next_cursor: { type: string }
   /audit:
     get:
       summary: Audit log
@@ -581,6 +643,34 @@ components:
         detail: { type: string }
         code: { type: string }
         request_id: { type: string }
+    STKPush:
+      type: object
+      required: [id, source, status, amount, phone, checkout_request_id, result_code, result_desc, query_attempts, transaction_id, created_at, completed_at]
+      properties:
+        id: { type: string, format: uuid }
+        source: { type: string, enum: [product, pay_page] }
+        status: { type: string, enum: [initiating, sent, succeeded, failed, unknown] }
+        amount: { type: integer }
+        phone: { type: string, description: Masked }
+        checkout_request_id: { type: [string, "null"] }
+        result_code: { type: [string, "null"] }
+        result_desc: { type: [string, "null"] }
+        query_attempts: { type: integer }
+        transaction_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: [string, "null"], format: date-time }
+    MpesaCallback:
+      type: object
+      required: [id, kind, remote_ip, received_at, processed_at, error, attempts, transaction_id]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [stk, c2b_confirmation] }
+        remote_ip: { type: [string, "null"] }
+        received_at: { type: string, format: date-time }
+        processed_at: { type: [string, "null"], format: date-time }
+        error: { type: [string, "null"] }
+        attempts: { type: integer }
+        transaction_id: { type: [string, "null"], format: uuid }
     Role: { type: string, enum: [viewer, finance, approver, admin] }
     RequestStatus: { type: string, enum: [open, partially_paid, paid, cancelled, expired] }
     TxnStatus: { type: string, enum: [pending, succeeded, failed, cancelled, needs_review] }
@@ -593,7 +683,7 @@ components:
         email: { type: string }
         name: { type: string }
         role: { $ref: "#/components/schemas/Role" }
-        permissions: { type: array, items: { type: string, enum: [read, products.manage, users.manage] } }
+        permissions: { type: array, items: { type: string, enum: [read, products.manage, users.manage, payments.resolve] } }
         expires_at: { type: string, format: date-time }
         idle_expires_at: { type: string, format: date-time }
     User:

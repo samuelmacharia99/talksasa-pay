@@ -1206,6 +1206,155 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/transactions/{id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm or fail an M-Pesa payment in needs_review (finance, admin)
+         * @description Safaricom reported success for an STK push but never sent the receipt.
+         *     Look the payment up on the M-Pesa portal, then either confirm it with
+         *     its receipt (the transaction succeeds and is applied to the bill) or
+         *     mark it failed (no money arrived). Audited with the reason.
+         *     409 `not_resolvable` if the transaction is not needs_review;
+         *     409 `receipt_taken` if the receipt is already recorded elsewhere.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        action: "confirm" | "fail";
+                        /** @description Required for confirm: the M-Pesa receipt, e.g. SKL4ABCD12 */
+                        receipt?: string;
+                        reason: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Resolved */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TransactionDetail"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/payment-requests/{id}/stk-pushes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        /** M-Pesa prompts sent for a payment request, newest first */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["id"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["STKPush"][];
+                        };
+                    };
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mpesa/callbacks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Safaricom callbacks received, newest first (bodies are not listed) */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Only callbacks not yet processed (or failing) */
+                    unprocessed?: boolean;
+                    cursor?: components["parameters"]["cursor"];
+                    limit?: components["parameters"]["limit"];
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["MpesaCallback"][];
+                            next_cursor?: string;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/audit": {
         parameters: {
             query?: never;
@@ -1460,6 +1609,42 @@ export interface components {
             code?: string;
             request_id?: string;
         };
+        STKPush: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            source: "product" | "pay_page";
+            /** @enum {string} */
+            status: "initiating" | "sent" | "succeeded" | "failed" | "unknown";
+            amount: number;
+            /** @description Masked */
+            phone: string;
+            checkout_request_id: string | null;
+            result_code: string | null;
+            result_desc: string | null;
+            query_attempts: number;
+            /** Format: uuid */
+            transaction_id: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            completed_at: string | null;
+        };
+        MpesaCallback: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            kind: "stk" | "c2b_confirmation";
+            remote_ip: string | null;
+            /** Format: date-time */
+            received_at: string;
+            /** Format: date-time */
+            processed_at: string | null;
+            error: string | null;
+            attempts: number;
+            /** Format: uuid */
+            transaction_id: string | null;
+        };
         /** @enum {string} */
         Role: "viewer" | "finance" | "approver" | "admin";
         /** @enum {string} */
@@ -1474,7 +1659,7 @@ export interface components {
             email: string;
             name: string;
             role: components["schemas"]["Role"];
-            permissions: ("read" | "products.manage" | "users.manage")[];
+            permissions: ("read" | "products.manage" | "users.manage" | "payments.resolve")[];
             /** Format: date-time */
             expires_at: string;
             /** Format: date-time */

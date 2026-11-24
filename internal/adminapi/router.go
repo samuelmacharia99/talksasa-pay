@@ -88,6 +88,9 @@ func Routes(d Deps) []Route {
 		{http.MethodGet, "/payment-requests/{id}", admin.PermRead, h.getRequest},
 		{http.MethodGet, "/transactions", admin.PermRead, h.listTransactions},
 		{http.MethodGet, "/transactions/{id}", admin.PermRead, h.getTransaction},
+		{http.MethodPost, "/transactions/{id}/resolve", admin.PermResolvePayments, h.resolveTransaction},
+		{http.MethodGet, "/payment-requests/{id}/stk-pushes", admin.PermRead, h.listSTKPushes},
+		{http.MethodGet, "/mpesa/callbacks", admin.PermRead, h.listMpesaCallbacks},
 		{http.MethodGet, "/audit", admin.PermRead, h.listAudit},
 
 		{http.MethodGet, "/users", admin.PermManageUsers, h.listUsers},

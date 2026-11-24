@@ -14,19 +14,24 @@ const (
 	PermManageProducts Permission = "products.manage"
 	// PermManageUsers allows inviting, disabling and re-roling staff.
 	PermManageUsers Permission = "users.manage"
+	// PermResolvePayments allows confirming (with the M-Pesa receipt from
+	// the portal) or failing an M-Pesa payment in needs_review. Confirming
+	// records money, so it is limited to finance and admin (user decision
+	// 2026-11-24); every resolution is audited with a reason.
+	PermResolvePayments Permission = "payments.resolve"
 )
 
 // AllPermissions lists every permission (used by the RBAC matrix test).
-var AllPermissions = []Permission{PermRead, PermManageProducts, PermManageUsers}
+var AllPermissions = []Permission{PermRead, PermManageProducts, PermManageUsers, PermResolvePayments}
 
 // rolePermissions is the single source of truth for what each role may do.
 // finance and approver gain money permissions (refund maker / approver,
 // statement import) in later phases.
 var rolePermissions = map[store.AdminRole]map[Permission]bool{
 	store.AdminRoleViewer:   {PermRead: true},
-	store.AdminRoleFinance:  {PermRead: true},
+	store.AdminRoleFinance:  {PermRead: true, PermResolvePayments: true},
 	store.AdminRoleApprover: {PermRead: true},
-	store.AdminRoleAdmin:    {PermRead: true, PermManageProducts: true, PermManageUsers: true},
+	store.AdminRoleAdmin:    {PermRead: true, PermManageProducts: true, PermManageUsers: true, PermResolvePayments: true},
 }
 
 // Allows reports whether role grants perm. Unknown roles get nothing.
