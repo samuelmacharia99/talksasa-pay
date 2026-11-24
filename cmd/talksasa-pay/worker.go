@@ -15,9 +15,11 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/webhook"
 )
 
-// runWorker runs background jobs (River): webhook delivery and maintenance
-// (payment request expiry, webhook attempt retention). Several workers may
-// run at once; River elects one leader to schedule the periodic jobs.
+// runWorker runs background jobs (River): webhook delivery, maintenance
+// (payment request expiry, webhook attempt retention) and, when M-Pesa is
+// configured, Daraja callback processing and the STK status sweep. Several
+// workers may run at once; River elects one leader to schedule the periodic
+// jobs.
 func runWorker(ctx context.Context, logw io.Writer) error {
 	a, err := newApp(ctx, logw, "worker")
 	if err != nil {
@@ -48,6 +50,11 @@ func runWorker(ctx context.Context, logw io.Writer) error {
 		AttemptRetention:   a.cfg.Worker.AttemptRetention,
 		WebhookConcurrency: a.cfg.Worker.WebhookConcurrency,
 		Webhook:            hookWorker,
+		// TODO(integrator): MpesaConcurrency: a.cfg.Worker.MpesaConcurrency
+		// (TSP_WORKER_MPESA_CONCURRENCY, default 20); 0 = jobs default.
+	}
+	if a.stk.Available() {
+		deps.STK = a.stk
 	}
 	client, err := jobs.NewClient(deps, jobs.ClientOptions{ExpiryEvery: a.cfg.Worker.MaintenanceEvery})
 	if err != nil {

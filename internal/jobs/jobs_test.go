@@ -630,7 +630,7 @@ func TestNewClientWithoutWebhookWorkerSkipsWebhookQueue(t *testing.T) {
 	if err := jobs.Register(river.NewWorkers(), jobs.Deps{}); err == nil {
 		t.Fatal("Register accepted missing deps")
 	}
-	if len(jobs.PeriodicJobs(time.Minute)) != 2 {
+	if len(jobs.PeriodicJobs(jobs.Deps{}, time.Minute)) != 2 {
 		t.Fatal("want expiry and retention periodic jobs")
 	}
 }

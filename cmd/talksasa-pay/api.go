@@ -37,6 +37,10 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 		Payers: a.payers, Requests: a.paymentRequests, View: a.events.View(),
 		KeyLimiter:        httpx.NewRateLimiterPerSecond(a.cfg.API.RatePerKey, a.cfg.API.BurstPerKey),
 		APIRequestTimeout: a.cfg.API.RequestTimeout, APIMaxInFlight: a.cfg.API.MaxInFlight, Readiness: ready,
+		// TODO(integrator): M-Pesa fields added by the HTTP agent, e.g.
+		//   STK: a.stk, MpesaCallbackToken: a.cfg.Mpesa.CallbackToken,
+		//   MpesaCallbackCIDRs: a.cfg.Mpesa.CallbackCIDRs,
+		// (callbacks are mounted only when a.stk.Available()).
 	})
 	apiSrv := httpx.NewServer(a.cfg.HTTP.Addr, handler, a.cfg.HTTP, a.logger)
 
@@ -45,7 +49,7 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 	adminHandler := adminapi.NewRouter(adminapi.Deps{
 		Logger: a.logger.With(slog.String("listener", "admin")), Admin: a.admin, Products: a.products, Reporting: a.reporting,
 		Metrics: metrics.NewHTTP(reg, "admin"), TrustedProxies: a.cfg.TrustedProxies, MaxBodyBytes: 64 << 10,
-		Webhooks: webhook.NewDeliveries(a.pool, a.river),
+		Webhooks: webhook.NewDeliveries(a.pool, a.river), STK: a.stk,
 	})
 	adminSrv := httpx.NewServer(a.cfg.Admin.Addr, adminHandler, a.cfg.HTTP, a.logger)
 

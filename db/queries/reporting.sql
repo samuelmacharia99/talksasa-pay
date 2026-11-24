@@ -158,7 +158,25 @@ SELECT
   (SELECT count(*) FROM transactions WHERE status = 'pending')::bigint AS pending,
   (SELECT coalesce(sum(credit_balance), 0) FROM payer_accounts)::bigint AS credit_held,
   (SELECT count(*) FROM payer_accounts)::bigint AS payers,
-  (SELECT count(*) FROM payment_requests WHERE duplicate_reference AND status IN ('open', 'partially_paid'))::bigint AS duplicate_references;
+  (SELECT count(*) FROM payment_requests WHERE duplicate_reference AND status IN ('open', 'partially_paid'))::bigint AS duplicate_references,
+  -- STK pushes a status check said succeeded but no receipt arrived: their
+  -- transactions wait in needs_review for staff to enter the receipt.
+  (SELECT count(*) FROM stk_pushes WHERE status = 'unknown')::bigint AS unknown_stk_pushes,
+  -- Callbacks needing attention: still unprocessed 5 minutes after arrival
+  -- (the worker is down or keeps failing), or processed with an error in
+  -- the last 7 days (malformed body, amount mismatch, ...).
+  (SELECT count(*) FROM mpesa_callbacks
+    WHERE (processed_at IS NULL AND received_at < now() - interval '5 minutes')
+       OR (error IS NOT NULL AND received_at > now() - interval '7 days'))::bigint AS unprocessed_callbacks,
+  -- Money received in the last 30 days for a product that is not active or
+  -- a payer account that is closed. It was still applied to their bills
+  -- (money rule), but staff should follow up.
+  (SELECT count(*) FROM transactions t
+     LEFT JOIN products p ON p.id = t.product_id
+     LEFT JOIN payer_accounts pa ON pa.id = t.payer_account_id
+    WHERE t.direction = 'in' AND t.status = 'succeeded'
+      AND coalesce(t.completed_at, t.created_at) > now() - interval '30 days'
+      AND (p.status <> 'active' OR pa.status <> 'active'))::bigint AS inactive_product_payments;
 
 -- name: GetPaymentRequestByHostedToken :one
 SELECT pr.id, pr.product_id, p.name AS product_name, p.account_prefix, p.status AS product_status,

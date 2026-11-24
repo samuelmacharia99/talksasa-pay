@@ -36,6 +36,8 @@ the audit log.
   user disable     --email EMAIL --actor NAME   (offboarding)
   audit verify     check the audit log hash chain
   ledger check     check cached balances against allocation lines
+  mpesa register-urls --actor NAME   register the paybill's C2B callback URLs with Safaricom
+  mpesa status     M-Pesa configuration (no secrets) and STK/callback counts to watch
   seed demo        --actor NAME   development only: demo products, payers, bills, payments
 `
 
@@ -258,6 +260,18 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		}
 		fmt.Fprintln(stdout, "Audit log chain verified: OK")
 		return nil
+
+	case "mpesa register-urls":
+		if err := needActor(); err != nil {
+			return err
+		}
+		if a.mpesa == nil {
+			return errors.New("M-Pesa is off (TSP_MPESA_ENV is not set)")
+		}
+		return registerC2BURLs(ctx, a.mpesa, a.pool, actor, a.cfg.Public.Paybill, a.cfg.Mpesa.CallbackToken.Reveal(), stdout)
+
+	case "mpesa status":
+		return printMpesaStatus(ctx, a.cfg, store.New(a.pool), stdout)
 
 	case "ledger check":
 		drift, err := store.New(a.pool).FindBalanceDrift(ctx)

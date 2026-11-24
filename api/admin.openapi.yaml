@@ -944,7 +944,7 @@ components:
         products: { type: array, items: { $ref: "#/components/schemas/Product" } }
         counts:
           type: object
-          required: [open_requests, outstanding, suspense_count, suspense_amount, needs_review, pending, credit_held, payers, duplicate_references]
+          required: [open_requests, outstanding, suspense_count, suspense_amount, needs_review, pending, credit_held, payers, duplicate_references, unknown_stk_pushes, unprocessed_callbacks, inactive_product_payments]
           properties:
             open_requests: { type: integer }
             outstanding: { type: integer }
@@ -957,6 +957,15 @@ components:
             duplicate_references:
               type: integer
               description: Live requests reopened by a reversal while a newer live request had the same reference; staff should resolve them.
+            unknown_stk_pushes:
+              type: integer
+              description: STK pushes a status check reported as paid but no receipt arrived; their transactions are in needs_review until staff enter the receipt.
+            unprocessed_callbacks:
+              type: integer
+              description: Safaricom callbacks still unprocessed 5 minutes after arrival, plus callbacks whose processing recorded an error in the last 7 days.
+            inactive_product_payments:
+              type: integer
+              description: Successful incoming payments in the last 30 days for a product that is not active or a payer account that is closed. The money was applied as normal; staff should follow up.
         timezone: { type: string }
         generated_at: { type: string, format: date-time }
     Integrity:

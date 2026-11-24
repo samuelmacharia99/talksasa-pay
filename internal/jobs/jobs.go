@@ -46,6 +46,14 @@ type Deps struct {
 	Webhook river.Worker[queue.WebhookArgs]
 	// WebhookConcurrency is the webhooks queue's worker count.
 	WebhookConcurrency int
+
+	// STK processes M-Pesa callbacks and runs the STK status sweep. nil when
+	// M-Pesa is off: the mpesa queue, its workers and the sweep are not
+	// registered at all.
+	STK STKService
+	// MpesaConcurrency is the mpesa queue's worker count
+	// (TSP_WORKER_MPESA_CONCURRENCY); 0 = DefaultMpesaConcurrency.
+	MpesaConcurrency int
 }
 
 func (d Deps) validate() error {
@@ -58,7 +66,17 @@ func (d Deps) validate() error {
 	if d.Webhook != nil && d.WebhookConcurrency < 1 {
 		return errors.New("jobs: WebhookConcurrency must be positive")
 	}
+	if d.MpesaConcurrency < 0 {
+		return errors.New("jobs: MpesaConcurrency must not be negative")
+	}
 	return nil
+}
+
+func (d Deps) mpesaConcurrency() int {
+	if d.MpesaConcurrency > 0 {
+		return d.MpesaConcurrency
+	}
+	return DefaultMpesaConcurrency
 }
 
 func (d Deps) batchSize() int {
@@ -97,6 +115,14 @@ func Register(workers *river.Workers, d Deps) error {
 			return err
 		}
 	}
+	if d.STK != nil {
+		if err := river.AddWorkerSafely(workers, NewCallbackWorker(d)); err != nil {
+			return err
+		}
+		if err := river.AddWorkerSafely(workers, NewSTKSweepWorker(d)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -108,14 +134,18 @@ func Queues(d Deps) map[string]river.QueueConfig {
 	if d.Webhook != nil {
 		q[queue.QueueWebhooks] = river.QueueConfig{MaxWorkers: d.WebhookConcurrency}
 	}
+	if d.STK != nil {
+		q[queue.QueueMpesa] = river.QueueConfig{MaxWorkers: d.mpesaConcurrency()}
+	}
 	return q
 }
 
-// PeriodicJobs schedules the maintenance jobs. Only the elected leader among
-// worker processes enqueues them; ExpireRequestsArgs/RetentionArgs are also
-// unique per period, so a leadership change cannot double-schedule.
-func PeriodicJobs(expiryEvery time.Duration) []*river.PeriodicJob {
-	return []*river.PeriodicJob{
+// PeriodicJobs schedules the maintenance jobs, plus the STK status sweep
+// when M-Pesa is on (d.STK set). Only the elected leader among worker
+// processes enqueues them; the args are also unique per period, so a
+// leadership change cannot double-schedule.
+func PeriodicJobs(d Deps, expiryEvery time.Duration) []*river.PeriodicJob {
+	jobs := []*river.PeriodicJob{
 		river.NewPeriodicJob(river.PeriodicInterval(expiryEvery),
 			func() (river.JobArgs, *river.InsertOpts) { return queue.ExpireRequestsArgs{}, nil },
 			&river.PeriodicJobOpts{ID: "expire_payment_requests", RunOnStart: true}),
@@ -123,6 +153,12 @@ func PeriodicJobs(expiryEvery time.Duration) []*river.PeriodicJob {
 			func() (river.JobArgs, *river.InsertOpts) { return queue.RetentionArgs{}, nil },
 			&river.PeriodicJobOpts{ID: "retention", RunOnStart: true}),
 	}
+	if d.STK != nil {
+		jobs = append(jobs, river.NewPeriodicJob(river.PeriodicInterval(STKSweepEvery),
+			func() (river.JobArgs, *river.InsertOpts) { return queue.STKSweepArgs{}, nil },
+			&river.PeriodicJobOpts{ID: "mpesa_stk_sweep", RunOnStart: true}))
+	}
+	return jobs
 }
 
 // ClientOptions tune the worker's River client.
@@ -146,11 +182,14 @@ func NewClient(d Deps, o ClientOptions) (*queue.Client, error) {
 	if d.Webhook == nil {
 		d.Logger.Warn("no webhook worker registered: the webhooks queue is NOT being worked; webhook jobs will wait")
 	}
+	if d.STK == nil {
+		d.Logger.Info("mpesa off: the mpesa queue (callbacks, STK status sweep) is not worked")
+	}
 	cfg := &river.Config{
 		Logger:       d.Logger,
 		Queues:       Queues(d),
 		Workers:      workers,
-		PeriodicJobs: PeriodicJobs(o.ExpiryEvery),
+		PeriodicJobs: PeriodicJobs(d, o.ExpiryEvery),
 	}
 	if o.FetchPollInterval > 0 {
 		cfg.FetchPollInterval = o.FetchPollInterval

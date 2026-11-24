@@ -13,6 +13,7 @@ import (
 
 	"github.com/talksasa/talksasa-pay/internal/platform/metrics"
 	"github.com/talksasa/talksasa-pay/internal/queue"
+	"github.com/talksasa/talksasa-pay/internal/stk"
 )
 
 // Metrics are the worker's Prometheus metrics. A nil *Metrics records nothing.
@@ -21,6 +22,10 @@ type Metrics struct {
 	duration *prometheus.HistogramVec
 	expiredN prometheus.Counter
 	prunedN  prometheus.Counter
+	// M-Pesa: callbacks by outcome (processed, failed) and STK sweep
+	// outcomes (queried, failed, needs_review, rescheduled).
+	callbacks *prometheus.CounterVec
+	sweepN    *prometheus.CounterVec
 }
 
 // NewMetrics registers the worker metrics.
@@ -41,8 +46,44 @@ func NewMetrics(r *metrics.Registry) *Metrics {
 			Namespace: "talksasa_pay", Name: "webhook_attempts_pruned_total", Help: "Webhook attempt log rows deleted by retention.",
 		}),
 	}
-	r.Prometheus().MustRegister(m.jobs, m.duration, m.expiredN, m.prunedN)
+	m.callbacks = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "talksasa_pay", Name: "mpesa_callbacks_total",
+		Help: "M-Pesa callback processing attempts by outcome (processed, failed; failed attempts are retried).",
+	}, []string{"outcome"})
+	m.sweepN = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "talksasa_pay", Name: "mpesa_stk_sweep_pushes_total",
+		Help: "STK pushes handled by the status sweep by outcome (queried, failed, needs_review, rescheduled).",
+	}, []string{"outcome"})
+	for _, o := range []string{"processed", "failed"} {
+		m.callbacks.WithLabelValues(o)
+	}
+	for _, o := range []string{"queried", "failed", "needs_review", "rescheduled"} {
+		m.sweepN.WithLabelValues(o)
+	}
+	r.Prometheus().MustRegister(m.jobs, m.duration, m.expiredN, m.prunedN, m.callbacks, m.sweepN)
 	return m
+}
+
+func (m *Metrics) callback(ok bool) {
+	if m == nil {
+		return
+	}
+	if ok {
+		m.callbacks.WithLabelValues("processed").Inc()
+	} else {
+		m.callbacks.WithLabelValues("failed").Inc()
+	}
+}
+
+func (m *Metrics) sweep(r stk.SweepResult) {
+	if m == nil {
+		return
+	}
+	for o, n := range map[string]int{"queried": r.Queried, "failed": r.Failed, "needs_review": r.NeedsReview, "rescheduled": r.Rescheduled} {
+		if n > 0 {
+			m.sweepN.WithLabelValues(o).Add(float64(n))
+		}
+	}
 }
 
 func (m *Metrics) expired(n int) {

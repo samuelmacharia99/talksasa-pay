@@ -441,6 +441,8 @@ func toDashboard(d reporting.Dashboard, products []product.Product) dashboardJSO
 			"needs_review": d.Counts.NeedsReview, "pending": d.Counts.Pending,
 			"credit_held": d.Counts.CreditHeld, "payers": d.Counts.Payers,
 			"duplicate_references": d.Counts.DuplicateReferences,
+			"unknown_stk_pushes":   d.Counts.UnknownStkPushes, "unprocessed_callbacks": d.Counts.UnprocessedCallbacks,
+			"inactive_product_payments": d.Counts.InactiveProductPayments,
 		},
 	}
 	for i, day := range d.Daily {
