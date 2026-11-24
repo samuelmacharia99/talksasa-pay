@@ -164,10 +164,12 @@ SELECT
   (SELECT count(*) FROM stk_pushes WHERE status = 'unknown')::bigint AS unknown_stk_pushes,
   -- Callbacks needing attention: still unprocessed 5 minutes after arrival
   -- (the worker is down or keeps failing), or processed with an error in
-  -- the last 7 days (malformed body, amount mismatch, ...).
+  -- the last 7 days that recorded no money (malformed body, foreign
+  -- shortcode, ...). Notes on callbacks that did record money (duplicate,
+  -- held in suspense) are not failures.
   (SELECT count(*) FROM mpesa_callbacks
     WHERE (processed_at IS NULL AND received_at < now() - interval '5 minutes')
-       OR (error IS NOT NULL AND received_at > now() - interval '7 days'))::bigint AS unprocessed_callbacks,
+       OR (error IS NOT NULL AND transaction_id IS NULL AND received_at > now() - interval '7 days'))::bigint AS unprocessed_callbacks,
   -- Money received in the last 30 days for a product that is not active or
   -- a payer account that is closed. It was still applied to their bills
   -- (money rule), but staff should follow up.

@@ -17,7 +17,7 @@ const listMpesaCallbacksAttention = `-- name: ListMpesaCallbacksAttention :many
 
 SELECT id, kind, remote_ip, received_at, processed_at, error, attempts, transaction_id
   FROM mpesa_callbacks
- WHERE (NOT $1::boolean OR processed_at IS NULL OR error IS NOT NULL)
+ WHERE (NOT $1::boolean OR processed_at IS NULL OR (error IS NOT NULL AND transaction_id IS NULL))
    AND ($2::timestamptz IS NULL
         OR (received_at, id) < ($2::timestamptz, $3::uuid))
  ORDER BY received_at DESC, id DESC
@@ -44,7 +44,9 @@ type ListMpesaCallbacksAttentionRow struct {
 
 // Admin panel and operator CLI views of M-Pesa activity (read-only).
 // Callback inbox for the admin panel. attention_only keeps callbacks that
-// need a look: not processed yet, or whose processing recorded an error.
+// need a look: not processed yet, or processed with an error and no money
+// recorded. (Notes on callbacks that did record money — duplicate receipt,
+// held in suspense — are not failures; those payments surface elsewhere.)
 func (q *Queries) ListMpesaCallbacksAttention(ctx context.Context, arg ListMpesaCallbacksAttentionParams) ([]ListMpesaCallbacksAttentionRow, error) {
 	rows, err := q.db.Query(ctx, listMpesaCallbacksAttention,
 		arg.AttentionOnly,
@@ -85,7 +87,7 @@ SELECT
   (SELECT count(*) FROM stk_pushes WHERE status = 'unknown')::bigint AS unknown_pushes,
   (SELECT count(*) FROM mpesa_callbacks WHERE processed_at IS NULL)::bigint AS unprocessed_callbacks,
   (SELECT count(*) FROM mpesa_callbacks
-    WHERE error IS NOT NULL AND received_at > now() - interval '7 days')::bigint AS failed_callbacks_7d
+    WHERE error IS NOT NULL AND transaction_id IS NULL AND received_at > now() - interval '7 days')::bigint AS failed_callbacks_7d
 `
 
 type MpesaStatusCountsRow struct {
