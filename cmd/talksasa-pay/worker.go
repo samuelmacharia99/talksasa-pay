@@ -9,8 +9,8 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/talksasa/talksasa-pay/internal/jobs"
-	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
+	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 	"github.com/talksasa/talksasa-pay/internal/platform/metrics"
 )
 

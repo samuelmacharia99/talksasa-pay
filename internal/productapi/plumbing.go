@@ -1,7 +1,6 @@
 package productapi
 
 import (
-	"time"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
@@ -13,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
