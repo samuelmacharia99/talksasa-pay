@@ -1,0 +1,10 @@
+packages:
+  - apps/*
+  - packages/*
+  - e2e
+# Supply-chain hardening: no install scripts except those explicitly allowed,
+# and only versions published at least a day ago.
+onlyBuiltDependencies:
+  - sharp
+  - unrs-resolver
+minimumReleaseAge: 1440

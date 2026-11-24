@@ -16,6 +16,18 @@ x-app: &app
     postgres:
       condition: service_healthy
 
+# Next.js frontends: same hardening as the Go containers. They hold no
+# secrets; the admin app only forwards each staff member's session cookie.
+x-web: &web
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  tmpfs:
+    - /tmp
+  depends_on:
+    api:
+      condition: service_healthy
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -57,6 +69,14 @@ services:
       TSP_LOG_LEVEL: debug
       TSP_HTTP_ADDR: ":8088"
       TSP_METRICS_ADDR: ":9464"
+      # Admin API: reachable only on the compose network (from the admin
+      # Next.js server). Deliberately NOT in `ports` below.
+      TSP_ADMIN_ADDR: ":8089"
+      TSP_ADMIN_SETUP_BASE_URL: "http://127.0.0.1:3001/setup/"
+      # Only the two Next.js servers may forward the end user's IP.
+      TSP_TRUSTED_PROXIES: "172.30.10.20/32,172.30.10.21/32"
+      # Safaricom's sandbox test paybill; production sets the real number.
+      TSP_MPESA_PAYBILL: "174379"
       TSP_DATABASE_URL_FILE: /run/secrets/database_url
       TSP_MASTER_KEYS_FILE: /run/secrets/master_keys
       TSP_API_KEY_PEPPER_FILE: /run/secrets/api_key_pepper
@@ -68,11 +88,64 @@ services:
     ports:
       - "127.0.0.1:8088:8088"
       - "127.0.0.1:9464:9464"
+    networks:
+      default:
+        ipv4_address: 172.30.10.10
     healthcheck:
       test: ["CMD", "/talksasa-pay", "healthcheck", "--url", "http://127.0.0.1:8088/healthz"]
       interval: 10s
       timeout: 3s
       retries: 3
+
+  admin:
+    <<: *web
+    build:
+      context: ./web
+      dockerfile: ../deploy/web.Dockerfile
+      args: { APP: admin }
+    image: talksasa-pay-admin:dev
+    environment:
+      TSP_ADMIN_API_URL: "http://172.30.10.10:8089/admin/v1"
+      # Plain http on localhost in development only.
+      TSP_ADMIN_INSECURE_COOKIES: "true"
+      PORT: "3001"
+    ports:
+      - "127.0.0.1:3001:3001"
+    networks:
+      default:
+        ipv4_address: 172.30.10.20
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3001/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  pay:
+    <<: *web
+    build:
+      context: ./web
+      dockerfile: ../deploy/web.Dockerfile
+      args: { APP: pay }
+    image: talksasa-pay-page:dev
+    environment:
+      TSP_PUBLIC_API_URL: "http://172.30.10.10:8088/public/v1"
+      PORT: "3000"
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      default:
+        ipv4_address: 172.30.10.21
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.10.0/24
 
 volumes:
   pgdata:

@@ -126,6 +126,20 @@ Each row includes a fingerprint (SHA-256) of the row before it, forming a
 chain. Editing or deleting a past row breaks the chain, and
 `talksasa-pay admin audit verify` reports where.
 
+### Staff accounts (admin panel)
+`admin_users`, `admin_invitations`, `admin_sessions`, `admin_recovery_codes`
+(migration `000002_admin`). Passwords are stored only as argon2id hashes, the
+authenticator (TOTP) secret is encrypted with the master key, and session,
+setup-link and recovery-code tokens are stored only as fingerprints, so a
+database copy cannot be used to sign in. The database refuses to:
+
+- delete any of these rows (staff are disabled, sessions revoked);
+- mark an account active without a password and an authenticator;
+- send an account back to "invited" without wiping its old credentials;
+- change a session's expiry or stage, or revive a revoked session or used link.
+
+See `docs/runbooks/admin-access.md` for how staff are onboarded and offboarded.
+
 ## Allocation rules (confirmed 2026-11-22)
 
 When a payment arrives for a payer:

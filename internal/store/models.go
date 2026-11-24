@@ -7,10 +7,194 @@ package store
 import (
 	"database/sql/driver"
 	"fmt"
+	"net/netip"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+type AdminRole string
+
+const (
+	AdminRoleViewer   AdminRole = "viewer"
+	AdminRoleFinance  AdminRole = "finance"
+	AdminRoleApprover AdminRole = "approver"
+	AdminRoleAdmin    AdminRole = "admin"
+)
+
+func (e *AdminRole) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AdminRole(s)
+	case string:
+		*e = AdminRole(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AdminRole: %T", src)
+	}
+	return nil
+}
+
+type NullAdminRole struct {
+	AdminRole AdminRole
+	Valid     bool // Valid is true if AdminRole is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAdminRole) Scan(value interface{}) error {
+	if value == nil {
+		ns.AdminRole, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AdminRole.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAdminRole) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AdminRole), nil
+}
+
+func (e AdminRole) Valid() bool {
+	switch e {
+	case AdminRoleViewer,
+		AdminRoleFinance,
+		AdminRoleApprover,
+		AdminRoleAdmin:
+		return true
+	}
+	return false
+}
+
+func AllAdminRoleValues() []AdminRole {
+	return []AdminRole{
+		AdminRoleViewer,
+		AdminRoleFinance,
+		AdminRoleApprover,
+		AdminRoleAdmin,
+	}
+}
+
+type AdminSessionStage string
+
+const (
+	AdminSessionStageMfa  AdminSessionStage = "mfa"
+	AdminSessionStageFull AdminSessionStage = "full"
+)
+
+func (e *AdminSessionStage) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AdminSessionStage(s)
+	case string:
+		*e = AdminSessionStage(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AdminSessionStage: %T", src)
+	}
+	return nil
+}
+
+type NullAdminSessionStage struct {
+	AdminSessionStage AdminSessionStage
+	Valid             bool // Valid is true if AdminSessionStage is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAdminSessionStage) Scan(value interface{}) error {
+	if value == nil {
+		ns.AdminSessionStage, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AdminSessionStage.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAdminSessionStage) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AdminSessionStage), nil
+}
+
+func (e AdminSessionStage) Valid() bool {
+	switch e {
+	case AdminSessionStageMfa,
+		AdminSessionStageFull:
+		return true
+	}
+	return false
+}
+
+func AllAdminSessionStageValues() []AdminSessionStage {
+	return []AdminSessionStage{
+		AdminSessionStageMfa,
+		AdminSessionStageFull,
+	}
+}
+
+type AdminUserStatus string
+
+const (
+	AdminUserStatusInvited  AdminUserStatus = "invited"
+	AdminUserStatusActive   AdminUserStatus = "active"
+	AdminUserStatusDisabled AdminUserStatus = "disabled"
+)
+
+func (e *AdminUserStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AdminUserStatus(s)
+	case string:
+		*e = AdminUserStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AdminUserStatus: %T", src)
+	}
+	return nil
+}
+
+type NullAdminUserStatus struct {
+	AdminUserStatus AdminUserStatus
+	Valid           bool // Valid is true if AdminUserStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAdminUserStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.AdminUserStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AdminUserStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAdminUserStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AdminUserStatus), nil
+}
+
+func (e AdminUserStatus) Valid() bool {
+	switch e {
+	case AdminUserStatusInvited,
+		AdminUserStatusActive,
+		AdminUserStatusDisabled:
+		return true
+	}
+	return false
+}
+
+func AllAdminUserStatusValues() []AdminUserStatus {
+	return []AdminUserStatus{
+		AdminUserStatusInvited,
+		AdminUserStatusActive,
+		AdminUserStatusDisabled,
+	}
+}
 
 type AllocationBatchKind string
 
@@ -573,6 +757,53 @@ func AllTxnStatusValues() []TxnStatus {
 	}
 }
 
+type AdminInvitation struct {
+	ID        uuid.UUID
+	UserID    uuid.UUID
+	TokenHash []byte
+	CreatedBy string
+	CreatedAt time.Time
+	ExpiresAt time.Time
+	UsedAt    *time.Time
+	RevokedAt *time.Time
+}
+
+type AdminSession struct {
+	ID           uuid.UUID
+	UserID       uuid.UUID
+	TokenHash    []byte
+	Stage        AdminSessionStage
+	CreatedAt    time.Time
+	LastSeenAt   time.Time
+	ExpiresAt    time.Time
+	Ip           *netip.Addr
+	UserAgent    *string
+	RevokedAt    *time.Time
+	RevokeReason *string
+}
+
+// Talksasa staff who use the admin panel. Never deleted: offboarding sets status = disabled.
+type AdminUser struct {
+	ID                uuid.UUID
+	Email             string
+	Name              string
+	Role              AdminRole
+	Status            AdminUserStatus
+	PasswordHash      *string
+	TotpCiphertext    []byte
+	TotpKeyVersion    *int32
+	TotpLastStep      *int64
+	FailedAttempts    int32
+	LockedUntil       *time.Time
+	LastLoginAt       *time.Time
+	PasswordChangedAt *time.Time
+	CreatedBy         string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	DisabledAt        *time.Time
+	DisabledBy        *string
+}
+
 type Allocation struct {
 	ID               int64
 	BatchID          uuid.UUID
@@ -695,4 +926,13 @@ type Transaction struct {
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
 	CompletedAt           *time.Time
+}
+
+type TransactionEvent struct {
+	ID            int64
+	TransactionID uuid.UUID
+	FromStatus    NullTxnStatus
+	ToStatus      TxnStatus
+	Actor         string
+	OccurredAt    time.Time
 }

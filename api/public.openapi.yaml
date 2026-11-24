@@ -1,0 +1,72 @@
+openapi: 3.1.0
+info:
+  title: Talksasa Pay public pay-page API
+  version: 1.0.0
+  description: |
+    Read-only data for the hosted pay page. Called server-side by the pay
+    Next.js app, which forwards the visitor's IP in `X-Talksasa-Client-Ip`
+    (trusted only from TSP_TRUSTED_PROXIES) for per-visitor rate limiting.
+
+    The response deliberately carries no payer name, phone, email or internal
+    ids. Unknown, malformed and suspended-product tokens all return the same
+    404.
+servers:
+  - url: /public/v1
+paths:
+  /pay/{token}:
+    get:
+      summary: The bill behind a hosted payment link
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string, pattern: "^[a-z2-7]{52}$" } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PayPage" }
+        "404":
+          description: Not a valid payment link
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "429":
+          description: Too many requests
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+components:
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code: { type: string }
+        request_id: { type: string }
+    PayPage:
+      type: object
+      required: [product_name, reference, description, currency, amount, amount_paid, outstanding, status, payable, expires_at, paid_at, paybill, stk_available]
+      properties:
+        product_name: { type: string }
+        reference: { type: string }
+        description: { type: string }
+        currency: { type: string, enum: [KES] }
+        amount: { type: integer }
+        amount_paid: { type: integer }
+        outstanding: { type: integer }
+        status: { type: string, enum: [open, partially_paid, paid, cancelled, expired] }
+        payable: { type: boolean }
+        expires_at: { type: [string, "null"], format: date-time }
+        paid_at: { type: [string, "null"], format: date-time }
+        paybill:
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [business_number, account_number]
+              properties:
+                business_number: { type: string }
+                account_number: { type: string }
+        stk_available: { type: boolean, description: "False until STK push (Daraja) is live" }

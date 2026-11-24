@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 
+	"github.com/talksasa/talksasa-pay/internal/admin"
 	"github.com/talksasa/talksasa-pay/internal/allocation"
 	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/ledger"
@@ -14,6 +15,7 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/platform/crypto"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/product"
+	"github.com/talksasa/talksasa-pay/internal/reporting"
 )
 
 // app holds the wired services shared by the api and admin commands.
@@ -25,6 +27,8 @@ type app struct {
 	payers          *payer.Service
 	paymentRequests *paymentrequest.Service
 	ledger          *ledger.Service
+	admin           *admin.Service
+	reporting       *reporting.Service
 }
 
 func newApp(ctx context.Context, logw io.Writer, component string) (*app, error) {
@@ -43,17 +47,24 @@ func newApp(ctx context.Context, logw io.Writer, component string) (*app, error)
 		return nil, err
 	}
 	alloc := allocation.NewService(logger)
+	adminCfg := admin.DefaultConfig()
+	adminCfg.IdleTimeout = cfg.Admin.IdleTimeout
+	adminCfg.AbsoluteTimeout = cfg.Admin.AbsoluteTimeout
+	adminCfg.SetupBaseURL = cfg.Admin.SetupBaseURL
+	pepper := []byte(cfg.Crypto.APIKeyPepper.Reveal())
 	return &app{
 		cfg:    cfg,
 		logger: logger,
 		pool:   pool,
 		products: product.NewService(product.Options{
-			Pool: pool, Keyring: keys, APIKeyPepper: []byte(cfg.Crypto.APIKeyPepper.Reveal()),
+			Pool: pool, Keyring: keys, APIKeyPepper: pepper,
 			AllowHTTPHooks: cfg.Env == config.EnvDevelopment, LiveKeys: cfg.Env == config.EnvProduction, Logger: logger,
 		}),
 		payers:          payer.NewService(pool, logger),
 		paymentRequests: paymentrequest.NewService(pool, alloc, logger),
 		ledger:          ledger.NewService(pool, alloc, logger),
+		admin:           admin.NewService(admin.Options{Pool: pool, Keyring: keys, Pepper: pepper, Config: adminCfg, Logger: logger}),
+		reporting:       reporting.NewService(pool),
 	}, nil
 }
 

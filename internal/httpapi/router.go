@@ -8,6 +8,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	tlog "github.com/talksasa/talksasa-pay/internal/platform/log"
 	"github.com/talksasa/talksasa-pay/internal/platform/metrics"
 	"github.com/talksasa/talksasa-pay/internal/product"
+	"github.com/talksasa/talksasa-pay/internal/reporting"
 )
 
 // Deps are the services the API needs.
@@ -25,15 +28,30 @@ type Deps struct {
 	Logger       *slog.Logger
 	Pool         *db.Pool
 	Products     *product.Service
+	Reporting    *reporting.Service
 	Metrics      *metrics.HTTP
 	MaxBodyBytes int64
 	Version      string
+	// TrustedProxies may forward the end user's IP (the pay Next.js server).
+	TrustedProxies []netip.Prefix
+	// Paybill is shown on the hosted pay page ("" hides the instructions).
+	Paybill string
+	// PayLimiter throttles pay-page lookups per client IP; nil = default.
+	PayLimiter *httpx.RateLimiter
 }
+
+// hostedTokenRe matches payment_requests.hosted_token (32 random bytes,
+// lowercase unpadded base32). Anything else is rejected before the database.
+var hostedTokenRe = regexp.MustCompile(`^[a-z2-7]{52}$`)
 
 // NewRouter builds the public API handler.
 func NewRouter(d Deps) http.Handler {
+	if d.PayLimiter == nil {
+		d.PayLimiter = httpx.NewRateLimiter(60, 30)
+	}
 	r := chi.NewRouter()
 	r.Use(httpx.RequestID)
+	r.Use(httpx.ClientIP(d.TrustedProxies))
 	r.Use(httpx.AccessLog(d.Logger, d.Metrics))
 	r.Use(httpx.Recover(d.Logger))
 	r.Use(httpx.SecurityHeaders)
@@ -58,6 +76,11 @@ func NewRouter(d Deps) http.Handler {
 			return
 		}
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	})
+
+	r.Route("/public/v1", func(pub chi.Router) {
+		pub.Use(httpx.LimitByIP(d.PayLimiter, "pay-page"))
+		pub.Get("/pay/{token}", payPage(d))
 	})
 
 	r.Route("/v1", func(v1 chi.Router) {
@@ -106,5 +129,64 @@ func requireProduct(products *product.Service, logger *slog.Logger) func(http.Ha
 			ctx = tlog.WithAttrs(ctx, slog.String("product_id", p.ProductID.String()), slog.String("key_id", p.KeyID))
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
+	}
+}
+
+type paybillJSON struct {
+	BusinessNumber string `json:"business_number"`
+	AccountNumber  string `json:"account_number"`
+}
+
+type payPageJSON struct {
+	ProductName  string       `json:"product_name"`
+	Reference    string       `json:"reference"`
+	Description  string       `json:"description"`
+	Currency     string       `json:"currency"`
+	Amount       int64        `json:"amount"`
+	AmountPaid   int64        `json:"amount_paid"`
+	Outstanding  int64        `json:"outstanding"`
+	Status       string       `json:"status"`
+	Payable      bool         `json:"payable"`
+	ExpiresAt    *time.Time   `json:"expires_at"`
+	PaidAt       *time.Time   `json:"paid_at"`
+	Paybill      *paybillJSON `json:"paybill"`
+	STKAvailable bool         `json:"stk_available"`
+}
+
+// payPage serves the hosted pay page's data. The token is the only key;
+// unknown, malformed and suspended-product tokens all get the same 404 so
+// the endpoint cannot be used to probe for valid tokens. It returns only
+// what the payer needs to pay: no name, phone, email or internal ids.
+func payPage(d Deps) http.HandlerFunc {
+	notFound := func(w http.ResponseWriter, r *http.Request) {
+		httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusNotFound, "not_found", "This payment link is not valid."))
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+		token := chi.URLParam(r, "token")
+		if !hostedTokenRe.MatchString(token) {
+			notFound(w, r)
+			return
+		}
+		p, err := d.Reporting.PayPageByToken(r.Context(), token)
+		if errors.Is(err, reporting.ErrNotFound) {
+			notFound(w, r)
+			return
+		}
+		if err != nil {
+			httpx.InternalError(w, r, d.Logger, err)
+			return
+		}
+		out := payPageJSON{
+			ProductName: p.ProductName, Reference: p.ProductReference, Description: p.Description, Currency: "KES",
+			Amount: p.Amount, AmountPaid: p.AmountPaid, Outstanding: p.Amount - p.AmountPaid, Status: string(p.Status),
+			Payable: p.Payable, ExpiresAt: p.ExpiresAt, PaidAt: p.PaidAt,
+			// STK push arrives with the Daraja integration (Phase 2).
+			STKAvailable: false,
+		}
+		if d.Paybill != "" && p.Payable {
+			out.Paybill = &paybillJSON{BusinessNumber: d.Paybill, AccountNumber: p.AccountNumber}
+		}
+		httpx.WriteJSON(w, http.StatusOK, out)
 	}
 }

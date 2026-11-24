@@ -200,6 +200,42 @@ func (s *Service) SetWebhookURL(ctx context.Context, actor audit.Actor, id uuid.
 	return fromRow(row), nil
 }
 
+// SetStatus suspends or re-activates a product. A suspended product's API
+// keys stop working immediately and its pay pages stop resolving; money that
+// still arrives on its account numbers is recorded as usual.
+func (s *Service) SetStatus(ctx context.Context, actor audit.Actor, id uuid.UUID, status store.ProductStatus) (Product, error) {
+	if !status.Valid() {
+		return Product{}, fmt.Errorf("product: unknown status %q", status)
+	}
+	var row store.Product
+	err := db.WithTx(ctx, s.pool, actor.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
+		before, err := q.GetProduct(ctx, id)
+		if db.IsNotFound(err) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if before.Status == status {
+			row = before
+			return nil
+		}
+		row, err = q.SetProductStatus(ctx, store.SetProductStatusParams{ID: id, Status: status})
+		if err != nil {
+			return err
+		}
+		return audit.Record(ctx, q, audit.Entry{
+			Actor: actor, Action: "product.status_changed", EntityType: "product", EntityID: id.String(), ProductID: &id,
+			Details: map[string]any{"from": string(before.Status), "to": string(status)},
+		})
+	})
+	if err != nil {
+		return Product{}, err
+	}
+	s.logger.InfoContext(ctx, "product status changed", slog.String("product_id", id.String()), slog.String("status", string(status)))
+	return fromRow(row), nil
+}
+
 // RotateWebhookSecret replaces the signing secret and returns the new one once.
 func (s *Service) RotateWebhookSecret(ctx context.Context, actor audit.Actor, id uuid.UUID) (string, error) {
 	secretRaw, err := crypto.RandomBytes(webhookSecretBytes)

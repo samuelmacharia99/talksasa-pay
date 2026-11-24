@@ -15,25 +15,38 @@ notifies the product. It only ever collects Talksasa's own revenue
 | 2 | Daraja STK + C2B collections, River worker | next |
 | 3 | Product API `/v1`, webhooks, clients, launch-product integration | |
 | 4 | B2C refunds (maker-checker) | |
-| 5 | Reconciliation, admin panel (Next.js), reports | |
+| UI | Admin panel + hosted pay page (Next.js), staff sign-in with 2FA, read-only views | done (pulled forward) |
+| 5 | Reconciliation (STK sweeper, suspense assignment, statement import), reports | |
 | 6 | Card gateway | |
+| Deploy | `scripts/deploy.sh`: tested, health-checked rollout with backup and auto-rollback; Caddy TLS edge | done |
 | 7–8 | Security review, go-live, manual test plan | |
 
 ## Quick start (development)
-Requires Docker only. Go runs in a pinned container via `scripts/go.sh`.
+Requires Docker and Node 24 (for pnpm via corepack). Go runs in a pinned
+container via `scripts/go.sh`.
 ```sh
-make dev-secrets                 # throwaway local secrets (gitignored)
-docker compose up -d postgres
-make test                        # unit + database integration tests (-race)
-make smoke                       # end-to-end checks against the running Docker stack
-make verify                      # test + lint + vuln + smoke: run before every merge
-make up                          # postgres + migrate + api on 127.0.0.1:8088
-make admin ARGS='product create --name "Cloud Hosting" --prefix HOST --actor "Your Name"'
-make admin ARGS='key issue --product HOST --label staging --actor "Your Name"'
-curl -H "Authorization: Bearer tsp_test_..." localhost:8088/v1/whoami
+make up                          # postgres, migrations, api :8088, admin :3001, pay page :3000
+make admin ARGS='seed demo --actor "Your Name"'      # demo products, payers, bills, payments
+make admin ARGS='user invite --email you@talksasa.co.ke --name "Your Name" --role admin --actor "Your Name"'
+#   open the printed setup link, set a password, scan the QR code, save the recovery codes,
+#   then sign in at http://127.0.0.1:3001
+#   pay pages: http://127.0.0.1:3000/<token printed by seed demo>
+
+make verify                      # everything below; run before every merge
+make test                        # Go unit + database integration tests (-race)
+make lint                        # golangci-lint (incl. gosec) + sqlc drift
+make web-check                   # TS types match OpenAPI, typecheck, eslint, vitest
+make smoke                       # 44 checks against the running Docker stack
+make e2e                         # Playwright browser tests (sign-in with real TOTP, every screen)
 ```
+Deploying: `scripts/deploy.sh staging|production --host user@host` (see
+[docs/runbooks/deploy.md](docs/runbooks/deploy.md)).
+
+Product API keys: `make admin ARGS='key issue --product HOST --label staging --actor "Your Name"'`,
+then `curl -H "Authorization: Bearer tsp_test_..." localhost:8088/v1/whoami`.
 `make help` lists every target. Metrics are on `127.0.0.1:9464/metrics`
-(never on the public port).
+(never on the public port). The admin API (`:8089`) is never published; see
+[docs/runbooks/admin-access.md](docs/runbooks/admin-access.md).
 
 ## Layout
 ```
@@ -47,7 +60,15 @@ internal/paymentrequest
 internal/product      products, API keys, authentication
 internal/audit        hash-chained audit log
 internal/platform     config-independent plumbing: db, crypto, log, httpx, metrics
+internal/admin        staff accounts: argon2id, TOTP, sessions, roles
+internal/adminapi     /admin/v1 (internal listener only)
+internal/reporting    read-only views for the panel and the pay page
 internal/integrationtest  tests against real Postgres with production privileges
+api/*.openapi.yaml    API contracts; TypeScript types are generated from them
+web/apps/admin        staff panel (Next.js; talks to Go server-side only)
+web/apps/pay          hosted pay page (Next.js)
+web/packages          ui (design tokens, components), money, api-client
+web/e2e               Playwright tests
 docs/                 schema explained, ADRs, runbooks
 ```
 
@@ -59,3 +80,6 @@ docs/                 schema explained, ADRs, runbooks
   corrections are new rows. The database enforces this too.
 - Every write runs in `db.WithTx` with a named actor. Sensitive actions call
   `audit.Record` in the same transaction.
+- The frontends hold no secrets and do no money arithmetic: amounts and
+  statuses always come from the Go service. Staff session tokens stay in
+  httpOnly cookies and are sent to Go only from the Next.js server.

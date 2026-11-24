@@ -1,0 +1,779 @@
+openapi: 3.1.0
+info:
+  title: Talksasa Pay admin API
+  version: 1.0.0
+  description: |
+    Staff admin API, served on the internal admin listener (TSP_ADMIN_ADDR).
+    Only the admin Next.js server calls it; browsers never do.
+
+    Authentication: `Authorization: Bearer <session token>` (from POST /auth/mfa).
+    The Next.js server forwards the end user's IP and user agent in
+    `X-Talksasa-Client-Ip` / `X-Talksasa-Client-Ua`; they are trusted only from
+    TSP_TRUSTED_PROXIES.
+
+    Amounts are integer Kenya shillings. Phone numbers are always masked.
+    Errors are RFC 9457 problem+json (`Problem`).
+servers:
+  - url: /admin/v1
+security:
+  - session: []
+paths:
+  /auth/login:
+    post:
+      security: []
+      summary: Check email and password; returns a 5-minute 2FA challenge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Password correct; complete 2FA next
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [challenge, expires_at]
+                properties:
+                  challenge: { type: string }
+                  expires_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+  /auth/mfa:
+    post:
+      security: []
+      summary: Exchange the challenge and a TOTP or recovery code for a session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [challenge, code]
+              properties:
+                challenge: { type: string }
+                code: { type: string }
+      responses:
+        "200":
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session_token, expires_at, user]
+                properties:
+                  session_token: { type: string }
+                  expires_at: { type: string, format: date-time }
+                  user: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+  /auth/setup/{token}:
+    parameters:
+      - { name: token, in: path, required: true, schema: { type: string } }
+    get:
+      security: []
+      summary: Validate a setup link and start TOTP enrolment
+      responses:
+        "200":
+          description: Setup details
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [email, name, expires_at, enrolment, totp_secret, otpauth_uri]
+                properties:
+                  email: { type: string }
+                  name: { type: string }
+                  expires_at: { type: string, format: date-time }
+                  enrolment: { type: string, description: Opaque; post it back unchanged }
+                  totp_secret: { type: string, description: Base32, for manual entry }
+                  otpauth_uri: { type: string, description: Encode as a QR code }
+        "404": { $ref: "#/components/responses/Problem" }
+    post:
+      security: []
+      summary: Set the password, prove TOTP enrolment, activate the account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [enrolment, password, code]
+              properties:
+                enrolment: { type: string }
+                password: { type: string }
+                code: { type: string }
+      responses:
+        "200":
+          description: Activated; recovery codes are shown once
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [recovery_codes]
+                properties:
+                  recovery_codes: { type: array, items: { type: string } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /auth/me:
+    get:
+      summary: The signed-in staff member
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Me" } } } }
+        "401": { $ref: "#/components/responses/Problem" }
+  /auth/logout:
+    post:
+      summary: End this session
+      responses:
+        "204": { description: Signed out }
+  /auth/password:
+    post:
+      summary: Change password (signs out every session)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string }
+      responses:
+        "204": { description: Changed }
+        "401": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /dashboard:
+    get:
+      summary: Collections and queue counts
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Dashboard" } } } }
+  /integrity:
+    get:
+      summary: Audit-chain and ledger-balance checks
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Integrity" } } } }
+  /products:
+    get:
+      summary: List products
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Product" } }
+    post:
+      summary: Create a product (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, account_prefix]
+              properties:
+                name: { type: string }
+                account_prefix: { type: string }
+                webhook_url: { type: string }
+      responses:
+        "201":
+          description: Created; the webhook secret is shown once
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [product, webhook_secret]
+                properties:
+                  product: { $ref: "#/components/schemas/Product" }
+                  webhook_secret: { type: string }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /products/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: One product
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /products/{id}/webhook-url:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    put:
+      summary: Change the webhook URL (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [webhook_url]
+              properties:
+                webhook_url: { type: string, description: Empty clears it }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /products/{id}/rotate-webhook-secret:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Replace the webhook signing secret (admin); shown once
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [webhook_secret]
+                properties:
+                  webhook_secret: { type: string }
+  /products/{id}/status:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Suspend or re-activate a product (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status]
+              properties:
+                status: { type: string, enum: [active, suspended] }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
+  /products/{id}/api-keys:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: List a product's API keys (never the secrets)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/APIKey" } }
+    post:
+      summary: Issue an API key (admin); the key is shown once
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [label]
+              properties:
+                label: { type: string }
+                expires_at: { type: [string, "null"], format: date-time }
+      responses:
+        "201":
+          description: Issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key, api_key]
+                properties:
+                  key: { $ref: "#/components/schemas/APIKey" }
+                  api_key: { type: string }
+  /products/{id}/api-keys/{keyID}/revoke:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: keyID, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Revoke an API key (admin)
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/Problem" }
+  /payers:
+    get:
+      summary: Search payer accounts
+      parameters:
+        - { $ref: "#/components/parameters/product_id" }
+        - { name: q, in: query, schema: { type: string }, description: "Account number, name, external ref or phone" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Payer" } }
+                  next_cursor: { type: string }
+        "400": { $ref: "#/components/responses/Problem" }
+  /payers/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: One payer with phones and credit movements
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/PayerDetail" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /payment-requests:
+    get:
+      summary: List payment requests
+      parameters:
+        - { $ref: "#/components/parameters/product_id" }
+        - { name: payer_id, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/RequestStatus" } }
+        - { name: q, in: query, schema: { type: string }, description: "Reference, description or account number" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/PaymentRequest" } }
+                  next_cursor: { type: string }
+        "400": { $ref: "#/components/responses/Problem" }
+  /payment-requests/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: One payment request with its allocations
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentRequestDetail" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /transactions:
+    get:
+      summary: List ledger transactions
+      parameters:
+        - { $ref: "#/components/parameters/product_id" }
+        - { name: payer_id, in: query, schema: { type: string, format: uuid } }
+        - { name: request_id, in: query, schema: { type: string, format: uuid } }
+        - { name: channel, in: query, schema: { $ref: "#/components/schemas/Channel" } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/TxnStatus" } }
+        - { name: direction, in: query, schema: { type: string, enum: [in, out] } }
+        - { name: receipt, in: query, schema: { type: string } }
+        - { name: phone, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string }, description: "YYYY-MM-DD (Nairobi) or RFC 3339" }
+        - { name: to, in: query, schema: { type: string }, description: "YYYY-MM-DD inclusive (Nairobi) or RFC 3339" }
+        - { name: suspense, in: query, schema: { type: string, enum: ["true"] } }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Transaction" } }
+                  next_cursor: { type: string }
+        "400": { $ref: "#/components/responses/Problem" }
+  /transactions/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: One transaction with events and allocations
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/TransactionDetail" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /audit:
+    get:
+      summary: Audit log
+      parameters:
+        - { $ref: "#/components/parameters/product_id" }
+        - { name: action, in: query, schema: { type: string }, description: Prefix, e.g. "product." }
+        - { name: actor_id, in: query, schema: { type: string } }
+        - { name: entity_id, in: query, schema: { type: string } }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/AuditEntry" } }
+                  next_cursor: { type: string }
+  /users:
+    get:
+      summary: Staff accounts (admin)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/User" } }
+    post:
+      summary: Invite a staff member (admin); the setup link is shown once
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, name, role]
+              properties:
+                email: { type: string }
+                name: { type: string }
+                role: { $ref: "#/components/schemas/Role" }
+      responses:
+        "201": { description: Invited, content: { application/json: { schema: { $ref: "#/components/schemas/Invitation" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /users/{id}/role:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Change a staff member's role (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [role]
+              properties:
+                role: { $ref: "#/components/schemas/Role" }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/User" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+  /users/{id}/disable:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Disable a staff member and sign them out (admin)
+      responses:
+        "204": { description: Disabled }
+        "409": { $ref: "#/components/responses/Problem" }
+  /users/{id}/reset:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Wipe password and 2FA and issue a new setup link (admin)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Invitation" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+components:
+  securitySchemes:
+    session: { type: http, scheme: bearer }
+  parameters:
+    id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    product_id: { name: product_id, in: query, schema: { type: string, format: uuid } }
+    cursor: { name: cursor, in: query, schema: { type: string } }
+    limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200 } }
+  responses:
+    Problem:
+      description: Error
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code: { type: string }
+        request_id: { type: string }
+    Role: { type: string, enum: [viewer, finance, approver, admin] }
+    RequestStatus: { type: string, enum: [open, partially_paid, paid, cancelled, expired] }
+    TxnStatus: { type: string, enum: [pending, succeeded, failed, cancelled, needs_review] }
+    Channel: { type: string, enum: [mpesa_stk, mpesa_c2b, mpesa_b2c, manual] }
+    Me:
+      type: object
+      required: [id, email, name, role, permissions, expires_at, idle_expires_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        name: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        permissions: { type: array, items: { type: string, enum: [read, products.manage, users.manage] } }
+        expires_at: { type: string, format: date-time }
+        idle_expires_at: { type: string, format: date-time }
+    User:
+      type: object
+      required: [id, email, name, role, status, last_login_at, created_by, created_at, disabled_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        name: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        status: { type: string, enum: [invited, active, disabled] }
+        last_login_at: { type: [string, "null"], format: date-time }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        disabled_at: { type: [string, "null"], format: date-time }
+    Invitation:
+      type: object
+      required: [user, setup_url, expires_at]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        setup_url: { type: string }
+        expires_at: { type: string, format: date-time }
+    Product:
+      type: object
+      required: [id, name, account_prefix, webhook_url, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        account_prefix: { type: string }
+        webhook_url: { type: string }
+        status: { type: string, enum: [active, suspended] }
+        created_at: { type: string, format: date-time }
+    APIKey:
+      type: object
+      required: [key_id, label, created_by, created_at, expires_at, revoked_at, last_used_at]
+      properties:
+        key_id: { type: string }
+        label: { type: string }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: [string, "null"], format: date-time }
+        revoked_at: { type: [string, "null"], format: date-time }
+        last_used_at: { type: [string, "null"], format: date-time }
+    Payer:
+      type: object
+      required: [id, product_id, account_prefix, external_ref, account_number, display_name, email, status, credit_balance, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        account_prefix: { type: string }
+        external_ref: { type: string }
+        account_number: { type: string }
+        display_name: { type: string }
+        email: { type: [string, "null"] }
+        status: { type: string, enum: [active, closed] }
+        credit_balance: { type: integer }
+        created_at: { type: string, format: date-time }
+    PayerDetail:
+      allOf:
+        - $ref: "#/components/schemas/Payer"
+        - type: object
+          required: [product_name, updated_at, phones, credit_movements]
+          properties:
+            product_name: { type: string }
+            updated_at: { type: string, format: date-time }
+            phones:
+              type: array
+              items:
+                type: object
+                required: [phone, is_primary]
+                properties:
+                  phone: { type: string, description: Masked }
+                  is_primary: { type: boolean }
+            credit_movements:
+              type: array
+              items:
+                type: object
+                required: [id, batch_kind, transaction_id, payment_request_id, amount, created_at]
+                properties:
+                  id: { type: integer }
+                  batch_kind: { type: string }
+                  transaction_id: { type: [string, "null"], format: uuid }
+                  payment_request_id: { type: [string, "null"], format: uuid }
+                  amount: { type: integer }
+                  created_at: { type: string, format: date-time }
+    PaymentRequest:
+      type: object
+      required: [id, product_id, account_prefix, payer_account_id, account_number, payer_name, product_reference, description, amount, amount_paid, outstanding, status, expires_at, created_at, paid_at, closed_at]
+      properties:
+        id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        account_prefix: { type: string }
+        payer_account_id: { type: string, format: uuid }
+        account_number: { type: string }
+        payer_name: { type: string }
+        product_reference: { type: string }
+        description: { type: string }
+        amount: { type: integer }
+        amount_paid: { type: integer }
+        outstanding: { type: integer }
+        status: { $ref: "#/components/schemas/RequestStatus" }
+        expires_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        paid_at: { type: [string, "null"], format: date-time }
+        closed_at: { type: [string, "null"], format: date-time }
+    PaymentRequestDetail:
+      allOf:
+        - $ref: "#/components/schemas/PaymentRequest"
+        - type: object
+          required: [product_name, updated_at, allocations]
+          properties:
+            product_name: { type: string }
+            updated_at: { type: string, format: date-time }
+            allocations:
+              type: array
+              items:
+                type: object
+                required: [id, batch_kind, transaction_id, receipt, amount, created_at]
+                properties:
+                  id: { type: integer }
+                  batch_kind: { type: string, enum: [payment, credit_application, reversal] }
+                  transaction_id: { type: [string, "null"], format: uuid }
+                  receipt: { type: [string, "null"] }
+                  amount: { type: integer }
+                  created_at: { type: string, format: date-time }
+    Transaction:
+      type: object
+      required: [id, product_id, account_prefix, direction, kind, channel, status, amount, receipt, phone, bill_ref, payer_account_id, account_number, payment_request_id, failure_reason, created_at, completed_at]
+      properties:
+        id: { type: string, format: uuid }
+        product_id: { type: [string, "null"], format: uuid }
+        account_prefix: { type: [string, "null"] }
+        direction: { type: string, enum: [in, out] }
+        kind: { type: string, enum: [payment, refund, reversal, adjustment] }
+        channel: { $ref: "#/components/schemas/Channel" }
+        status: { $ref: "#/components/schemas/TxnStatus" }
+        amount: { type: integer }
+        receipt: { type: [string, "null"] }
+        phone: { type: [string, "null"], description: Masked }
+        bill_ref: { type: [string, "null"] }
+        payer_account_id: { type: [string, "null"], format: uuid }
+        account_number: { type: [string, "null"] }
+        payment_request_id: { type: [string, "null"], format: uuid }
+        failure_reason: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: [string, "null"], format: date-time }
+    TransactionDetail:
+      allOf:
+        - $ref: "#/components/schemas/Transaction"
+        - type: object
+          required: [provider_request_id, reverses_transaction_id, failure_code, reason, created_by, occurred_at, updated_at, payer_name, product_reference, raw_payload, events, allocations]
+          properties:
+            provider_request_id: { type: [string, "null"] }
+            reverses_transaction_id: { type: [string, "null"], format: uuid }
+            failure_code: { type: [string, "null"] }
+            reason: { type: [string, "null"] }
+            created_by: { type: [string, "null"] }
+            occurred_at: { type: [string, "null"], format: date-time }
+            updated_at: { type: string, format: date-time }
+            payer_name: { type: [string, "null"] }
+            product_reference: { type: [string, "null"] }
+            raw_payload: { description: Provider payload with phones masked }
+            events:
+              type: array
+              items:
+                type: object
+                required: [from_status, to_status, actor, occurred_at]
+                properties:
+                  from_status: { type: [string, "null"] }
+                  to_status: { type: string }
+                  actor: { type: string }
+                  occurred_at: { type: string, format: date-time }
+            allocations:
+              type: array
+              items:
+                type: object
+                required: [id, batch_id, batch_kind, line_no, payment_request_id, product_reference, amount, created_at]
+                properties:
+                  id: { type: integer }
+                  batch_id: { type: string, format: uuid }
+                  batch_kind: { type: string, enum: [payment, credit_application, reversal] }
+                  line_no: { type: integer }
+                  payment_request_id: { type: [string, "null"], format: uuid, description: "null = payer credit" }
+                  product_reference: { type: [string, "null"] }
+                  amount: { type: integer }
+                  created_at: { type: string, format: date-time }
+    AuditEntry:
+      type: object
+      required: [id, occurred_at, actor_type, actor_id, action, entity_type, entity_id, product_id, account_prefix, details]
+      properties:
+        id: { type: integer }
+        occurred_at: { type: string, format: date-time }
+        actor_type: { type: string, enum: [system, admin, cli, product] }
+        actor_id: { type: string }
+        actor_name: { type: string }
+        action: { type: string }
+        entity_type: { type: string }
+        entity_id: { type: [string, "null"] }
+        product_id: { type: [string, "null"], format: uuid }
+        account_prefix: { type: [string, "null"] }
+        details: { type: object, additionalProperties: true }
+    Window:
+      type: object
+      required: [total, payments, by_product]
+      properties:
+        total: { type: integer }
+        payments: { type: integer }
+        by_product: { type: object, additionalProperties: { type: integer }, description: "product id -> KES; nil UUID = unassigned" }
+    Dashboard:
+      type: object
+      required: [today, last_7_days, last_30_days, daily, products, counts, timezone, generated_at]
+      properties:
+        today: { $ref: "#/components/schemas/Window" }
+        last_7_days: { $ref: "#/components/schemas/Window" }
+        last_30_days: { $ref: "#/components/schemas/Window" }
+        daily:
+          type: array
+          items:
+            type: object
+            required: [day, total, payments, by_product]
+            properties:
+              day: { type: string, format: date }
+              total: { type: integer }
+              payments: { type: integer }
+              by_product: { type: object, additionalProperties: { type: integer } }
+        products: { type: array, items: { $ref: "#/components/schemas/Product" } }
+        counts:
+          type: object
+          required: [open_requests, outstanding, suspense_count, suspense_amount, needs_review, pending, credit_held, payers]
+          properties:
+            open_requests: { type: integer }
+            outstanding: { type: integer }
+            suspense_count: { type: integer }
+            suspense_amount: { type: integer }
+            needs_review: { type: integer }
+            pending: { type: integer }
+            credit_held: { type: integer }
+            payers: { type: integer }
+        timezone: { type: string }
+        generated_at: { type: string, format: date-time }
+    Integrity:
+      type: object
+      required: [audit_chain_ok, ledger_ok, drift, checked_at]
+      properties:
+        audit_chain_ok: { type: boolean }
+        first_bad_audit_id: { type: integer }
+        ledger_ok: { type: boolean }
+        drift:
+          type: array
+          items:
+            type: object
+            required: [kind, id, cached, actual]
+            properties:
+              kind: { type: string }
+              id: { type: string, format: uuid }
+              cached: { type: integer }
+              actual: { type: integer }
+        checked_at: { type: string, format: date-time }

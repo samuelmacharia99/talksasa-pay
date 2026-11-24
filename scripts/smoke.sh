@@ -42,10 +42,23 @@ for h in X-Content-Type-Options X-Frame-Options Content-Security-Policy Strict-T
 done
 
 echo "== container hardening"
-cid=$(docker compose ps -q api)
-check "api runs as non-root" "$(docker inspect -f '{{.Config.User}}' "$cid" | cut -d: -f1 | grep -qv '^0$\|^$' && echo yes || echo no)" yes
-check "api root filesystem read-only" "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$cid")" true
-check "api has all capabilities dropped" "$(docker inspect -f '{{.HostConfig.CapDrop}}' "$cid")" "[ALL]"
+for svc in api admin pay; do
+  cid=$(docker compose ps -q "$svc")
+  user=$(docker inspect -f '{{.Config.User}}' "$cid")
+  check "$svc runs as non-root" "$([[ -n "$user" && "${user%%:*}" != 0 && "$user" != root ]] && echo yes || echo no)" yes
+  check "$svc root filesystem read-only" "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$cid")" true
+  check "$svc has all capabilities dropped" "$(docker inspect -f '{{.HostConfig.CapDrop}}' "$cid")" "[ALL]"
+done
+
+echo "== admin and pay front ends"
+check "admin API port NOT reachable from the host" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8089/admin/v1/auth/me || true)" "000"
+check "admin sign-in page loads" "$(status http://127.0.0.1:3001/login)" 200
+check "admin pages without a session redirect" "$(status http://127.0.0.1:3001/transactions)" 307
+csp=$(curl -s -D - -o /dev/null http://127.0.0.1:3001/login | grep -i '^content-security-policy:' || true)
+if grep -q "nonce-" <<<"$csp" && grep -q "frame-ancestors 'none'" <<<"$csp"; then ok "admin CSP with nonce"; else bad "admin CSP with nonce"; fi
+check "pay page: unknown link is 404" "$(status "http://127.0.0.1:3000/$(printf 'a%.0s' {1..52})")" 404
+check "pay API: malformed token is 404" "$(status $API/public/v1/pay/not-a-token)" 404
+check "pay API: never indexed" "$(curl -s -D - -o /dev/null $API/public/v1/pay/not-a-token | grep -ci '^x-robots-tag: noindex' || true)" 1
 
 echo "== product and API key"
 letters=ABCDEFGHIJKLMNOPQRSTUVWXYZ prefix=""

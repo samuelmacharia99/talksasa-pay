@@ -1,0 +1,27 @@
+{
+  "name": "@talksasa/api-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./admin": "./src/admin.ts",
+    "./public": "./src/public.ts",
+    "./errors": "./src/errors.ts"
+  },
+  "scripts": {
+    "gen": "openapi-typescript ../../../api/admin.openapi.yaml -o src/generated/admin.ts && openapi-typescript ../../../api/public.openapi.yaml -o src/generated/public.ts",
+    "check-gen": "openapi-typescript ../../../api/admin.openapi.yaml -o src/generated/admin.ts && openapi-typescript ../../../api/public.openapi.yaml -o src/generated/public.ts && git diff --exit-code -- src/generated",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "openapi-fetch": "0.17.0",
+    "server-only": "0.0.1"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0",
+    "typescript": "6.0.3",
+    "vitest": "5.1.1"
+  }
+}

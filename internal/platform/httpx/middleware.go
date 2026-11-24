@@ -154,9 +154,14 @@ func SecurityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// clientIP is the TCP peer address. Proxy headers are only trusted once a
-// trusted-proxy list is configured (Phase 3, with the Caddy front end).
-func clientIP(r *http.Request) string { return r.RemoteAddr }
+// clientIP is the address resolved by the ClientIP middleware, falling back
+// to the TCP peer.
+func clientIP(r *http.Request) string {
+	if ip := ClientIPFrom(r.Context()); ip.IsValid() {
+		return ip.String()
+	}
+	return peerIP(r.RemoteAddr).String()
+}
 
 func truncate(s string, n int) string {
 	if len(s) <= n {

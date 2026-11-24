@@ -1,0 +1,62 @@
+# Public edge for Talksasa Pay. TLS certificates are issued automatically
+# (Let's Encrypt / ZeroSSL) for the three domains in /etc/talksasa-pay/<env>.env.
+{
+	email {$TSP_ACME_EMAIL}
+	# No trusted_proxies: the client IP is always the TCP peer, so incoming
+	# X-Forwarded-For headers cannot fake an address (admin allow-list, logs).
+}
+
+(edge) {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+		-X-Powered-By
+	}
+	log {
+		output stdout
+		format json
+	}
+}
+
+# Customer pay pages: https://pay.example/<token>
+{$TSP_PAY_DOMAIN} {
+	import edge
+	reverse_proxy {$TSP_NET}.21:3000 {
+		header_up X-Forwarded-For {remote_host}
+		header_up -X-Talksasa-Client-Ip
+		header_up -X-Talksasa-Client-Ua
+	}
+}
+
+# Staff panel: reachable only from the office / VPN ranges in TSP_ADMIN_ALLOW_CIDRS.
+{$TSP_ADMIN_DOMAIN} {
+	import edge
+	header X-Robots-Tag "noindex, nofollow"
+	@outside not remote_ip {$TSP_ADMIN_ALLOW_CIDRS}
+	respond @outside 404
+	reverse_proxy {$TSP_NET}.20:3001 {
+		header_up X-Forwarded-For {remote_host}
+		header_up -X-Talksasa-Client-Ip
+		header_up -X-Talksasa-Client-Ua
+	}
+}
+
+# Machine endpoints: product API (/v1), Safaricom callbacks (/cb, Phase 2), health.
+# Nothing else on the Go public listener is exposed here.
+{$TSP_API_DOMAIN} {
+	import edge
+	@api path /v1/* /cb/* /healthz
+	handle @api {
+		reverse_proxy {$TSP_NET}.10:8088 {
+			header_up X-Talksasa-Client-Ip {remote_host}
+			header_up -X-Talksasa-Client-Ua
+			header_up -X-Forwarded-For
+		}
+	}
+	handle {
+		respond 404
+	}
+}

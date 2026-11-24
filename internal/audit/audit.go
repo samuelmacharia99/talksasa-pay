@@ -39,6 +39,11 @@ func System(component string) Actor { return Actor{Type: store.AuditActorTypeSys
 // CLI returns an actor for an operator using the admin CLI.
 func CLI(operator string) Actor { return Actor{Type: store.AuditActorTypeCli, ID: operator} }
 
+// Admin returns an actor for a signed-in admin panel user.
+func Admin(userID uuid.UUID) Actor {
+	return Actor{Type: store.AuditActorTypeAdmin, ID: userID.String()}
+}
+
 // Product returns an actor for an authenticated product API key.
 func Product(productID uuid.UUID) Actor {
 	return Actor{Type: store.AuditActorTypeProduct, ID: productID.String()}

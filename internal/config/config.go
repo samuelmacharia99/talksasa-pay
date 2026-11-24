@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +41,28 @@ type Config struct {
 	Metrics  MetricsConfig
 	Database DatabaseConfig
 	Crypto   CryptoConfig
+	Admin    AdminConfig
+	Public   PublicConfig
+	// TrustedProxies are peers (the Next.js servers, the reverse proxy)
+	// whose X-Talksasa-Client-IP header is believed. Anyone else's is ignored.
+	TrustedProxies []netip.Prefix
+}
+
+// AdminConfig configures the staff admin API listener and sessions.
+type AdminConfig struct {
+	// Addr must only be reachable from the admin Next.js server (internal
+	// network); it is never published to the internet.
+	Addr            string
+	SetupBaseURL    string // the one-time setup token is appended
+	IdleTimeout     time.Duration
+	AbsoluteTimeout time.Duration
+}
+
+// PublicConfig configures the public pay-page API.
+type PublicConfig struct {
+	// Paybill is Talksasa's M-Pesa paybill number shown on the pay page.
+	// Empty hides the manual paybill instructions.
+	Paybill string
 }
 
 // HTTPConfig configures the public API listener.
@@ -114,6 +138,14 @@ func Load(src Source) (*Config, error) {
 		MaxBodyBytes:      l.int64("TSP_HTTP_MAX_BODY_BYTES", 1<<20),
 	}
 	cfg.Metrics = MetricsConfig{Addr: l.str("TSP_METRICS_ADDR", "127.0.0.1:9464")}
+	cfg.Admin = AdminConfig{
+		Addr:            l.str("TSP_ADMIN_ADDR", "127.0.0.1:8089"),
+		SetupBaseURL:    l.str("TSP_ADMIN_SETUP_BASE_URL", "http://127.0.0.1:3001/setup/"),
+		IdleTimeout:     l.duration("TSP_ADMIN_IDLE_TIMEOUT", 15*time.Minute),
+		AbsoluteTimeout: l.duration("TSP_ADMIN_ABSOLUTE_TIMEOUT", 8*time.Hour),
+	}
+	cfg.Public = PublicConfig{Paybill: l.str("TSP_MPESA_PAYBILL", "")}
+	cfg.TrustedProxies = l.prefixes("TSP_TRUSTED_PROXIES", "127.0.0.1/32,::1/128")
 
 	cfg.Database = DatabaseConfig{
 		URL:              l.secret("TSP_DATABASE_URL", cfg.Env, true),
@@ -168,8 +200,24 @@ func (c *Config) validate() error {
 		// Metrics must never be served on the public listener.
 		errs = append(errs, errors.New("TSP_METRICS_ADDR: must differ from TSP_HTTP_ADDR"))
 	}
+	if c.Admin.Addr == c.HTTP.Addr || c.Admin.Addr == c.Metrics.Addr {
+		// The admin API must never share the public listener.
+		errs = append(errs, errors.New("TSP_ADMIN_ADDR: must differ from TSP_HTTP_ADDR and TSP_METRICS_ADDR"))
+	}
+	if u, err := url.Parse(c.Admin.SetupBaseURL); err != nil || u.Host == "" || !strings.HasSuffix(u.Path, "/") ||
+		(u.Scheme != "https" && (c.Env.IsProductionLike() || u.Scheme != "http")) {
+		errs = append(errs, errors.New("TSP_ADMIN_SETUP_BASE_URL: must be an absolute URL ending in / (https outside development)"))
+	}
+	if c.Admin.IdleTimeout > c.Admin.AbsoluteTimeout || c.Admin.AbsoluteTimeout > 24*time.Hour {
+		errs = append(errs, errors.New("TSP_ADMIN_IDLE_TIMEOUT/TSP_ADMIN_ABSOLUTE_TIMEOUT: need idle <= absolute <= 24h"))
+	}
+	if c.Public.Paybill != "" && !paybillRe.MatchString(c.Public.Paybill) {
+		errs = append(errs, errors.New("TSP_MPESA_PAYBILL: must be 5-7 digits"))
+	}
 	return errors.Join(errs...)
 }
+
+var paybillRe = regexp.MustCompile(`^[0-9]{5,7}$`)
 
 func validateDSN(name string, dsn Secret, env Environment) error {
 	u, err := url.Parse(dsn.Reveal())
@@ -228,6 +276,27 @@ func (l *loader) duration(name string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+func (l *loader) prefixes(name, def string) []netip.Prefix {
+	v := strings.TrimSpace(l.src.Getenv(name))
+	if v == "" {
+		v = def
+	}
+	var out []netip.Prefix
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(part)
+		if err != nil {
+			l.fail(name, fmt.Errorf("invalid CIDR %q", part))
+			continue
+		}
+		out = append(out, p.Masked())
+	}
+	return out
 }
 
 func (l *loader) level(name string, def slog.Level) slog.Level {

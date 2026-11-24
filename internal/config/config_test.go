@@ -63,8 +63,37 @@ func TestProductionRequiresFilesTLSAndPerms(t *testing.T) {
 	if _, err := Load(src(envF, files, 0o644)); err == nil || !strings.Contains(err.Error(), "readable") {
 		t.Fatalf("world-readable secret accepted: %v", err)
 	}
+	if _, err := Load(src(envF, files, 0o400)); err == nil || !strings.Contains(err.Error(), "TSP_ADMIN_SETUP_BASE_URL") {
+		t.Fatalf("http setup link accepted in production: %v", err)
+	}
+	envF["TSP_ADMIN_SETUP_BASE_URL"] = "https://admin.talksasa.co.ke/setup/"
 	if _, err := Load(src(envF, files, 0o400)); err != nil {
 		t.Fatalf("valid production config rejected: %v", err)
+	}
+}
+
+func TestAdminListenerSeparationAndPaybill(t *testing.T) {
+	base := map[string]string{"TSP_DATABASE_URL": "postgres://u:p@h/db", "TSP_MASTER_KEYS": "1:x", "TSP_API_KEY_PEPPER": pepper}
+	with := func(k, v string) map[string]string {
+		m := map[string]string{}
+		for a, b := range base {
+			m[a] = b
+		}
+		m[k] = v
+		return m
+	}
+	for k, v := range map[string]string{
+		"TSP_ADMIN_ADDR":      ":8088", // same as public listener
+		"TSP_MPESA_PAYBILL":   "12ab",
+		"TSP_TRUSTED_PROXIES": "10.0.0.0/33",
+	} {
+		if _, err := Load(src(with(k, v), nil, 0o600)); err == nil || !strings.Contains(err.Error(), k) {
+			t.Errorf("%s=%s accepted: %v", k, v, err)
+		}
+	}
+	cfg, err := Load(src(with("TSP_MPESA_PAYBILL", "4123456"), nil, 0o600))
+	if err != nil || cfg.Public.Paybill != "4123456" || len(cfg.TrustedProxies) != 2 {
+		t.Fatalf("%v %+v", err, cfg)
 	}
 }
 

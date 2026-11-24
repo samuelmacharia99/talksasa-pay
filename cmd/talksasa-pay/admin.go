@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/talksasa/talksasa-pay/internal/audit"
+	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/platform/crypto"
 	"github.com/talksasa/talksasa-pay/internal/product"
 	"github.com/talksasa/talksasa-pay/internal/store"
@@ -29,8 +30,13 @@ the audit log.
   key issue        --product ID|PREFIX --label LABEL [--expires YYYY-MM-DD] --actor NAME
   key list         --product ID|PREFIX
   key revoke       --product ID|PREFIX --key-id KEYID --actor NAME
+  user invite      --email EMAIL --name NAME --role viewer|finance|approver|admin --actor NAME
+  user list
+  user reset       --email EMAIL --actor NAME   (lost 2FA / re-onboard: new setup link)
+  user disable     --email EMAIL --actor NAME   (offboarding)
   audit verify     check the audit log hash chain
   ledger check     check cached balances against allocation lines
+  seed demo        --actor NAME   development only: demo products, payers, bills, payments
 `
 
 func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -56,6 +62,8 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	expires := fs.String("expires", "", "API key expiry date (YYYY-MM-DD, UTC)")
 	keyID := fs.String("key-id", "", "API key id")
 	actorName := fs.String("actor", "", "your name, recorded in the audit log")
+	email := fs.String("email", "", "staff email")
+	role := fs.String("role", "", "staff role: viewer, finance, approver or admin")
 	if err := fs.Parse(args); err != nil {
 		return usageError{adminUsage}
 	}
@@ -184,6 +192,62 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		fmt.Fprintf(stdout, "API key %s revoked\n", *keyID)
 		return nil
 
+	case "user invite":
+		if err := needActor(); err != nil {
+			return err
+		}
+		inv, err := a.admin.Invite(ctx, actor, *email, *name, store.AdminRole(*role))
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Staff account created for %s (%s, role %s)\n\n", inv.User.Name, inv.User.Email, inv.User.Role)
+		printSetupLink(stdout, inv.URL, inv.ExpiresAt)
+		return nil
+
+	case "user list":
+		users, err := a.admin.ListUsers(ctx)
+		if err != nil {
+			return err
+		}
+		tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "EMAIL\tNAME\tROLE\tSTATUS\tLAST SIGN-IN")
+		for _, u := range users {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", u.Email, u.Name, u.Role, u.Status, fmtTime(u.LastLoginAt))
+		}
+		return tw.Flush()
+
+	case "user reset", "user disable":
+		if err := needActor(); err != nil {
+			return err
+		}
+		u, err := a.admin.GetUserByEmail(ctx, *email)
+		if err != nil {
+			return err
+		}
+		if cmd == "user disable" {
+			if err := a.admin.Disable(ctx, actor, nil, u.ID); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "%s disabled and signed out everywhere\n", u.Email)
+			return nil
+		}
+		inv, err := a.admin.Reset(ctx, actor, nil, u.ID)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "%s reset: password, 2FA and recovery codes cleared, all sessions signed out\n\n", u.Email)
+		printSetupLink(stdout, inv.URL, inv.ExpiresAt)
+		return nil
+
+	case "seed demo":
+		if err := needActor(); err != nil {
+			return err
+		}
+		if a.cfg.Env != config.EnvDevelopment {
+			return errors.New("seed demo only runs with TSP_ENV=development")
+		}
+		return seedDemo(ctx, a, actor, stdout)
+
 	case "audit verify":
 		bad, err := store.New(a.pool).VerifyAuditChain(ctx)
 		if err != nil {
@@ -210,6 +274,11 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return nil
 	}
 	return usageError{adminUsage}
+}
+
+func printSetupLink(w io.Writer, url string, expires time.Time) {
+	fmt.Fprintf(w, "One-time setup link (shown ONCE; send it to the person over a private channel).\nIt expires %s:\n\n    %s\n\n",
+		expires.UTC().Format(time.RFC1123), url)
 }
 
 func printSecretOnce(w io.Writer, what, secret string) {

@@ -27,9 +27,9 @@
    `sops --encrypt`. Only the encrypted file is committed.
 3. At deploy, `sops --decrypt` writes each value to
    `/run/talksasa-pay/secrets/<name>` (tmpfs, mode 0400, owned by the
-   container uid). `deploy/compose.prod.yml` (written with the deployment work) mounts those as
-   Docker secrets. Nothing
-   is written to persistent disk.
+   container uid). `deploy/compose.prod.yml` mounts those as Docker secrets. Nothing is written
+   to persistent disk. `scripts/deploy.sh init-secrets <env> --age age1...`
+   creates a new bundle with fresh random values ([deploy runbook](deploy.md)).
 
 ## Generating keys
 ```sh

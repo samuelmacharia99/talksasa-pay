@@ -37,6 +37,8 @@ type env struct {
 	ctx      context.Context
 	db       *testdb.DB
 	logs     *syncBuffer
+	logger   *slog.Logger
+	keyring  *crypto.Keyring
 	products *product.Service
 	payers   *payer.Service
 	requests *paymentrequest.Service
@@ -59,7 +61,7 @@ func newEnv(t *testing.T) *env {
 	}
 	alloc := allocation.NewService(logger)
 	return &env{
-		t: t, ctx: context.Background(), db: d, logs: logs,
+		t: t, ctx: context.Background(), db: d, logs: logs, logger: logger, keyring: kr,
 		products: product.NewService(product.Options{
 			Pool: d.App, Keyring: kr, APIKeyPepper: []byte(strings.Repeat("p", 40)), AllowHTTPHooks: true, Logger: logger,
 		}),
