@@ -1,7 +1,7 @@
 import { Wordmark } from "@talksasa/ui";
 import type { ReactNode } from "react";
 
-import { NavLink } from "@/components/NavLink";
+import { NavGroup, NavLink } from "@/components/NavLink";
 import { requireMe } from "@/lib/api";
 
 import { signOut } from "../(auth)/actions";
@@ -26,17 +26,24 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
         <div className="flex items-center justify-between px-5 pt-5 pb-3 lg:pb-6">
           <Wordmark onDark />
         </div>
-        <nav aria-label="Main" className="flex gap-1 overflow-x-auto px-3 pb-3 lg:flex-1 lg:flex-col lg:overflow-visible lg:pb-0">
+        <nav aria-label="Main" className="flex gap-1 overflow-x-auto px-3 pb-3 lg:flex-1 lg:flex-col lg:overflow-y-auto lg:pb-4">
           <NavLink href="/">Overview</NavLink>
-          <NavLink href="/transactions">Transactions</NavLink>
-          <NavLink href="/suspense">Unmatched payments</NavLink>
-          <NavLink href="/requests">Payment requests</NavLink>
-          <NavLink href="/payers">Payers</NavLink>
-          <NavLink href="/products">Products</NavLink>
-          <NavLink href="/webhooks">Webhooks</NavLink>
-          <NavLink href="/mpesa/callbacks">M-Pesa callbacks</NavLink>
-          <NavLink href="/audit">Audit log</NavLink>
-          {canManageUsers ? <NavLink href="/staff">Staff</NavLink> : null}
+          <NavGroup label="Money">
+            <NavLink href="/transactions">Transactions</NavLink>
+            <NavLink href="/suspense">Unmatched payments</NavLink>
+            <NavLink href="/requests">Payment requests</NavLink>
+            <NavLink href="/payers">Payers</NavLink>
+          </NavGroup>
+          <NavGroup label="Integrations">
+            <NavLink href="/products">Products</NavLink>
+            <NavLink href="/webhooks">Webhooks</NavLink>
+            <NavLink href="/mpesa/callbacks">M-Pesa callbacks</NavLink>
+            <NavLink href="/developers">Developers</NavLink>
+          </NavGroup>
+          <NavGroup label="Admin">
+            <NavLink href="/audit">Audit log</NavLink>
+            {canManageUsers ? <NavLink href="/staff">Staff</NavLink> : null}
+          </NavGroup>
         </nav>
         <div className="hidden border-t border-white/10 px-5 py-4 text-sm lg:block">
           <a href="/account" className="block font-medium text-white hover:underline">

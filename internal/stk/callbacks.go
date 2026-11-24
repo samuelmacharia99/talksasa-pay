@@ -250,6 +250,12 @@ func (s *Service) stkSuccess(ctx context.Context, q *store.Queries, cb store.Mpe
 		if txn.ProviderTransactionID != nil && *txn.ProviderTransactionID == r.Receipt {
 			return outcome{txnID: &txn.ID}, nil // duplicate callback
 		}
+		if completedByC2B(txn) {
+			// The prompt was completed by a paybill payment of the same
+			// amount, and Safaricom now confirms the prompt itself with a
+			// different receipt: the customer paid twice. Both are real.
+			return s.recordSecondPayment(ctx, q, cb, push, txn, r, lb)
+		}
 		lb.alarm("STK success callback with a different receipt for a push that already succeeded; not recorded", attrs...)
 		return outcome{note: "receipt " + r.Receipt + " differs from the receipt already recorded for this push; not recorded", txnID: &txn.ID}, nil
 
@@ -387,6 +393,53 @@ func (s *Service) successAfterGiveUp(ctx context.Context, q *store.Queries, cb s
 	lb.warn("STK payment arrived after the push was given up; recorded as a new transaction",
 		append(attrs, slog.String("transaction_id", txn.ID.String()), slog.Int64("amount", txn.Amount))...)
 	return outcome{txnID: &txn.ID}, nil
+}
+
+// recordSecondPayment records an STK payment whose prompt had already been
+// completed by a separate paybill payment: a new mpesa_stk transaction for
+// the same payer (targeting the prompt's request; if that is already paid,
+// the allocation engine moves the money on as usual).
+func (s *Service) recordSecondPayment(ctx context.Context, q *store.Queries, cb store.MpesaCallback, push Push, first store.Transaction, r mpesa.STKResult, lb *logbuf) (outcome, error) {
+	if r.Amount <= 0 {
+		return outcome{note: "second payment without an amount; not recorded", txnID: &first.ID}, nil
+	}
+	provReq := r.CheckoutRequestID
+	if _, err := q.GetTransactionByProviderRequest(ctx, store.GetTransactionByProviderRequestParams{
+		Channel: store.TxnChannelMpesaStk, ProviderRequestID: &provReq,
+	}); err == nil {
+		provReq = ""
+	} else if !db.IsNotFound(err) {
+		return outcome{}, err
+	}
+	in := ledger.IncomingPayment{
+		Channel: store.TxnChannelMpesaStk, Receipt: r.Receipt, ProviderRequest: provReq, Amount: money.KES(r.Amount),
+		Phone: usablePhone(r.Phone), ProductID: &push.ProductID, PayerAccountID: first.PayerAccountID,
+		PaymentRequestID: &push.PaymentRequestID, OccurredAt: r.OccurredAt, RawPayload: cb.Raw,
+	}
+	if first.BillRef != nil {
+		in.BillRef = *first.BillRef
+	}
+	txn, created, err := ledger.RecordIncoming(ctx, q, in)
+	attrs := []any{slog.String("callback_id", cb.ID.String()), slog.String("stk_push_id", push.ID.String()),
+		slog.String("first_transaction_id", first.ID.String()), slog.String("receipt", r.Receipt)}
+	if errors.Is(err, ledger.ErrReceiptConflict) {
+		lb.alarm("STK receipt already recorded with different details; not recorded", attrs...)
+		return outcome{note: "receipt already recorded with different details", txnID: &first.ID}, nil
+	}
+	if err != nil {
+		return outcome{}, err
+	}
+	if !created {
+		return outcome{txnID: &txn.ID}, nil // duplicate
+	}
+	if txn.PayerAccountID != nil {
+		if _, err := s.o.Alloc.AllocateTransaction(ctx, q, callbackActor, txn.ID); err != nil {
+			return outcome{}, err
+		}
+	}
+	lb.warn("customer paid a prompt and a paybill payment of the same amount; both recorded",
+		append(attrs, slog.String("transaction_id", txn.ID.String()), slog.Int64("amount", txn.Amount))...)
+	return outcome{note: "second payment for an STK push already completed by a paybill payment", txnID: &txn.ID}, nil
 }
 
 // succeedPushTx moves a push to succeeded (once) and emits stk_push.succeeded.
@@ -553,6 +606,11 @@ func (s *Service) processC2B(ctx context.Context, q *store.Queries, cb store.Mpe
 	if err != nil {
 		return outcome{}, err
 	}
+	if ok {
+		if res, matched, err := s.c2bForWaitingPrompt(ctx, q, cb, c, route.PayerID, lb, attrs); err != nil || matched {
+			return res, err
+		}
+	}
 	in := ledger.IncomingPayment{
 		Channel: store.TxnChannelMpesaC2b, Receipt: c.Receipt, Amount: money.KES(c.Amount), Phone: usablePhone(c.Phone),
 		BillRef: c.BillRef, OccurredAt: c.OccurredAt, RawPayload: cb.Raw,
@@ -588,6 +646,84 @@ func (s *Service) processC2B(ctx context.Context, q *store.Queries, cb store.Mpe
 		lb.info("c2b payment received", attrs...)
 	}
 	return outcome{txnID: &txn.ID}, nil
+}
+
+// c2bForWaitingPrompt: some paybills send a C2B confirmation for STK
+// payments too. If this confirmation's receipt is new and the payer has
+// exactly one prompt still waiting (or in review) for exactly this amount,
+// it IS that prompt's payment (user decision 2026-11-24): complete the
+// prompt's transaction with this receipt, so the money pays the bill the
+// prompt was for, and the STK callback carrying the same receipt is then a
+// duplicate. matched=false means: record it as an ordinary C2B payment.
+func (s *Service) c2bForWaitingPrompt(ctx context.Context, q *store.Queries, cb store.MpesaCallback, c mpesa.C2BConfirmation, payerID uuid.UUID, lb *logbuf, attrs []any) (outcome, bool, error) {
+	if _, err := q.GetTransactionByReceipt(ctx, store.GetTransactionByReceiptParams{Provider: "mpesa", ProviderTransactionID: &c.Receipt}); err == nil {
+		return outcome{}, false, nil // already recorded: the ordinary path reports the duplicate
+	} else if !db.IsNotFound(err) {
+		return outcome{}, false, err
+	}
+	var ph *string
+	if p := usablePhone(c.Phone); p != "" {
+		ph = &p
+	}
+	cands, err := q.FindLiveSTKPushesForC2B(ctx, store.FindLiveSTKPushesForC2BParams{PayerAccountID: &payerID, Amount: c.Amount, Phone: ph})
+	if err != nil {
+		return outcome{}, false, err
+	}
+	if len(cands) != 1 {
+		if len(cands) > 1 {
+			lb.warn("C2B payment matches several waiting prompts; recorded as an ordinary paybill payment", attrs...)
+		}
+		return outcome{}, false, nil
+	}
+	// Lock order: push, then transaction (as everywhere else). Re-check
+	// after locking: a callback or the sweeper may have moved it on.
+	push, err := q.LockSTKPush(ctx, cands[0].ID)
+	if err != nil {
+		return outcome{}, false, err
+	}
+	txn, err := q.LockTransactionInternal(ctx, push.TransactionID)
+	if err != nil {
+		return outcome{}, false, err
+	}
+	switch push.Status {
+	case store.StkPushStatusInitiating, store.StkPushStatusSent, store.StkPushStatusUnknown:
+	default:
+		return outcome{}, false, nil
+	}
+	if push.ConfirmBlocked != nil || txn.Amount != c.Amount ||
+		(txn.Status != store.TxnStatusPending && txn.Status != store.TxnStatusNeedsReview) {
+		return outcome{}, false, nil
+	}
+	done, err := ledger.CompleteSTK(ctx, q, ledger.CompleteSTKParams{
+		TransactionID: txn.ID, Receipt: c.Receipt, Phone: c.Phone, OccurredAt: c.OccurredAt, RawPayload: cb.Raw,
+	})
+	if err != nil {
+		return outcome{}, false, err
+	}
+	if done.PayerAccountID != nil {
+		if _, err := s.o.Alloc.AllocateTransaction(ctx, q, callbackActor, done.ID); err != nil {
+			return outcome{}, false, err
+		}
+	}
+	if err := s.succeedPushTx(ctx, q, push, "Confirmed by Safaricom's paybill notice (receipt "+c.Receipt+")"); err != nil {
+		return outcome{}, false, err
+	}
+	lb.info("c2b confirmation completed a waiting stk push", append(attrs, slog.String("stk_push_id", push.ID.String()),
+		slog.String("transaction_id", done.ID.String()))...)
+	return outcome{note: "completed STK push " + push.ID.String(), txnID: &done.ID}, true, nil
+}
+
+// completedByC2B reports whether a succeeded STK transaction got its
+// receipt from a paybill (C2B) confirmation rather than the STK callback
+// or staff (its stored payload is then Safaricom's C2B body).
+func completedByC2B(t store.Transaction) bool {
+	if len(t.RawPayload) == 0 {
+		return false
+	}
+	var probe struct {
+		TransID *string `json:"TransID"`
+	}
+	return json.Unmarshal(t.RawPayload, &probe) == nil && probe.TransID != nil
 }
 
 // usablePhone returns p normalised, or "" if it is not a usable number

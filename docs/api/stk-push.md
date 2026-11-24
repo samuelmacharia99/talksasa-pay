@@ -121,6 +121,16 @@ Read a prompt at any time with `GET /stk-pushes/{id}`.
 Treat the code as information for support. Show `result_desc` (or your own
 wording) to the customer, and never parse it to decide money.
 
+## When the customer pays by paybill instead
+
+If the customer pays the paybill by hand (or Safaricom also sends a paybill
+notice for the prompt payment) for exactly the prompt's amount while the
+prompt is waiting, Talksasa Pay treats it as the prompt's payment: you get
+`stk_push.succeeded` and `payment_request.paid` for the prompt's bill as
+usual. If the customer ends up paying twice, both payments are recorded and
+the second goes to the customer's next unpaid bill or credit
+(`transaction.allocated`, `payer.credit_changed`).
+
 ## Events
 
 | Type | `data` | When |

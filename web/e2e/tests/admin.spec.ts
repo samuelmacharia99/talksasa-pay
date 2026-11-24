@@ -130,6 +130,21 @@ test("signs in, browses every section, manages a key, signs out", async ({ page,
   await expect(page.getByText(EMAIL)).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/12-staff.png`, fullPage: true });
 
+  // Developers: the product API guides and the generated reference.
+  await page.getByRole("link", { name: "Developers" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Talksasa Pay product API" })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/13-developers.png`, fullPage: true });
+  await page.getByRole("navigation", { name: "Developer guides" }).getByRole("link", { name: "M-Pesa prompts" }).click();
+  await expect(page).toHaveURL(/\/developers\/stk-push$/);
+  await expect(page.getByRole("button", { name: "Copy" }).first()).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/14-developers-guide.png`, fullPage: true });
+  await page.getByRole("navigation", { name: "Developer guides" }).getByRole("link", { name: "API reference" }).click();
+  await expect(page.locator("#sendSTKPush")).toContainText("/v1/payment-requests/{id}/stk-push");
+  await page.screenshot({ path: `${SHOTS}/15-developers-reference.png`, fullPage: true });
+  const spec = await page.request.get(`${ADMIN}/developers/openapi.yaml`);
+  expect(spec.ok()).toBe(true);
+  expect(await spec.text()).toMatch(/^openapi: 3\./);
+
   // Sign out, then prove the old cookie is dead server-side.
   const before = (await context.cookies()).find((c) => c.name.endsWith("tsp_admin"))!;
   await page.getByRole("button", { name: "Sign out" }).first().click();

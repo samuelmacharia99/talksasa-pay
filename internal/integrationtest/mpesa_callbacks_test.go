@@ -306,9 +306,14 @@ func TestMpesaSameReceiptSTKAndC2B(t *testing.T) {
 		got := m.push(p.ID)
 		switch got.Status {
 		case store.StkPushStatusSucceeded:
-			outcomes["stk won"]++
-		case store.StkPushStatusUnknown:
-			outcomes["c2b won (push needs review)"]++
+			// Either the STK callback completed it, or the C2B notice did
+			// (user decision 2026-11-24: a paybill notice matching a waiting
+			// prompt is that prompt's payment).
+			if completedViaC2B(m, p.TransactionID) {
+				outcomes["c2b completed the prompt"]++
+			} else {
+				outcomes["stk won"]++
+			}
 		default:
 			t.Fatalf("iteration %d: push %s", i, got.Status)
 		}
@@ -514,4 +519,82 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+func completedViaC2B(m *mpesaEnv, txnID uuid.UUID) bool {
+	var viaC2B bool
+	if err := m.db.Owner.QueryRow(m.ctx, `SELECT raw_payload ? 'TransID' FROM transactions WHERE id = $1`, txnID).Scan(&viaC2B); err != nil {
+		m.t.Fatal(err)
+	}
+	return viaC2B
+}
+
+// A paybill payment that matches a waiting prompt completes it; if the
+// customer then ALSO approves the prompt (a second, different receipt), both
+// payments are recorded — nothing is lost and nothing is doubled.
+func TestMpesaC2BCompletesWaitingPromptThenSecondPayment(t *testing.T) {
+	m := newMpesaEnv(t, nil, nil)
+	prod := m.product("TWICE").Product.ID
+	pa := m.mpesaPayer(prod)
+	older := m.request(prod, pa.ID, 700) // oldest-first would pick this one
+	req := m.request(prod, pa.ID, 500)
+	ph := newPhone(0)
+	p := m.mustSend(prod, req.ID, ph)
+
+	r1 := newMpesaReceipt()
+	if _, err := m.deliver(store.MpesaCallbackKindC2bConfirmation, c2bBody(r1, 500, pa.AccountNumber)); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.push(p.ID); got.Status != store.StkPushStatusSucceeded {
+		t.Fatalf("push %s after matching C2B, want succeeded", got.Status)
+	}
+	if !completedViaC2B(m, p.TransactionID) {
+		t.Fatal("prompt transaction not completed by the C2B notice")
+	}
+	assertStatus(t, m.reqState(prod, req.ID), allocation.StatusPaid, 500)
+	assertStatus(t, m.reqState(prod, older.ID), allocation.StatusOpen, 0)
+
+	// Duplicate STK callback with the SAME receipt: nothing new.
+	if _, err := m.deliver(store.MpesaCallbackKindStk, stkSuccessBody(*p.CheckoutRequestID, r1, 500, ph)); err != nil {
+		t.Fatal(err)
+	}
+	// The customer also approved the prompt: a second, different receipt.
+	r2 := newMpesaReceipt()
+	for i := 0; i < 3; i++ { // and Safaricom repeats it
+		if _, err := m.deliver(store.MpesaCallbackKindStk, stkSuccessBody(*p.CheckoutRequestID, r2, 500, ph)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if m.receiptRows(r1) != 1 || m.receiptRows(r2) != 1 {
+		t.Fatalf("receipts recorded r1=%d r2=%d, want 1/1", m.receiptRows(r1), m.receiptRows(r2))
+	}
+	var total int64
+	if err := m.db.Owner.QueryRow(m.ctx, `SELECT coalesce(sum(amount),0)::bigint FROM transactions
+		WHERE payer_account_id = $1 AND status = 'succeeded'`, pa.ID).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if total != 1000 {
+		t.Fatalf("payer received %d, want 1000 (two real payments)", total)
+	}
+	// The second payment moved on to the older bill (target already paid).
+	assertStatus(t, m.reqState(prod, older.ID), allocation.StatusPartiallyPaid, 500)
+	m.mpesaInvariants(invariantOpts{})
+}
+
+// A paybill payment for a different amount than the waiting prompt is an
+// ordinary paybill payment (oldest bill first); the prompt keeps waiting.
+func TestMpesaC2BDifferentAmountLeavesPromptWaiting(t *testing.T) {
+	m := newMpesaEnv(t, nil, nil)
+	prod := m.product("DIFF").Product.ID
+	pa := m.mpesaPayer(prod)
+	req := m.request(prod, pa.ID, 500)
+	p := m.mustSend(prod, req.ID, newPhone(0))
+	if _, err := m.deliver(store.MpesaCallbackKindC2bConfirmation, c2bBody(newMpesaReceipt(), 200, pa.AccountNumber)); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.push(p.ID); got.Status != store.StkPushStatusSent {
+		t.Fatalf("push %s, want still sent", got.Status)
+	}
+	assertStatus(t, m.reqState(prod, req.ID), allocation.StatusPartiallyPaid, 200)
+	m.mpesaInvariants(invariantOpts{allowCreditWithPayable: true})
 }

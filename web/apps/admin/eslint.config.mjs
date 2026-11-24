@@ -4,7 +4,7 @@ import nextTs from "eslint-config-next/typescript";
 const config = [
   ...nextVitals,
   ...nextTs,
-  { ignores: [".next/**", "next-env.d.ts"] },
+  { ignores: [".next/**", "next-env.d.ts", "src/content/*.generated.ts"] },
   {
     rules: {
       // Secrets and session tokens must never be logged from the browser.

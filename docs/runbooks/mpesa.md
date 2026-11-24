@@ -289,6 +289,21 @@ Every resolution is in the audit log with your name and reason. If a late
 callback arrives after you resolved it, the system matches it by receipt
 and does not count the money twice.
 
+## How unusual payments are handled
+
+These rules were decided with the business owner (2026-11-24). Nothing is
+ever counted twice; each M-Pesa receipt is recorded once.
+
+| Situation | What Talksasa Pay does |
+|---|---|
+| Safaricom confirms a prompt for a **different amount** than we asked | Records nothing, raises an alarm; staff cannot confirm it with a receipt (only mark it not paid). |
+| Paybill notice for **another business number** | Not recorded; alarm. Check the paybill configuration. |
+| Payment arrives **after we gave up** on a prompt | Recorded as a new transaction and applied to the prompt's bill; the prompt shows as succeeded and points at the new transaction. |
+| Paybill notice **matches a waiting prompt** (same customer, exact amount) | Treated as that prompt's payment: it pays the prompt's bill and the prompt is marked succeeded. Safaricom's own prompt confirmation with the same receipt is then a duplicate. |
+| The customer **really paid twice** (paybill + approved prompt, different receipts) | Both payments are recorded; the second moves on to the next unpaid bill or credit as usual. |
+| Paybill payment to an **unknown account number** | Recorded unmatched (suspense) for staff to assign. |
+| Payment for an **inactive product or closed customer** | Applied to their bills as normal; shown on the overview for staff. |
+
 ## Troubleshooting
 
 | Symptom | Likely cause |

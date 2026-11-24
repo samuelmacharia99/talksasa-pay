@@ -335,7 +335,10 @@ func (m *mpesaEnv) mpesaInvariants(opts invariantOpts) {
 		   AND NOT EXISTS (SELECT 1 FROM stk_pushes p WHERE p.transaction_id = t.id)
 		   AND NOT EXISTS (SELECT 1 FROM stk_pushes p JOIN transactions f ON f.id = p.transaction_id
 		                    WHERE p.status = 'succeeded' AND f.status = 'failed'
-		                      AND p.payment_request_id = t.payment_request_id AND p.amount = t.amount)`)
+		                      AND p.payment_request_id = t.payment_request_id AND p.amount = t.amount)
+		   AND NOT EXISTS (SELECT 1 FROM stk_pushes p JOIN transactions f ON f.id = p.transaction_id
+		                    WHERE p.status = 'succeeded' AND f.status = 'succeeded' AND f.raw_payload ? 'TransID'
+		                      AND p.payment_request_id = t.payment_request_id AND p.amount = t.amount)`) // second payment after a paybill payment completed the prompt
 	m.zero("rescued push with more than one rescue transaction", `
 		SELECT count(*) FROM stk_pushes p JOIN transactions f ON f.id = p.transaction_id
 		 WHERE p.status = 'succeeded' AND f.status = 'failed'

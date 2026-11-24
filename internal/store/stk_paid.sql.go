@@ -26,6 +26,73 @@ func (q *Queries) BlockSTKPushConfirm(ctx context.Context, arg BlockSTKPushConfi
 	return err
 }
 
+const findLiveSTKPushesForC2B = `-- name: FindLiveSTKPushesForC2B :many
+SELECT p.id, p.product_id, p.payment_request_id, p.transaction_id, p.source, p.phone, p.amount, p.idempotency_key, p.request_hash, p.merchant_request_id, p.checkout_request_id, p.status, p.result_code, p.result_desc, p.query_attempts, p.next_query_at, p.created_at, p.updated_at, p.completed_at, p.paid_transaction_id, p.confirm_blocked FROM stk_pushes p
+  JOIN transactions t ON t.id = p.transaction_id
+ WHERE t.payer_account_id = $1
+   AND p.amount = $2
+   AND p.status IN ('initiating', 'sent', 'unknown')
+   AND p.confirm_blocked IS NULL
+   AND t.status IN ('pending', 'needs_review')
+   AND ($3::text IS NULL OR p.phone = $3)
+   AND p.created_at > now() - interval '1 day'
+ ORDER BY p.created_at DESC
+ LIMIT 2
+`
+
+type FindLiveSTKPushesForC2BParams struct {
+	PayerAccountID *uuid.UUID
+	Amount         int64
+	Phone          *string
+}
+
+// A paybill (C2B) confirmation may be Safaricom's second notice for an STK
+// payment. Candidates: the payer's prompts still waiting (or in review) for
+// exactly this amount, whose transaction has no receipt yet, not blocked by
+// an anomaly; phone must match when the notice carries a usable one. The
+// caller acts only on exactly one candidate.
+func (q *Queries) FindLiveSTKPushesForC2B(ctx context.Context, arg FindLiveSTKPushesForC2BParams) ([]StkPush, error) {
+	rows, err := q.db.Query(ctx, findLiveSTKPushesForC2B, arg.PayerAccountID, arg.Amount, arg.Phone)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []StkPush
+	for rows.Next() {
+		var i StkPush
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProductID,
+			&i.PaymentRequestID,
+			&i.TransactionID,
+			&i.Source,
+			&i.Phone,
+			&i.Amount,
+			&i.IdempotencyKey,
+			&i.RequestHash,
+			&i.MerchantRequestID,
+			&i.CheckoutRequestID,
+			&i.Status,
+			&i.ResultCode,
+			&i.ResultDesc,
+			&i.QueryAttempts,
+			&i.NextQueryAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CompletedAt,
+			&i.PaidTransactionID,
+			&i.ConfirmBlocked,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setSTKPushPaidTransaction = `-- name: SetSTKPushPaidTransaction :one
 UPDATE stk_pushes SET paid_transaction_id = $1
  WHERE id = $2 AND paid_transaction_id IS NULL

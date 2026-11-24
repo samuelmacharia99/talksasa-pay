@@ -22,3 +22,18 @@ export function NavLink({ href, children }: { href: string; children: ReactNode 
     </Link>
   );
 }
+
+/**
+ * A labelled section of the sidebar. On small screens the sidebar is one
+ * scrolling row, so the label is hidden and the links sit inline.
+ */
+export function NavGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div role="group" aria-label={label} className="contents lg:mt-5 lg:block lg:space-y-0.5">
+      <p aria-hidden className="mb-1.5 hidden px-3 text-[0.6875rem] font-medium tracking-[0.08em] text-white/40 uppercase lg:block">
+        {label}
+      </p>
+      {children}
+    </div>
+  );
+}
