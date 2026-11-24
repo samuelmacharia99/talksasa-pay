@@ -75,7 +75,6 @@ func TestConcurrencyAuditChainAppends(t *testing.T) {
 	}
 	t.Logf("after the storm, %d of 5 sequential audited operations still fail", wedged)
 	if forks > 0 || wedged > 0 {
-		bugGate(t, "audit_log append race: id is assigned before tsp_audit_chain takes its lock, so concurrent audited operations fail with audit_log_prev_id_key")
 		t.Fatalf("%d of %d concurrent audited operations failed with audit_log_prev_id_key; %d of 5 later sequential ones too", forks, n, wedged)
 	}
 }

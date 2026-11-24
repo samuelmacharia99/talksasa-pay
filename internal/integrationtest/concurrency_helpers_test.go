@@ -388,8 +388,7 @@ func (e *env) skipIfAuditWedged(errs ...error) {
 	for _, err := range errs {
 		if isAuditFork(err) {
 			e.checkInvariants(invariantOpts{allowCreditWithPayable: true})
-			bugGate(e.t, "audit_log chain wedged by the append race during this test: "+err.Error())
-			e.t.Fatalf("audit chain wedged: %v", err)
+			e.t.Fatalf("audit_log chain wedged (regression of migration 000004): %v", err)
 		}
 	}
 }

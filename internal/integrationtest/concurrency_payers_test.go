@@ -132,8 +132,6 @@ func TestConcurrencyPayerUpsertStorm(t *testing.T) {
 
 	if failed > 0 || len(phones) != 1 || primaries != 1 {
 		e.checkInvariants(invariantOpts{}) // money/audit are still fine either way
-		bugGate(t, "payer.Upsert update path syncs phones without locking the payer row: concurrent upserts "+
-			"fail with payer_phones_one_primary unique violations and/or leave a union of several callers' phones")
 		t.Fatalf("upsert storm: %d failed (first %v); phones %v; primaries %d — want 0 failures, exactly one caller's phone, one primary",
 			failed, firstErr, phones, primaries)
 	}

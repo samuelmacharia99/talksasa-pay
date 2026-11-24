@@ -53,29 +53,40 @@ func SignatureHeader(t int64, body []byte, secrets ...[]byte) string {
 	return b.String()
 }
 
-// Verify is the receiver-side check (used by tests and as the reference for
-// the SDKs): accept when ANY v1 matches and |now - t| <= tolerance.
+// Verify is the receiver-side check and the reference for the SDKs (the
+// canonical rules are in pkg/talksasapay/testdata/webhook_signature_vectors.json):
+// items are comma-separated and trimmed; an item without "=" (incl. a
+// trailing comma) is malformed; exactly one t of 1-12 digits; v1 values that
+// are not 64 hex digits are ignored but at least one valid v1 is required;
+// unknown keys are ignored; accept when ANY v1 matches (case-insensitive hex)
+// and |now - t| <= tolerance.
 func Verify(secret []byte, header string, body []byte, now time.Time, tolerance time.Duration) bool {
 	var t int64
 	var sigs []string
-	haveT := false
+	tCount := 0
 	for _, part := range strings.Split(header, ",") {
 		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok {
-			continue
+		if !ok || k == "" {
+			return false
 		}
 		switch k {
 		case "t":
+			if len(v) < 1 || len(v) > 12 || strings.Trim(v, "0123456789") != "" {
+				return false
+			}
 			n, err := strconv.ParseInt(v, 10, 64)
 			if err != nil {
 				return false
 			}
-			t, haveT = n, true
+			t = n
+			tCount++
 		case "v1":
-			sigs = append(sigs, v)
+			if len(v) == 64 && strings.Trim(strings.ToLower(v), "0123456789abcdef") == "" {
+				sigs = append(sigs, strings.ToLower(v))
+			}
 		}
 	}
-	if !haveT || len(sigs) == 0 {
+	if tCount != 1 || len(sigs) == 0 {
 		return false
 	}
 	if d := now.Sub(time.Unix(t, 0)); d > tolerance || d < -tolerance {

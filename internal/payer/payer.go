@@ -177,6 +177,13 @@ func (s *Service) upsertTx(ctx context.Context, q *store.Queries, actor audit.Ac
 	case err != nil:
 		return Payer{}, false, fmt.Errorf("payer: lookup: %w", err)
 	default:
+		// Serialise concurrent updates of the same payer (the same per-payer
+		// lock allocation takes first), so two upserts can't interleave their
+		// phone syncs and leave a mix of both callers' numbers.
+		row, err = q.LockPayer(ctx, store.LockPayerParams{ProductID: productID, ID: row.ID})
+		if err != nil {
+			return Payer{}, false, fmt.Errorf("payer: lock: %w", err)
+		}
 		if row.DisplayName != v.name || !strPtrEq(row.Email, v.email) {
 			row, err = q.UpdatePayerProfile(ctx, store.UpdatePayerProfileParams{
 				ProductID: productID, ID: row.ID, DisplayName: v.name, Email: v.email,
