@@ -42,6 +42,10 @@ type Deps struct {
 	// AuthLimiter throttles sign-in, 2FA and setup attempts per client IP.
 	// nil uses the default (10 per minute, burst 10).
 	AuthLimiter *httpx.RateLimiter
+	// STK resolves needs_review M-Pesa payments and lists a request's STK
+	// pushes (*stk.Service). nil: resolve answers 503 mpesa_unavailable and
+	// push lists are empty.
+	STK STKService
 }
 
 // Route is one authenticated admin route and the permission it requires.
@@ -54,6 +58,15 @@ type Route struct {
 
 type handlers struct {
 	d Deps
+	// rd overrides d.Reporting for the M-Pesa screens (tests).
+	rd reads
+}
+
+func (h *handlers) reads() reads {
+	if h.rd != nil {
+		return h.rd
+	}
+	return h.d.Reporting
 }
 
 // Routes lists every authenticated route (exported for the RBAC test).
