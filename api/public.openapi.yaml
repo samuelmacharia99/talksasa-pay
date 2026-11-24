@@ -3,7 +3,8 @@ info:
   title: Talksasa Pay public pay-page API
   version: 1.0.0
   description: |
-    Read-only data for the hosted pay page. Called server-side by the pay
+    Data for the hosted pay page, plus one action: sending an M-Pesa
+    payment prompt (STK push) for the bill's outstanding balance. Called server-side by the pay
     Next.js app, which forwards the visitor's IP in `X-Talksasa-Client-Ip`
     (trusted only from TSP_TRUSTED_PROXIES) for per-visitor rate limiting.
 
@@ -34,8 +35,73 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
+  /pay/{token}/stk:
+    post:
+      summary: Send an M-Pesa payment prompt to a phone for this bill
+      description: |
+        Always the full outstanding balance. Rate limited per visitor, and
+        only one prompt per bill can be live at a time (409 `stk_in_progress`).
+        The page then polls GET /pay/{token} for `status` and `stk_push`.
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string, pattern: "^[a-z2-7]{52}$" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [phone]
+              properties:
+                phone: { type: string, maxLength: 20, description: "07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX or +2547XXXXXXXX" }
+      responses:
+        "202":
+          description: Prompt sent
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PayPageSTK" }
+        "404":
+          description: Not a valid payment link
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "409":
+          description: "Not payable (not_payable), a prompt is already live (stk_in_progress) or balance above KES 250,000 (amount_too_large)"
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "422":
+          description: Invalid phone number (validation_failed)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "429":
+          description: Too many requests
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "502":
+          description: Safaricom could not send the prompt (mpesa_error)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "503":
+          description: M-Pesa prompts are not available (mpesa_unavailable)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
 components:
   schemas:
+    PayPageSTK:
+      type: object
+      description: The latest prompt for this bill, without ids or the phone number.
+      required: [status, message, created_at]
+      properties:
+        status: { type: string, enum: [initiating, sent, succeeded, failed, needs_review] }
+        message:
+          type: [string, "null"]
+          description: "Customer-facing reason when failed (e.g. 'You cancelled the prompt'); null otherwise"
+        created_at: { type: string, format: date-time }
     Problem:
       type: object
       required: [type, title, status]
@@ -48,7 +114,7 @@ components:
         request_id: { type: string }
     PayPage:
       type: object
-      required: [product_name, reference, description, currency, amount, amount_paid, outstanding, status, payable, expires_at, paid_at, paybill, stk_available]
+      required: [product_name, reference, description, currency, amount, amount_paid, outstanding, status, payable, expires_at, paid_at, paybill, stk_available, stk_push]
       properties:
         product_name: { type: string }
         reference: { type: string }
@@ -69,4 +135,9 @@ components:
               properties:
                 business_number: { type: string }
                 account_number: { type: string }
-        stk_available: { type: boolean, description: "False until STK push (Daraja) is live" }
+        stk_available: { type: boolean, description: "True when M-Pesa prompts can be sent for this bill (M-Pesa on, bill payable, balance <= KES 250,000)" }
+        stk_push:
+          description: The latest prompt for this bill in the last 15 minutes, if any
+          oneOf:
+            - $ref: "#/components/schemas/PayPageSTK"
+            - { type: "null" }

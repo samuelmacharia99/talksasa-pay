@@ -60,10 +60,123 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/pay/{token}/stk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send an M-Pesa payment prompt to a phone for this bill
+         * @description Always the full outstanding balance. Rate limited per visitor, and
+         *     only one prompt per bill can be live at a time (409 `stk_in_progress`).
+         *     The page then polls GET /pay/{token} for `status` and `stk_push`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    token: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX or +2547XXXXXXXX */
+                        phone: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Prompt sent */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PayPageSTK"];
+                    };
+                };
+                /** @description Not a valid payment link */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description Not payable (not_payable), a prompt is already live (stk_in_progress) or balance above KES 250,000 (amount_too_large) */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description Invalid phone number (validation_failed) */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description Too many requests */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description Safaricom could not send the prompt (mpesa_error) */
+                502: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+                /** @description M-Pesa prompts are not available (mpesa_unavailable) */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["Problem"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description The latest prompt for this bill, without ids or the phone number. */
+        PayPageSTK: {
+            /** @enum {string} */
+            status: "initiating" | "sent" | "succeeded" | "failed" | "needs_review";
+            /** @description Customer-facing reason when failed (e.g. 'You cancelled the prompt'); null otherwise */
+            message: string | null;
+            /** Format: date-time */
+            created_at: string;
+        };
         Problem: {
             type: string;
             title: string;
@@ -92,8 +205,10 @@ export interface components {
                 business_number: string;
                 account_number: string;
             };
-            /** @description False until STK push (Daraja) is live */
+            /** @description True when M-Pesa prompts can be sent for this bill (M-Pesa on, bill payable, balance <= KES 250,000) */
             stk_available: boolean;
+            /** @description The latest prompt for this bill in the last 15 minutes, if any */
+            stk_push: components["schemas"]["PayPageSTK"] | null;
         };
     };
     responses: never;

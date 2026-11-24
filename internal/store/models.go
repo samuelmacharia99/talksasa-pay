@@ -321,6 +321,64 @@ func AllAuditActorTypeValues() []AuditActorType {
 	}
 }
 
+type MpesaCallbackKind string
+
+const (
+	MpesaCallbackKindStk             MpesaCallbackKind = "stk"
+	MpesaCallbackKindC2bConfirmation MpesaCallbackKind = "c2b_confirmation"
+)
+
+func (e *MpesaCallbackKind) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = MpesaCallbackKind(s)
+	case string:
+		*e = MpesaCallbackKind(s)
+	default:
+		return fmt.Errorf("unsupported scan type for MpesaCallbackKind: %T", src)
+	}
+	return nil
+}
+
+type NullMpesaCallbackKind struct {
+	MpesaCallbackKind MpesaCallbackKind
+	Valid             bool // Valid is true if MpesaCallbackKind is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullMpesaCallbackKind) Scan(value interface{}) error {
+	if value == nil {
+		ns.MpesaCallbackKind, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.MpesaCallbackKind.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullMpesaCallbackKind) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.MpesaCallbackKind), nil
+}
+
+func (e MpesaCallbackKind) Valid() bool {
+	switch e {
+	case MpesaCallbackKindStk,
+		MpesaCallbackKindC2bConfirmation:
+		return true
+	}
+	return false
+}
+
+func AllMpesaCallbackKindValues() []MpesaCallbackKind {
+	return []MpesaCallbackKind{
+		MpesaCallbackKindStk,
+		MpesaCallbackKindC2bConfirmation,
+	}
+}
+
 type PayerStatus string
 
 const (
@@ -501,6 +559,73 @@ func AllProductStatusValues() []ProductStatus {
 	return []ProductStatus{
 		ProductStatusActive,
 		ProductStatusSuspended,
+	}
+}
+
+type StkPushStatus string
+
+const (
+	StkPushStatusInitiating StkPushStatus = "initiating"
+	StkPushStatusSent       StkPushStatus = "sent"
+	StkPushStatusSucceeded  StkPushStatus = "succeeded"
+	StkPushStatusFailed     StkPushStatus = "failed"
+	StkPushStatusUnknown    StkPushStatus = "unknown"
+)
+
+func (e *StkPushStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = StkPushStatus(s)
+	case string:
+		*e = StkPushStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for StkPushStatus: %T", src)
+	}
+	return nil
+}
+
+type NullStkPushStatus struct {
+	StkPushStatus StkPushStatus
+	Valid         bool // Valid is true if StkPushStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullStkPushStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.StkPushStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.StkPushStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullStkPushStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.StkPushStatus), nil
+}
+
+func (e StkPushStatus) Valid() bool {
+	switch e {
+	case StkPushStatusInitiating,
+		StkPushStatusSent,
+		StkPushStatusSucceeded,
+		StkPushStatusFailed,
+		StkPushStatusUnknown:
+		return true
+	}
+	return false
+}
+
+func AllStkPushStatusValues() []StkPushStatus {
+	return []StkPushStatus{
+		StkPushStatusInitiating,
+		StkPushStatusSent,
+		StkPushStatusSucceeded,
+		StkPushStatusFailed,
+		StkPushStatusUnknown,
 	}
 }
 
@@ -905,6 +1030,19 @@ type Event struct {
 	CreatedAt   time.Time
 }
 
+// Inbox of every Daraja callback, stored before we acknowledge it. Never deleted.
+type MpesaCallback struct {
+	ID            uuid.UUID
+	Kind          MpesaCallbackKind
+	RemoteIp      *netip.Addr
+	Raw           []byte
+	ReceivedAt    time.Time
+	ProcessedAt   *time.Time
+	Error         *string
+	Attempts      int32
+	TransactionID *uuid.UUID
+}
+
 type PayerAccount struct {
 	ID                uuid.UUID
 	ProductID         uuid.UUID
@@ -980,6 +1118,29 @@ type ProductApiKey struct {
 	LastUsedAt *time.Time
 	// NULL = any address. Otherwise requests must come from one of these networks.
 	AllowedCidrs []netip.Prefix
+}
+
+// STK push prompts sent through Daraja. Owns the pending mpesa_stk transaction the callback completes.
+type StkPush struct {
+	ID                uuid.UUID
+	ProductID         uuid.UUID
+	PaymentRequestID  uuid.UUID
+	TransactionID     uuid.UUID
+	Source            string
+	Phone             string
+	Amount            int64
+	IdempotencyKey    *string
+	RequestHash       []byte
+	MerchantRequestID *string
+	CheckoutRequestID *string
+	Status            StkPushStatus
+	ResultCode        *string
+	ResultDesc        *string
+	QueryAttempts     int32
+	NextQueryAt       *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	CompletedAt       *time.Time
 }
 
 // Append-only ledger of money movements. Amounts are never changed and rows are never deleted; corrections are new reversal/adjustment rows.

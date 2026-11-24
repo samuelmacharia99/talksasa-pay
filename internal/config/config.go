@@ -45,6 +45,7 @@ type Config struct {
 	Public   PublicConfig
 	API      APIConfig
 	Worker   WorkerConfig
+	Mpesa    MpesaConfig
 	// TrustedProxies are peers (the Next.js servers, the reverse proxy)
 	// whose X-Talksasa-Client-IP header is believed. Anyone else's is ignored.
 	TrustedProxies []netip.Prefix
@@ -69,6 +70,49 @@ type PublicConfig struct {
 	// to form its pay_url. Must end in "/"; https outside development.
 	PayBaseURL string
 }
+
+// M-Pesa (Daraja) environments.
+const (
+	MpesaOff        = ""
+	MpesaSandbox    = "sandbox"
+	MpesaProduction = "production"
+)
+
+// MpesaConfig configures Safaricom Daraja (STK push, STK query, C2B).
+// Env "" turns M-Pesa off: no STK push (pay page shows only the paybill
+// steps, /v1 stk-push answers 503 mpesa_unavailable) and callbacks are not
+// mounted.
+type MpesaConfig struct {
+	Env string // "", "sandbox" or "production" (TSP_MPESA_ENV)
+	// BaseURL overrides the Daraja base URL. Development only (fake Daraja).
+	BaseURL string
+	// ShortCode is the BusinessShortCode for STK push; defaults to the
+	// paybill (Daraja's sandbox uses its own test shortcode).
+	ShortCode      string
+	ConsumerKey    Secret
+	ConsumerSecret Secret
+	Passkey        Secret
+	// CallbackToken is a random secret placed in the callback URL path.
+	// Daraja does not sign callbacks, so together with the source-IP check
+	// it is what tells a genuine callback from a forged one.
+	CallbackToken Secret
+	// CallbackBaseURL is the public base Safaricom calls, e.g.
+	// https://api.pay.talksasa.co.ke/ (https outside development).
+	CallbackBaseURL string
+	// CallbackCIDRs are Safaricom's callback source networks. Required in
+	// production; empty means any source (development and sandbox only).
+	CallbackCIDRs []netip.Prefix
+	// RequestTimeout bounds one Daraja HTTP call.
+	RequestTimeout time.Duration
+	// QueryAfter: a sent push with no callback is first checked this long
+	// after it was sent. GiveUpAfter: no answer at all by then means staff
+	// review.
+	QueryAfter  time.Duration
+	GiveUpAfter time.Duration
+}
+
+// Enabled reports whether M-Pesa is configured.
+func (m MpesaConfig) Enabled() bool { return m.Env != MpesaOff }
 
 // APIConfig bounds the product integration API (/v1).
 type APIConfig struct {
@@ -210,6 +254,22 @@ func Load(src Source) (*Config, error) {
 		ShutdownTimeout:    l.duration("TSP_WORKER_SHUTDOWN_TIMEOUT", 25*time.Second),
 	}
 	cfg.TrustedProxies = l.prefixes("TSP_TRUSTED_PROXIES", "127.0.0.1/32,::1/128")
+	cfg.Mpesa = MpesaConfig{
+		Env:             l.str("TSP_MPESA_ENV", MpesaOff),
+		BaseURL:         l.str("TSP_MPESA_BASE_URL", ""),
+		ShortCode:       l.str("TSP_MPESA_SHORTCODE", cfg.Public.Paybill),
+		CallbackBaseURL: l.str("TSP_MPESA_CALLBACK_BASE_URL", ""),
+		CallbackCIDRs:   l.prefixes("TSP_MPESA_CALLBACK_CIDRS", ""),
+		RequestTimeout:  l.duration("TSP_MPESA_REQUEST_TIMEOUT", 15*time.Second),
+		QueryAfter:      l.duration("TSP_MPESA_QUERY_AFTER", 60*time.Second),
+		GiveUpAfter:     l.duration("TSP_MPESA_GIVE_UP_AFTER", 30*time.Minute),
+	}
+	if cfg.Mpesa.Enabled() {
+		cfg.Mpesa.ConsumerKey = l.secret("TSP_MPESA_CONSUMER_KEY", cfg.Env, true)
+		cfg.Mpesa.ConsumerSecret = l.secret("TSP_MPESA_CONSUMER_SECRET", cfg.Env, true)
+		cfg.Mpesa.Passkey = l.secret("TSP_MPESA_PASSKEY", cfg.Env, true)
+		cfg.Mpesa.CallbackToken = l.secret("TSP_MPESA_CALLBACK_TOKEN", cfg.Env, true)
+	}
 
 	cfg.Database = DatabaseConfig{
 		URL:              l.secret("TSP_DATABASE_URL", cfg.Env, true),
@@ -314,8 +374,62 @@ func (c *Config) validate() error {
 	if c.Public.Paybill != "" && !paybillRe.MatchString(c.Public.Paybill) {
 		errs = append(errs, errors.New("TSP_MPESA_PAYBILL: must be 5-7 digits"))
 	}
+	errs = append(errs, c.validateMpesa()...)
 	return errors.Join(errs...)
 }
+
+func (c *Config) validateMpesa() []error {
+	m := c.Mpesa
+	var errs []error
+	switch m.Env {
+	case MpesaOff:
+		return nil
+	case MpesaSandbox, MpesaProduction:
+	default:
+		return []error{fmt.Errorf("TSP_MPESA_ENV: must be empty, sandbox or production, got %q", m.Env)}
+	}
+	if m.Env == MpesaProduction && !c.Env.IsProductionLike() {
+		errs = append(errs, errors.New("TSP_MPESA_ENV=production: only allowed in staging or production"))
+	}
+	if c.Env == EnvProduction && m.Env != MpesaProduction {
+		errs = append(errs, errors.New("TSP_MPESA_ENV: production must use the production Daraja environment"))
+	}
+	if m.BaseURL != "" {
+		if c.Env != EnvDevelopment {
+			errs = append(errs, errors.New("TSP_MPESA_BASE_URL: only allowed in development (fake Daraja)"))
+		} else if u, err := url.Parse(m.BaseURL); err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			errs = append(errs, errors.New("TSP_MPESA_BASE_URL: must be an absolute http(s) URL"))
+		}
+	}
+	if !shortCodeRe.MatchString(m.ShortCode) {
+		errs = append(errs, errors.New("TSP_MPESA_SHORTCODE (or TSP_MPESA_PAYBILL): must be 5-7 digits"))
+	}
+	if c.Public.Paybill == "" {
+		errs = append(errs, errors.New("TSP_MPESA_PAYBILL: required when M-Pesa is on"))
+	}
+	if len(m.CallbackToken.Reveal()) < 32 || !callbackTokenRe.MatchString(m.CallbackToken.Reveal()) {
+		errs = append(errs, errors.New("TSP_MPESA_CALLBACK_TOKEN: must be at least 32 URL-safe characters (A-Z a-z 0-9 _ -)"))
+	}
+	if u, err := url.Parse(m.CallbackBaseURL); err != nil || u.Host == "" || !strings.HasSuffix(u.Path, "/") ||
+		(u.Scheme != "https" && (c.Env.IsProductionLike() || u.Scheme != "http")) {
+		errs = append(errs, errors.New("TSP_MPESA_CALLBACK_BASE_URL: must be an absolute URL ending in / (https outside development)"))
+	}
+	if m.Env == MpesaProduction && len(m.CallbackCIDRs) == 0 {
+		errs = append(errs, errors.New("TSP_MPESA_CALLBACK_CIDRS: required with the production Daraja environment (Safaricom's callback IPs)"))
+	}
+	if m.RequestTimeout < time.Second || m.RequestTimeout > time.Minute {
+		errs = append(errs, errors.New("TSP_MPESA_REQUEST_TIMEOUT: must be 1s-1m"))
+	}
+	if m.QueryAfter < 15*time.Second || m.GiveUpAfter < 5*time.Minute || m.GiveUpAfter > 24*time.Hour || m.QueryAfter >= m.GiveUpAfter {
+		errs = append(errs, errors.New("TSP_MPESA_QUERY_AFTER >= 15s and 5m <= TSP_MPESA_GIVE_UP_AFTER <= 24h (and greater) required"))
+	}
+	return errs
+}
+
+var (
+	shortCodeRe     = regexp.MustCompile(`^[0-9]{5,7}$`)
+	callbackTokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+)
 
 var paybillRe = regexp.MustCompile(`^[0-9]{5,7}$`)
 

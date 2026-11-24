@@ -137,6 +137,14 @@ type payPageJSON struct {
 	PaidAt       *time.Time   `json:"paid_at"`
 	Paybill      *paybillJSON `json:"paybill"`
 	STKAvailable bool         `json:"stk_available"`
+	STKPush      *payPageSTK  `json:"stk_push"`
+}
+
+// payPageSTK is the latest prompt for a bill (no ids, no phone).
+type payPageSTK struct {
+	Status    string    `json:"status"`
+	Message   *string   `json:"message"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // payPage serves the hosted pay page's data. The token is the only key;

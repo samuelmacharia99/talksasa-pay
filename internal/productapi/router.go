@@ -84,6 +84,8 @@ func Routes(d Deps) []Route {
 		{http.MethodGet, "/transactions", h.listTransactions},
 		{http.MethodGet, "/transactions/{id}", h.getTransaction},
 		{http.MethodGet, "/events", h.listEvents},
+		{http.MethodPost, "/payment-requests/{id}/stk-push", h.sendSTKPush},
+		{http.MethodGet, "/stk-pushes/{id}", h.getSTKPush},
 	}
 }
 

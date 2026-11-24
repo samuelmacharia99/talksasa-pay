@@ -24,6 +24,9 @@ import (
 const (
 	QueueWebhooks    = "webhooks"
 	QueueMaintenance = "maintenance"
+	// QueueMpesa processes Safaricom callbacks and STK status checks. Kept
+	// apart so a webhook backlog never delays recording money.
+	QueueMpesa = "mpesa"
 )
 
 // WebhookArgs asks the worker to deliver one event to its product.
@@ -67,6 +70,46 @@ func (RetentionArgs) Kind() string { return "retention" }
 // InsertOpts implements river.JobArgsWithInsertOpts.
 func (RetentionArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{Queue: QueueMaintenance, MaxAttempts: 3, UniqueOpts: river.UniqueOpts{ByPeriod: time.Hour}}
+}
+
+// ProcessCallbackArgs asks the worker to process one stored Daraja
+// callback (mpesa_callbacks row). Inserted in the same transaction as the
+// row, so every stored callback gets processed.
+type ProcessCallbackArgs struct {
+	CallbackID uuid.UUID `json:"callback_id"`
+}
+
+// Kind implements river.JobArgs.
+func (ProcessCallbackArgs) Kind() string { return "mpesa_process_callback" }
+
+// ProcessCallbackMaxAttempts: retries cover DB outages; processing is
+// idempotent (receipt uniqueness, row locks), so retrying is always safe.
+const ProcessCallbackMaxAttempts = 20
+
+// InsertOpts implements river.JobArgsWithInsertOpts.
+func (ProcessCallbackArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		Queue: QueueMpesa, MaxAttempts: ProcessCallbackMaxAttempts,
+		UniqueOpts: river.UniqueOpts{ByArgs: true},
+	}
+}
+
+// EnqueueCallback inserts the processing job for a stored callback in tx.
+func (e *Enqueuer) EnqueueCallback(ctx context.Context, tx pgx.Tx, callbackID uuid.UUID) error {
+	_, err := e.c.InsertTx(ctx, tx, ProcessCallbackArgs{CallbackID: callbackID}, nil)
+	return err
+}
+
+// STKSweepArgs runs the periodic STK status check (STK query for pushes
+// whose callback is late; give up on pushes stuck before Daraja answered).
+type STKSweepArgs struct{}
+
+// Kind implements river.JobArgs.
+func (STKSweepArgs) Kind() string { return "mpesa_stk_sweep" }
+
+// InsertOpts implements river.JobArgsWithInsertOpts.
+func (STKSweepArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{Queue: QueueMpesa, MaxAttempts: 3, UniqueOpts: river.UniqueOpts{ByPeriod: 15 * time.Second}}
 }
 
 // Client is a River client over pgx.

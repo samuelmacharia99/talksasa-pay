@@ -29,12 +29,19 @@ const (
 	TransactionAllocated        = "transaction.allocated"
 	TransactionReversed         = "transaction.reversed"
 	PayerCreditChanged          = "payer.credit_changed" //nolint:gosec // event name, not a credential
+	// STK push lifecycle (Phase 2). The money itself is reported by
+	// transaction.allocated / payment_request.paid as usual.
+	STKPushSent        = "stk_push.sent"         // prompt is on the customer's phone
+	STKPushSucceeded   = "stk_push.succeeded"    // customer paid; receipt recorded
+	STKPushFailed      = "stk_push.failed"       // cancelled, timed out, insufficient funds, rejected...
+	STKPushNeedsReview = "stk_push.needs_review" // Safaricom says paid but sent no receipt: staff are checking
 )
 
 // AllTypes lists every event type (docs, contract tests, SDKs).
 var AllTypes = []string{
 	PaymentRequestCreated, PaymentRequestPartiallyPaid, PaymentRequestPaid, PaymentRequestReopened,
 	PaymentRequestCancelled, PaymentRequestExpired, TransactionAllocated, TransactionReversed, PayerCreditChanged,
+	STKPushSent, STKPushSucceeded, STKPushFailed, STKPushNeedsReview,
 }
 
 // ErrNoTx means Emit was called outside a transaction. Events must commit
@@ -110,6 +117,16 @@ func (e *Emitter) EmitTransaction(ctx context.Context, q *store.Queries, product
 		return fmt.Errorf("events: load allocations: %w", err)
 	}
 	_, err = e.Emit(ctx, q, productID, typ, "transaction", txnID, e.view.Transaction(t, allocs))
+	return err
+}
+
+// EmitSTKPush emits typ with the push's current state as data.
+func (e *Emitter) EmitSTKPush(ctx context.Context, q *store.Queries, productID, pushID uuid.UUID, typ string) error {
+	p, err := q.GetSTKPushForProduct(ctx, store.GetSTKPushForProductParams{ProductID: productID, ID: pushID})
+	if err != nil {
+		return fmt.Errorf("events: load stk push: %w", err)
+	}
+	_, err = e.Emit(ctx, q, productID, typ, "stk_push", pushID, apiview.STKPushOf(p))
 	return err
 }
 

@@ -22,6 +22,14 @@ info:
     `idempotency_conflict`); cancel is a no-op on an already-cancelled
     request.
 
+    **M-Pesa prompts (STK push).** `POST /payment-requests/{id}/stk-push`
+    sends a payment prompt to the customer's phone for the request's full
+    outstanding balance. A 202 only means the prompt was sent; the money is
+    confirmed by the `payment_request.paid` / `transaction.allocated` events
+    (and `stk_push.*` events report the prompt's own fate). A request is
+    only ever marked paid once Safaricom has confirmed it with an M-Pesa
+    receipt.
+
     **Events.** Every change is delivered as a signed webhook AND is
     available from `GET /events`, a gap-free feed. Webhooks are at least once
     and may arrive out of order: de-duplicate by event `id`, and when in
@@ -235,6 +243,73 @@ paths:
                   has_more: { type: boolean }
         default: { $ref: "#/components/responses/Problem" }
 
+  /payment-requests/{id}/stk-push:
+    parameters:
+      - $ref: "#/components/parameters/ID"
+    post:
+      operationId: sendSTKPush
+      summary: Send an M-Pesa payment prompt for the request's outstanding balance
+      description: |
+        Asks Safaricom to show "Pay KES <outstanding> to Talksasa" on the
+        customer's phone. The amount is always the full outstanding balance
+        (at most KES 250,000; larger balances get 409 `amount_too_large` and
+        must be paid by paybill). Only one prompt per request can be live at
+        a time (409 `stk_in_progress` with the live push's id in `detail`).
+
+        The response is 202 with the push. Its outcome arrives as events:
+        `stk_push.sent` → then `stk_push.succeeded` with `payment_request.paid`
+        (or `.partially_paid`) and `transaction.allocated`, or
+        `stk_push.failed` (`result_code` / `result_desc`: cancelled by the
+        customer, timed out, insufficient funds, wrong PIN...). If Safaricom
+        never calls back, Talksasa checks with Safaricom after about a minute;
+        a success without a receipt becomes `stk_push.needs_review` while staff
+        confirm it — do NOT treat that as paid.
+
+        Requires an `Idempotency-Key`: the same key returns the same push
+        (200, `Idempotent-Replayed: true`); the same key with a different
+        phone is 409 `idempotency_conflict`. On `503 timeout` retry with the
+        SAME key: a new key could send the customer a second prompt.
+
+        503 `mpesa_unavailable`: M-Pesa is not enabled in this environment.
+        502 `mpesa_error`: Safaricom refused or failed to send the prompt
+        (the push is returned as `failed` in the problem's `detail`; nothing
+        was charged). Ask the customer to pay by paybill or try again later.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/STKPushInput" }
+      responses:
+        "202":
+          description: Prompt sent (or being sent) to the phone
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/STKPush" }
+        "200":
+          description: Replay of an earlier identical request (same Idempotency-Key)
+          headers:
+            Idempotent-Replayed: { schema: { type: string, enum: ["true"] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/STKPush" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /stk-pushes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ID"
+    get:
+      operationId: getSTKPush
+      summary: One STK push
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/STKPush" }
+        default: { $ref: "#/components/responses/Problem" }
+
 webhooks:
   event:
     post:
@@ -313,6 +388,8 @@ components:
             validation_failed, invalid_json, unsupported_media_type,
             idempotency_key_required, idempotency_conflict,
             duplicate_reference, payer_closed, not_cancellable,
+            not_payable, amount_too_large, stk_in_progress,
+            mpesa_unavailable, mpesa_error,
             payload_too_large, internal_error.
         request_id: { type: string }
         errors:
@@ -432,6 +509,39 @@ components:
         occurred_at: { type: [string, "null"], format: date-time }
         created_at: { type: string, format: date-time }
         completed_at: { type: [string, "null"], format: date-time }
+    STKPushInput:
+      type: object
+      additionalProperties: false
+      required: [phone]
+      properties:
+        phone:
+          type: string
+          description: "Safaricom number to prompt: 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX or +2547XXXXXXXX"
+          maxLength: 20
+    STKPush:
+      type: object
+      required: [object, id, payment_request_id, transaction_id, status, amount, phone, checkout_request_id, result_code, result_desc, created_at, updated_at, completed_at]
+      properties:
+        object: { type: string, const: stk_push }
+        id: { type: string, format: uuid }
+        payment_request_id: { type: string, format: uuid }
+        transaction_id: { type: string, format: uuid, description: "The M-Pesa transaction this push will complete (pending until Safaricom answers)" }
+        status:
+          type: string
+          enum: [initiating, sent, succeeded, failed, needs_review]
+          description: |
+            initiating: being sent to Safaricom. sent: on the customer's phone.
+            succeeded: paid (receipt recorded). failed: see result_code/result_desc.
+            needs_review: Safaricom reported success without a receipt; staff
+            are confirming. Not paid until payment_request.paid arrives.
+        amount: { type: integer }
+        phone: { type: string, description: Masked }
+        checkout_request_id: { type: [string, "null"], description: "Safaricom's CheckoutRequestID (quote it to support)" }
+        result_code: { type: [string, "null"], description: "Safaricom result code, e.g. 1032 = cancelled by the customer, 1037 = phone unreachable, 1 = insufficient funds, 2001 = wrong PIN" }
+        result_desc: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        completed_at: { type: [string, "null"], format: date-time }
     CreditChange:
       type: object
       required: [payer, delta, credit_balance, transaction_id]
@@ -458,11 +568,16 @@ components:
             - transaction.allocated
             - transaction.reversed
             - payer.credit_changed
+            - stk_push.sent
+            - stk_push.succeeded
+            - stk_push.failed
+            - stk_push.needs_review
         api_version: { type: string }
         created_at: { type: string, format: date-time }
         data:
-          description: "payment_request.* -> PaymentRequest; transaction.* -> Transaction; payer.credit_changed -> CreditChange (state at the time of the event)"
+          description: "payment_request.* -> PaymentRequest; transaction.* -> Transaction; payer.credit_changed -> CreditChange; stk_push.* -> STKPush (state at the time of the event)"
           oneOf:
             - $ref: "#/components/schemas/PaymentRequest"
             - $ref: "#/components/schemas/Transaction"
             - $ref: "#/components/schemas/CreditChange"
+            - $ref: "#/components/schemas/STKPush"

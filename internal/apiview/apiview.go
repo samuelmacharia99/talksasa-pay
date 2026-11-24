@@ -194,3 +194,44 @@ func utcPtr(t *time.Time) *time.Time {
 	u := t.UTC()
 	return &u
 }
+
+// STKPush is a payment prompt sent to a customer's phone.
+//
+// status: "initiating" (being sent to Safaricom), "sent" (on the phone),
+// "succeeded" (paid; see transaction_id), "failed" (result_code/result_desc
+// say why: cancelled, timed out, insufficient funds...), "needs_review"
+// (Safaricom reported success without a receipt; staff are confirming it —
+// do not treat as paid until payment_request.paid arrives).
+type STKPush struct {
+	Object            string     `json:"object"` // "stk_push"
+	ID                uuid.UUID  `json:"id"`
+	PaymentRequestID  uuid.UUID  `json:"payment_request_id"`
+	TransactionID     uuid.UUID  `json:"transaction_id"`
+	Status            string     `json:"status"`
+	Amount            int64      `json:"amount"`
+	Phone             string     `json:"phone"` // masked
+	CheckoutRequestID *string    `json:"checkout_request_id"`
+	ResultCode        *string    `json:"result_code"`
+	ResultDesc        *string    `json:"result_desc"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	CompletedAt       *time.Time `json:"completed_at"`
+}
+
+// STKPushStatus maps the stored status to the public one.
+func STKPushStatus(s store.StkPushStatus) string {
+	if s == store.StkPushStatusUnknown {
+		return "needs_review"
+	}
+	return string(s)
+}
+
+// STKPushOf renders a push.
+func STKPushOf(p store.StkPush) STKPush {
+	return STKPush{
+		Object: "stk_push", ID: p.ID, PaymentRequestID: p.PaymentRequestID, TransactionID: p.TransactionID,
+		Status: STKPushStatus(p.Status), Amount: p.Amount, Phone: tlog.MaskPhone(p.Phone),
+		CheckoutRequestID: p.CheckoutRequestID, ResultCode: p.ResultCode, ResultDesc: p.ResultDesc,
+		CreatedAt: p.CreatedAt.UTC(), UpdatedAt: p.UpdatedAt.UTC(), CompletedAt: utcPtr(p.CompletedAt),
+	}
+}
