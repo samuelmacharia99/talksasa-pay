@@ -118,10 +118,16 @@ Each Talksasa Pay event type has its own Laravel event class in
 | `transaction.allocated` | `TransactionAllocated` |
 | `transaction.reversed` | `TransactionReversed` |
 | `payer.credit_changed` | `PayerCreditChanged` |
+| `stk_push.sent` | `StkPushSent` |
+| `stk_push.succeeded` | `StkPushSucceeded` |
+| `stk_push.failed` | `StkPushFailed` |
+| `stk_push.needs_review` | `StkPushNeedsReview` |
 | any of the above | `WebhookReceived` (dispatched after the specific one) |
 
 Every event has `$event` (the envelope) and `$source` (`webhook` or `poll`).
-Payment request events also have `$paymentRequest`.
+Payment request events also have `$paymentRequest`; transaction events
+`$transaction`; `stk_push.*` events `$stkPush` (a `Talksasa\Pay\Model\StkPush`
+with `status`, `resultCode`, `resultDesc`, `checkoutRequestId`).
 
 Use a queued listener so the webhook is answered within 10 seconds, and
 re-read the request before you change an invoice:
@@ -156,6 +162,87 @@ class SyncInvoice implements ShouldQueue
 Register it the usual way (Laravel discovers listeners by type-hint, or add
 it in `EventServiceProvider`). Keep listeners idempotent: setting a status is
 safe to repeat, adding to a balance is not.
+
+## Pay invoice button
+
+Send the M-Pesa prompt straight to the customer's phone from your own
+"Pay invoice" button. The full flow, statuses and error codes are in
+[M-Pesa payment prompts](stk-push.md).
+
+**The rule: the invoice becomes paid only in the `PaymentRequestPaid`
+listener.** `StkPushSent` and `StkPushNeedsReview` are never payment.
+
+```php
+namespace App\Http\Controllers;
+
+use App\Models\Invoice;
+use Illuminate\Http\Request;
+use Talksasa\Pay\Exception\{AmountTooLargeException, MpesaErrorException, MpesaUnavailableException,
+    NotPayableException, StkInProgressException, ValidationException};
+use TalksasaPay;
+
+class PayInvoiceController
+{
+    public function __invoke(Request $request, Invoice $invoice)
+    {
+        $phone = $request->validate(['phone' => ['required', 'string', 'max:20']])['phone'];
+
+        // Create the payment request, or get the same one back on a second
+        // click or after a crash: the idempotency key makes this safe.
+        $pr = TalksasaPay::createPaymentRequest(
+            payer: (string) $invoice->user_id,
+            reference: $invoice->number,
+            description: "Invoice {$invoice->number}",
+            amount: $invoice->total_kes,
+            idempotencyKey: "invoice-{$invoice->id}-v1",
+        );
+        $invoice->update(['talksasa_request_id' => $pr->id, 'stk_message' => null]);
+        if ($pr->isPaid()) {
+            return to_route('invoices.show', $invoice);      // credit already covered it
+        }
+
+        try {
+            // A fresh key per click; the SDK reuses it on its own retries,
+            // so one click never sends two prompts.
+            TalksasaPay::stkPush($pr->id, $phone);
+        } catch (StkInProgressException) {
+            // Already on their phone: same screen.
+        } catch (ValidationException) {
+            return back()->withErrors(['phone' => 'Enter a Safaricom number, e.g. 0712 345 678.']);
+        } catch (AmountTooLargeException | NotPayableException | MpesaUnavailableException | MpesaErrorException) {
+            return view('invoices.paybill', ['paybill' => $pr->paybill]);   // pay by paybill instead
+        }
+
+        return view('invoices.check-phone', ['invoice' => $invoice]);
+        // "Check your phone and enter your M-Pesa PIN." Poll your own
+        // endpoint for $invoice->status and $invoice->stk_message.
+    }
+}
+```
+
+```php
+use Talksasa\Pay\Laravel\Events\{PaymentRequestPaid, StkPushFailed};
+
+// The ONLY place an invoice becomes paid.
+Event::listen(function (PaymentRequestPaid $e) {
+    Invoice::where('talksasa_request_id', $e->paymentRequest->id)
+        ->where('status', '!=', 'paid')
+        ->update(['status' => 'paid', 'paid_at' => $e->paymentRequest->paidAt]);
+});
+
+// Cancelled, timed out, insufficient funds, wrong PIN...: show why, offer a retry.
+Event::listen(function (StkPushFailed $e) {
+    Invoice::where('talksasa_request_id', $e->stkPush->paymentRequestId)
+        ->where('status', '!=', 'paid')
+        ->update(['stk_message' => $e->stkPush->resultDesc ?? 'The payment prompt failed.']);
+});
+```
+
+On the "check your phone" screen, when `stk_message` is set, show it with a
+**Try again** button (posting to the same controller) and the paybill steps
+(`$pr->paybill->businessNumber`, account `$pr->paybill->accountNumber`).
+Optionally show "We're confirming your payment with Safaricom" on
+`StkPushNeedsReview`, without changing the invoice.
 
 ## Poll the events feed
 
@@ -194,3 +281,6 @@ absorbs but takes time.
 - [ ] Your production servers' outbound IPs sent to staff for the key's
       allow-list.
 - [ ] You handle `payment_request.reopened` (reversals) as well as `paid`.
+- [ ] If you send M-Pesa prompts: the invoice is marked paid only on
+      `payment_request.paid`; `stk_push.failed` shows the reason with a
+      retry and the paybill; tested end to end on staging (Daraja sandbox).

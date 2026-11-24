@@ -14,6 +14,8 @@ use Talksasa\Pay\Client;
  * @method static \Talksasa\Pay\Model\PaymentRequest createPaymentRequest(string $payer, string $reference, string $description, int $amount, ?\DateTimeInterface $expiresAt = null, ?string $idempotencyKey = null)
  * @method static \Talksasa\Pay\Model\PaymentRequest getPaymentRequest(string $id)
  * @method static \Talksasa\Pay\Model\PaymentRequest cancelPaymentRequest(string $id)
+ * @method static \Talksasa\Pay\Model\StkPush stkPush(string $paymentRequestId, string $phone, ?string $idempotencyKey = null)
+ * @method static \Talksasa\Pay\Model\StkPush getStkPush(string $id)
  * @method static \Talksasa\Pay\Model\Page listPaymentRequests(?string $status = null, ?string $reference = null, ?string $payer = null, ?string $cursor = null, ?int $limit = null)
  * @method static \Generator paymentRequests(?string $status = null, ?string $reference = null, ?string $payer = null, ?int $pageSize = null)
  * @method static \Talksasa\Pay\Model\Page listTransactions(?string $payer = null, ?\DateTimeInterface $since = null, ?string $cursor = null, ?int $limit = null)

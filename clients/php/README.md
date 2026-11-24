@@ -105,6 +105,101 @@ return redirect()->away($request->payUrl);
 
 Or inject `Talksasa\Pay\Client` instead of using the facade.
 
+### "Pay invoice" button: send an M-Pesa payment prompt
+
+Instead of redirecting to the pay page, you can send the M-Pesa prompt
+(STK push) straight to the customer's phone. They see "Pay KES 1,500 to
+Talksasa" and enter their PIN. The prompt is always for the request's full
+outstanding balance (at most KES 250,000).
+
+**The golden rule: mark the invoice paid only on `payment_request.paid`.**
+`stk_push.sent` means the prompt reached the phone; `stk_push.needs_review`
+means Safaricom said "paid" without a receipt and Talksasa staff are checking.
+Neither is money.
+
+```php
+// app/Http/Controllers/PayInvoiceController.php
+use Illuminate\Http\Request;
+use Talksasa\Pay\Exception\{AmountTooLargeException, MpesaErrorException, MpesaUnavailableException,
+    NotPayableException, StkInProgressException, ValidationException};
+use Talksasa\Pay\Laravel\Facades\TalksasaPay;
+
+final class PayInvoiceController
+{
+    public function __invoke(Request $request, Invoice $invoice)
+    {
+        $phone = $request->validate(['phone' => ['required', 'string', 'max:20']])['phone'];
+
+        // 1. Create the payment request for this invoice, or get the same one
+        //    back: the idempotency key makes a second click (or a retry after
+        //    a crash) return the original request.
+        $pr = TalksasaPay::createPaymentRequest(
+            payer: (string) $invoice->user_id,           // upserted earlier, see above
+            reference: $invoice->number,
+            description: "Invoice {$invoice->number}",
+            amount: $invoice->total_kes,
+            idempotencyKey: "invoice-{$invoice->id}-v1",
+        );
+        $invoice->update(['talksasa_request_id' => $pr->id, 'stk_message' => null]);
+        if ($pr->isPaid()) {                              // credit covered it
+            return to_route('invoices.show', $invoice);
+        }
+
+        // 2. Send the prompt. The client sends an Idempotency-Key and retries
+        //    timeouts/429/503 with that SAME key, so one call = at most one prompt.
+        try {
+            TalksasaPay::stkPush($pr->id, $phone);
+        } catch (StkInProgressException) {
+            // A prompt is already on their phone: same "check your phone" screen.
+        } catch (ValidationException) {
+            return back()->withErrors(['phone' => 'Enter a Safaricom number, e.g. 0712 345 678.']);
+        } catch (AmountTooLargeException | NotPayableException | MpesaUnavailableException | MpesaErrorException) {
+            // Prompts are not possible right now: show the paybill steps.
+            return view('invoices.paybill', ['paybill' => $pr->paybill]);
+        }
+
+        return view('invoices.check-phone', ['invoice' => $invoice]);
+        // "Check your phone and enter your M-Pesa PIN." The page polls your
+        // own endpoint, which reads $invoice->status and $invoice->stk_message.
+    }
+}
+```
+
+The listeners (queued in a real app):
+
+```php
+use Talksasa\Pay\Laravel\Events\{PaymentRequestPaid, StkPushFailed};
+
+// The ONLY place the invoice becomes paid.
+Event::listen(function (PaymentRequestPaid $e) {
+    Invoice::where('talksasa_request_id', $e->paymentRequest->id)
+        ->where('status', '!=', 'paid')                  // idempotent
+        ->update(['status' => 'paid', 'paid_at' => $e->paymentRequest->paidAt]);
+});
+
+// The prompt was cancelled, timed out, wrong PIN, insufficient funds...
+Event::listen(function (StkPushFailed $e) {
+    Invoice::where('talksasa_request_id', $e->stkPush->paymentRequestId)
+        ->where('status', '!=', 'paid')
+        ->update(['stk_message' => $e->stkPush->resultDesc ?? 'The payment prompt failed.']);
+});
+```
+
+On the "check your phone" page, when `stk_message` is set show it with a
+**Try again** button (which posts to the same controller; a new prompt is
+allowed once the old one has failed) and the paybill instructions
+(`$pr->paybill->businessNumber`, account `$pr->paybill->accountNumber`) as
+the fallback. Don't listen for `StkPushSent` / `StkPushNeedsReview` to
+change the invoice; at most show "We're confirming your payment".
+
+`TalksasaPay::getStkPush($id)` reads a prompt's current state if you need it
+(`$push->status`: `initiating`, `sent`, `succeeded`, `failed`,
+`needs_review`; `$push->resultCode`, `$push->resultDesc`,
+`$push->checkoutRequestId` to quote to support).
+
+Testing in the Safaricom sandbox and the full flow: `docs/api/stk-push.md`
+in the Talksasa Pay repository.
+
 ### Handle webhooks
 
 Register the route (in `routes/web.php` or `routes/api.php`):
@@ -132,6 +227,10 @@ and dispatches Laravel events:
 | `transaction.allocated` | `TransactionAllocated` | `$e->transaction` |
 | `transaction.reversed` | `TransactionReversed` | `$e->transaction` |
 | `payer.credit_changed` | `PayerCreditChanged` | `$e->creditChange` |
+| `stk_push.sent` (prompt on the phone, not paid) | `StkPushSent` | `$e->stkPush` |
+| `stk_push.succeeded` (receipt recorded; `payment_request.paid` follows) | `StkPushSucceeded` | `$e->stkPush` |
+| `stk_push.failed` (cancelled, timed out, ...: `resultDesc`) | `StkPushFailed` | `$e->stkPush` |
+| `stk_push.needs_review` (success without receipt, staff checking; not paid) | `StkPushNeedsReview` | `$e->stkPush` |
 | every event, incl. future types | `WebhookReceived` | `$e->event` |
 
 All live in `Talksasa\Pay\Laravel\Events`, carry the raw `$e->event`
@@ -259,6 +358,11 @@ foreach ($client->transactions(since: new DateTimeImmutable('-1 day')) as $txn) 
   (`DuplicateReferenceException`): look it up with
   `listPaymentRequests(reference: ...)`.
 - After a `TransportException` on a create, retry with the **same** key.
+- `stkPush` always sends a key too (random unless you pass one), and its
+  automatic retries reuse it, so one call never sends two prompts. Only one
+  prompt per request can be live anyway (`StkInProgressException`). To try
+  again after a **failed** prompt, call `stkPush` again with a new (or no)
+  key: the old key would just return the failed prompt.
 
 ## Errors
 
@@ -271,9 +375,9 @@ Every exception implements `Talksasa\Pay\Exception\TalksasaPayException`.
 | `PermissionDeniedException` | 403 `ip_not_allowed`, `product_suspended` |
 | `NotFoundException` | 404 `not_found` |
 | `ValidationException` | `validation_failed` (see `$fieldErrors`), `invalid_json`, `idempotency_key_required`, `unsupported_media_type`, `payload_too_large` |
-| `ConflictException` | 409; subclasses `DuplicateReferenceException`, `IdempotencyConflictException`, `NotCancellableException`, `PayerClosedException` |
+| `ConflictException` | 409; subclasses `DuplicateReferenceException`, `IdempotencyConflictException`, `NotCancellableException`, `PayerClosedException`, and for `stkPush`: `StkInProgressException` (a prompt is already live; `liveStkPushId()`), `NotPayableException` (paid, cancelled or expired), `AmountTooLargeException` (above KES 250,000: use the paybill) |
 | `RateLimitedException` | 429 after retries (or a Retry-After too long to wait inline) |
-| `ServerException` | 5xx after retries |
+| `ServerException` | 5xx after retries; subclasses (never retried) `MpesaUnavailableException` (503 `mpesa_unavailable`: prompts are off) and `MpesaErrorException` (502 `mpesa_error`: Safaricom could not send the prompt; nothing charged) |
 | `TransportException` | no HTTP response (DNS, connect, TLS, timeout) after retries |
 | `UnexpectedResponseException` | 2xx with a body that breaks the contract (never silently zero) |
 
@@ -297,7 +401,8 @@ try {
 ### Retries
 
 Every `/v1` call is idempotent, so the client retries network errors, 429,
-502, 503 and 504 (default 2 retries) with exponential backoff (0.5 s, 1 s,
+502, 503 and 504 (default 2 retries; never the M-Pesa answers
+`mpesa_unavailable` and `mpesa_error`, which are final) with exponential backoff (0.5 s, 1 s,
 ... capped at 8 s, equal jitter). A `Retry-After` header is respected as a
 minimum; one longer than `max_retry_after` is not waited out inline (the
 exception carries `$retryAfter` so a job can `release()` itself). 500 and

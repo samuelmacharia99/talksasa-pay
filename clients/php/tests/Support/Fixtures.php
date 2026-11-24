@@ -83,11 +83,35 @@ final class Fixtures
         ];
     }
 
+    public const STK_ID = '0193a1b2-0000-7000-8000-0000000000cc';
+
+    /** @return array<string,mixed> */
+    public static function stkPush(array $override = []): array
+    {
+        return $override + [
+            'object' => 'stk_push',
+            'id' => self::STK_ID,
+            'payment_request_id' => self::REQUEST_ID,
+            'transaction_id' => self::TXN_ID,
+            'status' => 'sent',
+            'amount' => 1300,
+            'phone' => '2547****5678',
+            'checkout_request_id' => 'ws_CO_241120261015001234',
+            'result_code' => null,
+            'result_desc' => null,
+            'created_at' => '2026-11-30T06:15:00Z',
+            'updated_at' => '2026-11-30T06:15:01.25Z',
+            'completed_at' => null,
+            'future_field' => 1,
+        ];
+    }
+
     /** @return array<string,mixed> */
     public static function event(string $type = 'payment_request.paid', ?array $data = null, string $id = '0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b'): array
     {
         $data ??= match (true) {
             str_starts_with($type, 'transaction.') => self::transaction(),
+            str_starts_with($type, 'stk_push.') => self::stkPush(),
             $type === 'payer.credit_changed' => [
                 'payer' => ['external_ref' => 'cust-77', 'account_number' => 'HOST-1042'],
                 'delta' => 700,

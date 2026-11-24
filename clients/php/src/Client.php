@@ -16,6 +16,8 @@ use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamFactoryInterface;
 use Talksasa\Pay\Exception\ApiException;
+use Talksasa\Pay\Exception\MpesaErrorException;
+use Talksasa\Pay\Exception\MpesaUnavailableException;
 use Talksasa\Pay\Exception\TransportException;
 use Talksasa\Pay\Exception\UnexpectedResponseException;
 use Talksasa\Pay\Http\RetryPolicy;
@@ -27,6 +29,7 @@ use Talksasa\Pay\Model\EventPage;
 use Talksasa\Pay\Model\Page;
 use Talksasa\Pay\Model\Payer;
 use Talksasa\Pay\Model\PaymentRequest;
+use Talksasa\Pay\Model\StkPush;
 use Talksasa\Pay\Model\Transaction;
 use Talksasa\Pay\Model\WhoAmI;
 
@@ -146,10 +149,7 @@ class Client
         if ($expiresAt !== null) {
             $body['expires_at'] = self::formatDate($expiresAt);
         }
-        $key = $idempotencyKey ?? ($this->idempotencyKeys)();
-        if ($key === '' || strlen($key) > 255 || preg_match('/[\x00-\x1f\x7f]/', $key) === 1) {
-            throw new \InvalidArgumentException('Idempotency key must be 1-255 printable characters.');
-        }
+        $key = $this->idempotencyKey($idempotencyKey);
 
         return PaymentRequest::fromArray($this->request('POST', '/payment-requests', body: $body, headers: [
             'Idempotency-Key' => $key,
@@ -169,6 +169,53 @@ class Client
     public function cancelPaymentRequest(string $id): PaymentRequest
     {
         return PaymentRequest::fromArray($this->request('POST', '/payment-requests/' . self::seg($id) . '/cancel'));
+    }
+
+    /**
+     * Sends an M-Pesa payment prompt (STK push) to $phone for the request's
+     * full outstanding balance. Returns as soon as Safaricom has the prompt
+     * (status sent) or Talksasa is still sending it (initiating).
+     *
+     * The prompt's outcome arrives as events: stk_push.succeeded together
+     * with payment_request.paid, or stk_push.failed ($resultDesc says why,
+     * e.g. cancelled by the customer). Mark the invoice paid ONLY on
+     * payment_request.paid, never on stk_push.sent or stk_push.needs_review.
+     *
+     * Always sends an Idempotency-Key, and every automatic retry (network
+     * error, timeout, 429, 503 overloaded/timeout) re-sends the SAME key, so
+     * the customer never gets two prompts from one call. Pass your own key
+     * (e.g. "invoice-{$id}-stk-{$attempt}") to make a retry after a crash
+     * safe too; reuse a key only for the same phone.
+     *
+     * @param string $phone Safaricom number: 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX or +2547XXXXXXXX
+     * @throws Exception\StkInProgressException a prompt for this request is already on a phone
+     * @throws Exception\NotPayableException the request is paid, cancelled or expired
+     * @throws Exception\AmountTooLargeException balance above KES 250,000: use the paybill
+     * @throws Exception\ValidationException not a valid Safaricom number ($fieldErrors)
+     * @throws Exception\MpesaUnavailableException M-Pesa is off in this environment
+     * @throws Exception\MpesaErrorException Safaricom could not send the prompt (nothing charged)
+     * @throws Exception\IdempotencyConflictException key reused with a different phone
+     */
+    public function stkPush(string $paymentRequestId, string $phone, ?string $idempotencyKey = null): StkPush
+    {
+        $phone = trim($phone);
+        if ($phone === '' || strlen($phone) > 20) {
+            throw new \InvalidArgumentException('Phone must be 1-20 characters, e.g. 0712345678.');
+        }
+        $key = $this->idempotencyKey($idempotencyKey);
+
+        return StkPush::fromArray($this->request(
+            'POST',
+            '/payment-requests/' . self::seg($paymentRequestId) . '/stk-push',
+            body: ['phone' => $phone],
+            headers: ['Idempotency-Key' => $key],
+        ));
+    }
+
+    /** One payment prompt, e.g. to check its status while waiting for events. */
+    public function getStkPush(string $id): StkPush
+    {
+        return StkPush::fromArray($this->request('GET', '/stk-pushes/' . self::seg($id)));
     }
 
     /**
@@ -350,6 +397,11 @@ class Client
                 return self::decode($response);
             }
             if ($idempotent && RetryPolicy::isRetryableStatus($status)) {
+                $error = ApiException::fromResponse($response);
+                if ($error instanceof MpesaUnavailableException || $error instanceof MpesaErrorException) {
+                    // Final answers about M-Pesa, not overload: retrying would not help.
+                    throw $error;
+                }
                 $retry++;
                 $retryAfter = ApiException::parseRetryAfter($response->getHeaderLine('Retry-After'));
                 $delay = $this->retryPolicy->delay($retry, $retryAfter);
@@ -360,6 +412,15 @@ class Client
             }
             throw ApiException::fromResponse($response);
         }
+    }
+
+    private function idempotencyKey(?string $given): string
+    {
+        $key = $given ?? ($this->idempotencyKeys)();
+        if ($key === '' || strlen($key) > 255 || preg_match('/[\x00-\x1f\x7f]/', $key) === 1) {
+            throw new \InvalidArgumentException('Idempotency key must be 1-255 printable characters.');
+        }
+        return $key;
     }
 
     /** @return array<string,mixed> */

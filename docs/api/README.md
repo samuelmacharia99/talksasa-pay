@@ -12,6 +12,7 @@ money through this API. You ask for money and you read what happened.
 |---|---|
 | [Authentication](authentication.md) | You get your first key, rotate a key, or restrict a key to your servers |
 | [Idempotency and retries](idempotency-and-retries.md) | You write the code that calls the API |
+| [M-Pesa payment prompts](stk-push.md) | You want a "Pay invoice" button that sends the M-Pesa prompt to the customer's phone |
 | [Webhooks](webhooks.md) | You build the endpoint that hears about payments |
 | [Events feed](events-feed.md) | You want a backstop so no payment is ever missed |
 | [Money rules](money-rules.md) | You need to know how payments are applied to bills |
@@ -112,8 +113,10 @@ If the call times out, send exactly the same request again with the same
 ### 4. Send the customer to `pay_url`
 
 Redirect the customer, or email or SMS them the link. The hosted page shows
-the bill, the amount still owed and how to pay it by M-Pesa. You don't build
-any payment screens. Customers who prefer the M-Pesa menu can also pay to the
+the bill, the amount still owed and how to pay it by M-Pesa: the customer
+can type their number to get the M-Pesa prompt on their phone, or follow the
+paybill steps. You don't build any payment screens. (To send the prompt from
+your own screen instead, see [M-Pesa payment prompts](stk-push.md).) Customers who prefer the M-Pesa menu can also pay to the
 paybill with their account number directly.
 
 ### 5. Receive the webhook

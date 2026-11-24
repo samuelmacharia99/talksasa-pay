@@ -17,6 +17,14 @@ final class EventType
     public const TRANSACTION_ALLOCATED = 'transaction.allocated';
     public const TRANSACTION_REVERSED = 'transaction.reversed';
     public const PAYER_CREDIT_CHANGED = 'payer.credit_changed';
+    /** The M-Pesa prompt is on the customer's phone. NOT paid. */
+    public const STK_PUSH_SENT = 'stk_push.sent';
+    /** Safaricom confirmed the prompt with a receipt; payment_request.paid/partially_paid follows. */
+    public const STK_PUSH_SUCCEEDED = 'stk_push.succeeded';
+    /** The prompt failed (cancelled, timed out, insufficient funds, wrong PIN...). See result_desc. */
+    public const STK_PUSH_FAILED = 'stk_push.failed';
+    /** Safaricom reported success without a receipt; staff are confirming. NOT paid. */
+    public const STK_PUSH_NEEDS_REVIEW = 'stk_push.needs_review';
 
     public const ALL = [
         self::PAYMENT_REQUEST_CREATED,
@@ -28,6 +36,10 @@ final class EventType
         self::TRANSACTION_ALLOCATED,
         self::TRANSACTION_REVERSED,
         self::PAYER_CREDIT_CHANGED,
+        self::STK_PUSH_SENT,
+        self::STK_PUSH_SUCCEEDED,
+        self::STK_PUSH_FAILED,
+        self::STK_PUSH_NEEDS_REVIEW,
     ];
 
     private function __construct()

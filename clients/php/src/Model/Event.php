@@ -14,6 +14,7 @@ use Talksasa\Pay\Internal\Data;
  *   payment_request.* -> PaymentRequest
  *   transaction.*     -> Transaction
  *   payer.credit_changed -> CreditChange
+ *   stk_push.*        -> StkPush
  * An event type this version does not know has $data = null; its raw JSON
  * is always in $rawData.
  *
@@ -30,7 +31,7 @@ final readonly class Event
         public string $type,
         public string $apiVersion,
         public DateTimeImmutable $createdAt,
-        public PaymentRequest|Transaction|CreditChange|null $data,
+        public PaymentRequest|Transaction|CreditChange|StkPush|null $data,
         public array $rawData,
     ) {
     }
@@ -45,6 +46,7 @@ final readonly class Event
             str_starts_with($type, 'payment_request.') => PaymentRequest::fromArray($raw),
             str_starts_with($type, 'transaction.') => Transaction::fromArray($raw),
             $type === EventType::PAYER_CREDIT_CHANGED => CreditChange::fromArray($raw),
+            str_starts_with($type, 'stk_push.') => StkPush::fromArray($raw),
             default => null,
         };
 
@@ -92,6 +94,14 @@ final readonly class Event
     {
         if (!$this->data instanceof CreditChange) {
             throw new \LogicException("Event {$this->type} does not carry a credit change.");
+        }
+        return $this->data;
+    }
+
+    public function stkPush(): StkPush
+    {
+        if (!$this->data instanceof StkPush) {
+            throw new \LogicException("Event {$this->type} does not carry an STK push.");
         }
         return $this->data;
     }

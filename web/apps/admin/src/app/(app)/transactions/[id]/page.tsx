@@ -1,17 +1,21 @@
+import { formatKes } from "@talksasa/money";
 import { Amount, DateTime, Status, Table, Td, Th } from "@talksasa/ui";
 import type { Metadata } from "next";
 import Link from "next/link";
 
 import { Facts, PageHeader, Panel } from "@/components/PageHeader";
-import { load } from "@/lib/api";
+import { getMe, load } from "@/lib/api";
 import { actorLabel, BATCH_KIND, CHANNEL, KIND } from "@/lib/labels";
+
+import { ResolvePanel } from "./ResolvePanel";
 
 export const metadata: Metadata = { title: "Transaction" };
 
 export default async function TransactionPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const t = await load((c) => c.GET("/transactions/{id}", { params: { path: { id } } }));
+  const [t, me] = await Promise.all([load((c) => c.GET("/transactions/{id}", { params: { path: { id } } })), getMe()]);
   const out = t.direction === "out";
+  const canResolve = t.status === "needs_review" && t.channel === "mpesa_stk" && me.permissions.includes("payments.resolve");
   return (
     <>
       <PageHeader
@@ -35,6 +39,18 @@ export default async function TransactionPage({ params }: { params: Promise<{ id
         actions={<Status value={t.status} className="text-sm" />}
       />
       <div className="grid gap-6">
+        {canResolve ? (
+          <Panel title="Resolve this payment">
+            <ResolvePanel id={t.id} amountLabel={formatKes(t.amount)} phone={t.phone} />
+          </Panel>
+        ) : t.status === "needs_review" ? (
+          <Panel>
+            <p className="text-sm text-ink-2">
+              <span className="font-medium text-bad">Waiting for staff review.</span> Safaricom said this was paid but sent no receipt.
+              Finance or an admin confirms it from the M-Pesa portal.
+            </p>
+          </Panel>
+        ) : null}
         <Panel title="Details">
           <Facts
             items={[

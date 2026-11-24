@@ -27,6 +27,13 @@ const (
 	CodeDuplicateReference     = "duplicate_reference"
 	CodePayerClosed            = "payer_closed"
 	CodeNotCancellable         = "not_cancellable"
+	CodeNotPayable             = "not_payable"       // STK push: the request is paid, cancelled or expired
+	CodeAmountTooLarge         = "amount_too_large"  // STK push: balance above KES 250,000; use the paybill
+	CodeSTKInProgress          = "stk_in_progress"   // STK push: a prompt for this request is already live
+	CodeMpesaUnavailable       = "mpesa_unavailable" // 503: M-Pesa prompts are off here; never retried
+	CodeMpesaError             = "mpesa_error"       // 502: Safaricom could not send the prompt; never retried
+	CodeTimeout                = "timeout"
+	CodeBusy                   = "busy"
 	CodePayloadTooLarge        = "payload_too_large"
 	CodeInternalError          = "internal_error"
 )
@@ -80,7 +87,18 @@ func (e *APIError) Error() string {
 }
 
 // Temporary reports whether retrying later may succeed.
-func (e *APIError) Temporary() bool { return retryableStatus(e.Status) || e.Status >= 500 }
+func (e *APIError) Temporary() bool {
+	if e.Code == CodeMpesaUnavailable {
+		return false
+	}
+	return retryableStatus(e.Status) || e.Status >= 500
+}
+
+// finalCode reports codes that arrive with a retryable status (502/503) but
+// are final answers: retrying inline would not help.
+func finalCode(code string) bool {
+	return code == CodeMpesaUnavailable || code == CodeMpesaError
+}
 
 // AsAPIError returns the *APIError in err's chain, if any.
 func AsAPIError(err error) (*APIError, bool) {

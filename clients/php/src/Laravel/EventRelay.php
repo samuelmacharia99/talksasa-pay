@@ -31,6 +31,10 @@ class EventRelay
         EventType::TRANSACTION_ALLOCATED => Events\TransactionAllocated::class,
         EventType::TRANSACTION_REVERSED => Events\TransactionReversed::class,
         EventType::PAYER_CREDIT_CHANGED => Events\PayerCreditChanged::class,
+        EventType::STK_PUSH_SENT => Events\StkPushSent::class,
+        EventType::STK_PUSH_SUCCEEDED => Events\StkPushSucceeded::class,
+        EventType::STK_PUSH_FAILED => Events\StkPushFailed::class,
+        EventType::STK_PUSH_NEEDS_REVIEW => Events\StkPushNeedsReview::class,
     ];
 
     public function __construct(
