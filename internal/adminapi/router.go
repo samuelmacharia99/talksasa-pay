@@ -23,14 +23,19 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/platform/metrics"
 	"github.com/talksasa/talksasa-pay/internal/product"
 	"github.com/talksasa/talksasa-pay/internal/reporting"
+	"github.com/talksasa/talksasa-pay/internal/webhook"
 )
 
 // Deps are the services the admin API needs.
 type Deps struct {
-	Logger         *slog.Logger
-	Admin          *admin.Service
-	Products       *product.Service
-	Reporting      *reporting.Service
+	Logger    *slog.Logger
+	Admin     *admin.Service
+	Products  *product.Service
+	Reporting *reporting.Service
+	// Webhooks serves the webhook-delivery screens and redelivery
+	// (webhook.NewDeliveries(pool, riverClient); an insert-only River
+	// client is enough).
+	Webhooks       *webhook.Deliveries
 	Metrics        *metrics.HTTP
 	TrustedProxies []netip.Prefix
 	MaxBodyBytes   int64
@@ -71,6 +76,11 @@ func Routes(d Deps) []Route {
 		{http.MethodGet, "/products/{id}/api-keys", admin.PermRead, h.listAPIKeys},
 		{http.MethodPost, "/products/{id}/api-keys", admin.PermManageProducts, h.issueAPIKey},
 		{http.MethodPost, "/products/{id}/api-keys/{keyID}/revoke", admin.PermManageProducts, h.revokeAPIKey},
+		{http.MethodPut, "/products/{id}/api-keys/{keyID}/allowed-ips", admin.PermManageProducts, h.setAllowedIPs},
+
+		{http.MethodGet, "/webhook-deliveries", admin.PermRead, h.listWebhookDeliveries},
+		{http.MethodGet, "/webhook-deliveries/{eventID}", admin.PermRead, h.getWebhookDelivery},
+		{http.MethodPost, "/webhook-deliveries/{eventID}/redeliver", admin.PermManageProducts, h.redeliverWebhook},
 
 		{http.MethodGet, "/payers", admin.PermRead, h.listPayers},
 		{http.MethodGet, "/payers/{id}", admin.PermRead, h.getPayer},

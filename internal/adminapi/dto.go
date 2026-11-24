@@ -78,11 +78,23 @@ type apiKeyJSON struct {
 	ExpiresAt  *time.Time `json:"expires_at"`
 	RevokedAt  *time.Time `json:"revoked_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
+	AllowedIPs []string   `json:"allowed_ips"` // null = any address
 }
 
 func toAPIKey(k product.APIKey) apiKeyJSON {
-	return apiKeyJSON{KeyID: k.KeyID, Label: k.Label, CreatedBy: k.CreatedBy, CreatedAt: k.CreatedAt,
+	out := apiKeyJSON{KeyID: k.KeyID, Label: k.Label, CreatedBy: k.CreatedBy, CreatedAt: k.CreatedAt,
 		ExpiresAt: k.ExpiresAt, RevokedAt: k.RevokedAt, LastUsedAt: k.LastUsedAt}
+	if len(k.AllowedCIDRs) > 0 {
+		out.AllowedIPs = make([]string, len(k.AllowedCIDRs))
+		for i, c := range k.AllowedCIDRs {
+			if c.IsSingleIP() {
+				out.AllowedIPs[i] = c.Addr().String()
+			} else {
+				out.AllowedIPs[i] = c.String()
+			}
+		}
+	}
+	return out
 }
 
 type pageJSON[T any] struct {

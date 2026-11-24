@@ -286,6 +286,35 @@ func (s *Service) WebhookSecret(ctx context.Context, id uuid.UUID) ([]byte, erro
 	return s.keys.Open(row.WebhookSecretCiphertext, int(row.WebhookSecretKeyVersion), webhookSecretAAD(id))
 }
 
+// WebhookSecrets decrypts the current signing secret and, during the
+// rotation grace period (WebhookSecretGrace), the previous one. previous is
+// nil when there is none or it has expired. Both values are secrets: never
+// log or return them over the API.
+func (s *Service) WebhookSecrets(ctx context.Context, id uuid.UUID) (current, previous []byte, err error) {
+	row, err := store.New(s.pool).GetProduct(ctx, id)
+	if db.IsNotFound(err) {
+		return nil, nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	current, err = s.keys.Open(row.WebhookSecretCiphertext, int(row.WebhookSecretKeyVersion), webhookSecretAAD(id))
+	if err != nil {
+		return nil, nil, fmt.Errorf("product: open webhook secret: %w", err)
+	}
+	if row.WebhookSecretPrevCiphertext == nil || row.WebhookSecretPrevKeyVersion == nil ||
+		row.WebhookSecretPrevExpiresAt == nil || !row.WebhookSecretPrevExpiresAt.After(s.now()) {
+		return current, nil, nil
+	}
+	// Sealed by RotateWebhookSecret's predecessor with the same AAD (the
+	// ciphertext was moved, not re-encrypted).
+	previous, err = s.keys.Open(row.WebhookSecretPrevCiphertext, int(*row.WebhookSecretPrevKeyVersion), webhookSecretAAD(id))
+	if err != nil {
+		return nil, nil, fmt.Errorf("product: open previous webhook secret: %w", err)
+	}
+	return current, previous, nil
+}
+
 func (s *Service) validateWebhookURL(raw string) (*string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

@@ -19,6 +19,7 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 	"github.com/talksasa/talksasa-pay/internal/reporting"
 	"github.com/talksasa/talksasa-pay/internal/store"
+	"github.com/talksasa/talksasa-pay/internal/webhook"
 )
 
 type apiEnv struct {
@@ -33,6 +34,7 @@ func newAPIEnv(t *testing.T) *apiEnv {
 	rep := reporting.NewService(a.db.App)
 	deps := adminapi.Deps{
 		Logger: a.logger, Admin: a.svc, Products: a.products, Reporting: rep, MaxBodyBytes: 64 << 10,
+		Webhooks:       webhook.NewDeliveries(a.db.App, a.river),
 		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
 		AuthLimiter:    httpx.NewRateLimiter(6000, 6000), // tests exercise auth many times
 	}
@@ -87,7 +89,8 @@ func TestAdminAPIEveryRouteRequiresSessionAndPermission(t *testing.T) {
 		s := e.onboard(string(role)+"@talksasa.co.ke", role)
 		tokens[role] = e.signIn(s).Token
 	}
-	fill := strings.NewReplacer("{id}", "00000000-0000-7000-8000-000000000000", "{keyID}", "abcdefghijklmnopqrst")
+	fill := strings.NewReplacer("{id}", "00000000-0000-7000-8000-000000000000", "{keyID}", "abcdefghijklmnopqrst",
+		"{eventID}", "00000000-0000-7000-8000-000000000000")
 	for _, rt := range adminapi.Routes(e.deps) {
 		if rt.Pattern == "/auth/logout" || rt.Pattern == "/auth/password" {
 			continue // would end the session used by later checks; covered elsewhere
