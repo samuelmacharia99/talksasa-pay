@@ -559,8 +559,12 @@ func (s *Service) CheckIntegrity(ctx context.Context) (Integrity, error) {
 // ---------------------------------------------------------------------------
 
 // PayPage is everything the public pay page may show. It deliberately
-// excludes payer name, phone, email, external ref and internal ids.
+// excludes payer name, phone, email and external ref. RequestID and
+// ProductID are for the server only (sending an STK push, finding the
+// latest one): they must never be rendered to the visitor.
 type PayPage struct {
+	RequestID        uuid.UUID
+	ProductID        uuid.UUID
 	ProductName      string
 	AccountNumber    string
 	ProductReference string
@@ -596,6 +600,7 @@ func (s *Service) PayPageByToken(ctx context.Context, token string) (PayPage, er
 		status = store.PaymentRequestStatusExpired
 	}
 	return PayPage{
+		RequestID: r.ID, ProductID: r.ProductID,
 		ProductName: r.ProductName, AccountNumber: r.AccountNumber, ProductReference: r.ProductReference,
 		Description: r.Description, Amount: r.Amount, AmountPaid: r.AmountPaid, Status: status,
 		ExpiresAt: r.ExpiresAt, PaidAt: r.PaidAt, Payable: payable,

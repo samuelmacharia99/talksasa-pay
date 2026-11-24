@@ -63,7 +63,7 @@ type tenant struct {
 	KeyID string
 }
 
-func newEnv(t *testing.T, limiter *httpx.RateLimiter) *env {
+func newEnv(t *testing.T, limiter *httpx.RateLimiter, opts ...func(*productapi.Deps)) *env {
 	t.Helper()
 	d := testdb.New(t)
 	logs := &syncBuffer{}
@@ -91,10 +91,14 @@ func newEnv(t *testing.T, limiter *httpx.RateLimiter) *env {
 	}
 	root := chi.NewRouter()
 	root.Use(httpx.RequestID, httpx.ClientIP(nil), httpx.Recover(logger))
-	root.Mount("/v1", productapi.NewRouter(productapi.Deps{
+	deps := productapi.Deps{
 		Logger: logger, Pool: d.App, Products: e.products, Payers: e.payers, Requests: e.requests,
 		View: view, KeyLimiter: limiter,
-	}))
+	}
+	for _, o := range opts {
+		o(&deps)
+	}
+	root.Mount("/v1", productapi.NewRouter(deps))
 	e.h = root
 	e.secrets = append(e.secrets, fullPhone, "0712345678", `"hosted_token"`, `"idempotency_key"`, "IdempotencyKey")
 	return e

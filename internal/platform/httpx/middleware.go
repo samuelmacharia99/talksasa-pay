@@ -89,14 +89,41 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
+// AccessLogOption customises AccessLog.
+type AccessLogOption func(*accessLogConfig)
+
+type accessLogConfig struct {
+	redact PathRedactor
+}
+
+// LogPath makes AccessLog also log the request path, passed through redact
+// (which must hide every secret path segment, e.g. tokens). The redacted
+// path is added to the request context's log attributes too, so error and
+// panic logs from inner handlers carry the same safe "path". The raw path is
+// never logged.
+func LogPath(redact PathRedactor) AccessLogOption {
+	return func(c *accessLogConfig) { c.redact = redact }
+}
+
 // AccessLog logs one line per request and records HTTP metrics. It logs the
-// route pattern (not the raw path, which may carry tokens) and never logs
-// headers or bodies.
-func AccessLog(logger *slog.Logger, m *metrics.HTTP) func(http.Handler) http.Handler {
+// route pattern (not the raw path, which may carry tokens; see LogPath for a
+// redacted path) and never logs headers or bodies.
+func AccessLog(logger *slog.Logger, m *metrics.HTTP, opts ...AccessLogOption) func(http.Handler) http.Handler {
+	var cfg accessLogConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			rec := &statusRecorder{ResponseWriter: w}
+			logCtx := r.Context() // without "path": it is added explicitly below
+			var pathAttr []any
+			if cfg.redact != nil {
+				a := slog.String("path", truncate(cfg.redact(r.URL.Path), 200))
+				pathAttr = []any{a}
+				r = r.WithContext(tlog.WithAttrs(r.Context(), a))
+			}
 			next.ServeHTTP(rec, r)
 			if rec.status == 0 {
 				rec.status = http.StatusOK
@@ -118,10 +145,12 @@ func AccessLog(logger *slog.Logger, m *metrics.HTTP) func(http.Handler) http.Han
 			case route == "/healthz" || route == "/readyz":
 				lvl = slog.LevelDebug
 			}
-			logger.Log(r.Context(), lvl, "http request",
+			attrs := append([]any{
 				slog.String("method", r.Method), slog.String("route", route), slog.Int("status", rec.status),
 				slog.Int("bytes", rec.bytes), slog.Float64("duration_ms", float64(el.Microseconds())/1000), slog.String("remote_ip", clientIP(r)),
-				slog.String("user_agent", truncate(r.UserAgent(), 200)))
+				slog.String("user_agent", truncate(r.UserAgent(), 200)),
+			}, pathAttr...)
+			logger.Log(logCtx, lvl, "http request", attrs...)
 		})
 	}
 }

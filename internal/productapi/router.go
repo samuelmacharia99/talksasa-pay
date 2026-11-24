@@ -52,6 +52,9 @@ type Deps struct {
 	Payers   *payer.Service
 	Requests *paymentrequest.Service
 	View     apiview.View
+	// STK sends M-Pesa prompts. nil (M-Pesa off): sending is 503
+	// mpesa_unavailable and GET /stk-pushes/{id} is 404.
+	STK STKService
 	// KeyLimiter is a token bucket per API key (keyed by key id). nil uses
 	// DefaultKeyRatePerMinute / DefaultKeyBurst.
 	KeyLimiter *httpx.RateLimiter
