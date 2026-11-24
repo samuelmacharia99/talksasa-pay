@@ -16,8 +16,12 @@ SELECT * FROM products WHERE account_prefix = @account_prefix;
 SELECT * FROM products ORDER BY account_prefix;
 
 -- name: UpdateProductWebhookSecret :one
+-- The outgoing secret keeps signing until prev_expires_at (rotation grace).
 UPDATE products
-   SET webhook_secret_ciphertext = @webhook_secret_ciphertext,
+   SET webhook_secret_prev_ciphertext  = webhook_secret_ciphertext,
+       webhook_secret_prev_key_version = webhook_secret_key_version,
+       webhook_secret_prev_expires_at  = sqlc.arg(prev_expires_at)::timestamptz,
+       webhook_secret_ciphertext = @webhook_secret_ciphertext,
        webhook_secret_key_version = @webhook_secret_key_version
  WHERE id = @id
 RETURNING *;
@@ -41,7 +45,7 @@ VALUES (@id, @product_id, @key_id, @secret_hash, @label, @created_by, @expires_a
 RETURNING *;
 
 -- name: GetAPIKeyForAuth :one
-SELECT k.id, k.product_id, k.key_id, k.secret_hash, k.expires_at, k.revoked_at, k.last_used_at,
+SELECT k.id, k.product_id, k.key_id, k.secret_hash, k.expires_at, k.revoked_at, k.last_used_at, k.allowed_cidrs,
        p.status AS product_status, p.account_prefix, p.name AS product_name
   FROM product_api_keys k
   JOIN products p ON p.id = k.product_id
@@ -62,3 +66,8 @@ RETURNING *;
 
 -- name: ListAPIKeys :many
 SELECT * FROM product_api_keys WHERE product_id = @product_id ORDER BY created_at;
+
+-- name: SetAPIKeyAllowedCIDRs :one
+UPDATE product_api_keys SET allowed_cidrs = sqlc.narg(allowed_cidrs)::cidr[]
+ WHERE product_id = @product_id AND key_id = @key_id AND revoked_at IS NULL
+RETURNING *;

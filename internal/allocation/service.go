@@ -46,13 +46,42 @@ type Result struct {
 	CreditBalance money.KES
 }
 
-// Service writes allocation plans to the ledger.
-type Service struct {
-	logger *slog.Logger
+// Notification describes a committed-in-this-transaction allocation batch.
+type Notification struct {
+	Kind          store.AllocationBatchKind
+	ProductID     uuid.UUID
+	PayerID       uuid.UUID
+	TransactionID *uuid.UUID // nil for credit applications
+	Result        Result
 }
 
-// NewService builds an allocation service.
-func NewService(logger *slog.Logger) *Service { return &Service{logger: logger} }
+// Notifier is told about every new batch INSIDE the allocation transaction
+// (the events outbox), so notifications commit or roll back with the money.
+type Notifier interface {
+	Allocated(ctx context.Context, q *store.Queries, n Notification) error
+}
+
+// Service writes allocation plans to the ledger.
+type Service struct {
+	logger   *slog.Logger
+	notifier Notifier
+}
+
+// NewService builds an allocation service. notifier is required: products
+// must hear about every allocation.
+func NewService(logger *slog.Logger, notifier Notifier) *Service {
+	if notifier == nil {
+		panic("allocation: nil Notifier")
+	}
+	return &Service{logger: logger, notifier: notifier}
+}
+
+func (s *Service) notify(ctx context.Context, q *store.Queries, n Notification) error {
+	if err := s.notifier.Allocated(ctx, q, n); err != nil {
+		return fmt.Errorf("allocation: emit events: %w", err)
+	}
+	return nil
+}
 
 // AllocateTransaction allocates a succeeded incoming payment to its payer.
 // It is idempotent: calling it again for the same transaction returns the
@@ -106,6 +135,9 @@ func (s *Service) AllocateTransaction(ctx context.Context, q *store.Queries, act
 	if err != nil {
 		return Result{}, err
 	}
+	if err := s.notify(ctx, q, Notification{Kind: store.AllocationBatchKindPayment, ProductID: productID, PayerID: payerID, TransactionID: &txn.ID, Result: res}); err != nil {
+		return Result{}, err
+	}
 	s.logger.InfoContext(ctx, "payment allocated",
 		slog.String("transaction_id", txn.ID.String()), slog.String("payer_id", payerID.String()),
 		slog.String("batch_id", batchID.String()), slog.Int64("amount", txn.Amount),
@@ -149,6 +181,9 @@ func (s *Service) ApplyCredit(ctx context.Context, q *store.Queries, actor audit
 	}
 	res, err := s.buildResult(ctx, q, productID, batchID, plan, before, money.KES(payer.CreditBalance))
 	if err != nil {
+		return Result{}, err
+	}
+	if err := s.notify(ctx, q, Notification{Kind: store.AllocationBatchKindCreditApplication, ProductID: productID, PayerID: payer.ID, Result: res}); err != nil {
 		return Result{}, err
 	}
 	s.logger.InfoContext(ctx, "credit applied to payment request",
@@ -202,7 +237,14 @@ func (s *Service) ReverseBatch(ctx context.Context, q *store.Queries, actor audi
 	if err != nil {
 		return Result{}, err
 	}
-	return s.buildResult(ctx, q, original.ProductID, batchID, plan, before, money.KES(payer.CreditBalance))
+	res, err := s.buildResult(ctx, q, original.ProductID, batchID, plan, before, money.KES(payer.CreditBalance))
+	if err != nil {
+		return Result{}, err
+	}
+	if err := s.notify(ctx, q, Notification{Kind: store.AllocationBatchKindReversal, ProductID: original.ProductID, PayerID: original.PayerAccountID, TransactionID: &reversalTxnID, Result: res}); err != nil {
+		return Result{}, err
+	}
+	return res, nil
 }
 
 type writeBatchParams struct {

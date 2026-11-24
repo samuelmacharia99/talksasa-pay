@@ -16,13 +16,16 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/talksasa/talksasa-pay/internal/allocation"
+	"github.com/talksasa/talksasa-pay/internal/apiview"
 	"github.com/talksasa/talksasa-pay/internal/audit"
+	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/ledger"
 	"github.com/talksasa/talksasa-pay/internal/money"
 	"github.com/talksasa/talksasa-pay/internal/payer"
 	"github.com/talksasa/talksasa-pay/internal/paymentrequest"
 	"github.com/talksasa/talksasa-pay/internal/platform/crypto"
 	"github.com/talksasa/talksasa-pay/internal/product"
+	"github.com/talksasa/talksasa-pay/internal/queue"
 	"github.com/talksasa/talksasa-pay/internal/store"
 	"github.com/talksasa/talksasa-pay/internal/testutil/testdb"
 )
@@ -44,6 +47,8 @@ type env struct {
 	requests *paymentrequest.Service
 	ledger   *ledger.Service
 	alloc    *allocation.Service
+	river    *queue.Client
+	events   *events.Emitter
 }
 
 func newEnv(t *testing.T) *env {
@@ -59,16 +64,23 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	alloc := allocation.NewService(logger)
+	rc, err := queue.NewInsertOnly(d.App, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := events.NewEmitter(apiview.View{PayBaseURL: "https://pay.test/", Paybill: "174379"}, queue.NewEnqueuer(rc))
+	alloc := allocation.NewService(logger, ev)
 	return &env{
 		t: t, ctx: context.Background(), db: d, logs: logs, logger: logger, keyring: kr,
 		products: product.NewService(product.Options{
 			Pool: d.App, Keyring: kr, APIKeyPepper: []byte(strings.Repeat("p", 40)), AllowHTTPHooks: true, Logger: logger,
 		}),
 		payers:   payer.NewService(d.App, logger),
-		requests: paymentrequest.NewService(d.App, alloc, logger),
+		requests: paymentrequest.NewService(d.App, alloc, ev, logger),
 		ledger:   ledger.NewService(d.App, alloc, logger),
 		alloc:    alloc,
+		river:    rc,
+		events:   ev,
 	}
 }
 

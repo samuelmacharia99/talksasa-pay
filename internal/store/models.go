@@ -757,6 +757,70 @@ func AllTxnStatusValues() []TxnStatus {
 	}
 }
 
+type WebhookDeliveryStatus string
+
+const (
+	WebhookDeliveryStatusPending   WebhookDeliveryStatus = "pending"
+	WebhookDeliveryStatusDelivered WebhookDeliveryStatus = "delivered"
+	WebhookDeliveryStatusFailed    WebhookDeliveryStatus = "failed"
+	WebhookDeliveryStatusSkipped   WebhookDeliveryStatus = "skipped"
+)
+
+func (e *WebhookDeliveryStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = WebhookDeliveryStatus(s)
+	case string:
+		*e = WebhookDeliveryStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for WebhookDeliveryStatus: %T", src)
+	}
+	return nil
+}
+
+type NullWebhookDeliveryStatus struct {
+	WebhookDeliveryStatus WebhookDeliveryStatus
+	Valid                 bool // Valid is true if WebhookDeliveryStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullWebhookDeliveryStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.WebhookDeliveryStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.WebhookDeliveryStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullWebhookDeliveryStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.WebhookDeliveryStatus), nil
+}
+
+func (e WebhookDeliveryStatus) Valid() bool {
+	switch e {
+	case WebhookDeliveryStatusPending,
+		WebhookDeliveryStatusDelivered,
+		WebhookDeliveryStatusFailed,
+		WebhookDeliveryStatusSkipped:
+		return true
+	}
+	return false
+}
+
+func AllWebhookDeliveryStatusValues() []WebhookDeliveryStatus {
+	return []WebhookDeliveryStatus{
+		WebhookDeliveryStatusPending,
+		WebhookDeliveryStatusDelivered,
+		WebhookDeliveryStatusFailed,
+		WebhookDeliveryStatusSkipped,
+	}
+}
+
 type AdminInvitation struct {
 	ID        uuid.UUID
 	UserID    uuid.UUID
@@ -829,6 +893,18 @@ type AllocationBatch struct {
 	CreatedAt        time.Time
 }
 
+// Append-only outbox of product-visible changes. Written in the same transaction as the change.
+type Event struct {
+	ID          uuid.UUID
+	Txid        int64
+	ProductID   uuid.UUID
+	Type        string
+	SubjectType string
+	SubjectID   uuid.UUID
+	Data        []byte
+	CreatedAt   time.Time
+}
+
 type PayerAccount struct {
 	ID                uuid.UUID
 	ProductID         uuid.UUID
@@ -874,15 +950,18 @@ type PaymentRequest struct {
 
 // Talksasa's own products. There is deliberately no payout/settlement configuration: all money collected is Talksasa revenue.
 type Product struct {
-	ID                      uuid.UUID
-	Name                    string
-	AccountPrefix           string
-	WebhookUrl              *string
-	WebhookSecretCiphertext []byte
-	WebhookSecretKeyVersion int32
-	Status                  ProductStatus
-	CreatedAt               time.Time
-	UpdatedAt               time.Time
+	ID                          uuid.UUID
+	Name                        string
+	AccountPrefix               string
+	WebhookUrl                  *string
+	WebhookSecretCiphertext     []byte
+	WebhookSecretKeyVersion     int32
+	Status                      ProductStatus
+	CreatedAt                   time.Time
+	UpdatedAt                   time.Time
+	WebhookSecretPrevCiphertext []byte
+	WebhookSecretPrevKeyVersion *int32
+	WebhookSecretPrevExpiresAt  *time.Time
 }
 
 type ProductApiKey struct {
@@ -897,6 +976,8 @@ type ProductApiKey struct {
 	RevokedAt  *time.Time
 	RevokedBy  *string
 	LastUsedAt *time.Time
+	// NULL = any address. Otherwise requests must come from one of these networks.
+	AllowedCidrs []netip.Prefix
 }
 
 // Append-only ledger of money movements. Amounts are never changed and rows are never deleted; corrections are new reversal/adjustment rows.
@@ -935,4 +1016,29 @@ type TransactionEvent struct {
 	ToStatus      TxnStatus
 	Actor         string
 	OccurredAt    time.Time
+}
+
+type WebhookAttempt struct {
+	ID           int64
+	EventID      uuid.UUID
+	Attempt      int32
+	AttemptedAt  time.Time
+	UrlHost      string
+	StatusCode   *int32
+	LatencyMs    int32
+	Error        *string
+	ResponseBody *string
+}
+
+type WebhookDelivery struct {
+	EventID        uuid.UUID
+	ProductID      uuid.UUID
+	Status         WebhookDeliveryStatus
+	Attempts       int32
+	LastAttemptAt  *time.Time
+	LastStatusCode *int32
+	LastError      *string
+	DeliveredAt    *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }

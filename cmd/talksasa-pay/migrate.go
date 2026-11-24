@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
+	"github.com/talksasa/talksasa-pay/internal/queue"
 )
 
 func runMigrate(args []string, logw io.Writer) error {
@@ -26,7 +29,11 @@ func runMigrate(args []string, logw io.Writer) error {
 
 	switch args[0] {
 	case "up":
-		err = m.Up()
+		if err = m.Up(); err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			err = queue.Migrate(ctx, dsn, logger)
+			cancel()
+		}
 	case "down":
 		err = m.Down()
 	case "version":

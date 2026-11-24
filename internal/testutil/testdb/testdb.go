@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net/url"
 	"os"
 	"testing"
@@ -25,6 +26,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	dbmigrations "github.com/talksasa/talksasa-pay/db"
+	"github.com/talksasa/talksasa-pay/internal/config"
+	"github.com/talksasa/talksasa-pay/internal/queue"
 )
 
 // DB is one throwaway database.
@@ -127,5 +130,7 @@ func migrateUp(dbURL string) error {
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return err
 	}
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	return queue.Migrate(ctx, config.NewSecret(dbURL), slog.New(slog.DiscardHandler))
 }

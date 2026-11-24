@@ -7,6 +7,7 @@ package store
 
 import (
 	"context"
+	"net/netip"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,7 +16,7 @@ import (
 const createAPIKey = `-- name: CreateAPIKey :one
 INSERT INTO product_api_keys (id, product_id, key_id, secret_hash, label, created_by, expires_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, product_id, key_id, secret_hash, label, created_by, created_at, expires_at, revoked_at, revoked_by, last_used_at
+RETURNING id, product_id, key_id, secret_hash, label, created_by, created_at, expires_at, revoked_at, revoked_by, last_used_at, allowed_cidrs
 `
 
 type CreateAPIKeyParams struct {
@@ -51,6 +52,7 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Pro
 		&i.RevokedAt,
 		&i.RevokedBy,
 		&i.LastUsedAt,
+		&i.AllowedCidrs,
 	)
 	return i, err
 }
@@ -72,7 +74,7 @@ func (q *Queries) CreateAccountCounter(ctx context.Context, arg CreateAccountCou
 const createProduct = `-- name: CreateProduct :one
 INSERT INTO products (id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at
+RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at
 `
 
 type CreateProductParams struct {
@@ -104,12 +106,15 @@ func (q *Queries) CreateProduct(ctx context.Context, arg CreateProductParams) (P
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WebhookSecretPrevCiphertext,
+		&i.WebhookSecretPrevKeyVersion,
+		&i.WebhookSecretPrevExpiresAt,
 	)
 	return i, err
 }
 
 const getAPIKeyForAuth = `-- name: GetAPIKeyForAuth :one
-SELECT k.id, k.product_id, k.key_id, k.secret_hash, k.expires_at, k.revoked_at, k.last_used_at,
+SELECT k.id, k.product_id, k.key_id, k.secret_hash, k.expires_at, k.revoked_at, k.last_used_at, k.allowed_cidrs,
        p.status AS product_status, p.account_prefix, p.name AS product_name
   FROM product_api_keys k
   JOIN products p ON p.id = k.product_id
@@ -124,6 +129,7 @@ type GetAPIKeyForAuthRow struct {
 	ExpiresAt     *time.Time
 	RevokedAt     *time.Time
 	LastUsedAt    *time.Time
+	AllowedCidrs  []netip.Prefix
 	ProductStatus ProductStatus
 	AccountPrefix string
 	ProductName   string
@@ -140,6 +146,7 @@ func (q *Queries) GetAPIKeyForAuth(ctx context.Context, keyID string) (GetAPIKey
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.LastUsedAt,
+		&i.AllowedCidrs,
 		&i.ProductStatus,
 		&i.AccountPrefix,
 		&i.ProductName,
@@ -148,7 +155,7 @@ func (q *Queries) GetAPIKeyForAuth(ctx context.Context, keyID string) (GetAPIKey
 }
 
 const getProduct = `-- name: GetProduct :one
-SELECT id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at FROM products WHERE id = $1
+SELECT id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at FROM products WHERE id = $1
 `
 
 func (q *Queries) GetProduct(ctx context.Context, id uuid.UUID) (Product, error) {
@@ -164,12 +171,15 @@ func (q *Queries) GetProduct(ctx context.Context, id uuid.UUID) (Product, error)
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WebhookSecretPrevCiphertext,
+		&i.WebhookSecretPrevKeyVersion,
+		&i.WebhookSecretPrevExpiresAt,
 	)
 	return i, err
 }
 
 const getProductByPrefix = `-- name: GetProductByPrefix :one
-SELECT id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at FROM products WHERE account_prefix = $1
+SELECT id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at FROM products WHERE account_prefix = $1
 `
 
 func (q *Queries) GetProductByPrefix(ctx context.Context, accountPrefix string) (Product, error) {
@@ -185,12 +195,15 @@ func (q *Queries) GetProductByPrefix(ctx context.Context, accountPrefix string) 
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WebhookSecretPrevCiphertext,
+		&i.WebhookSecretPrevKeyVersion,
+		&i.WebhookSecretPrevExpiresAt,
 	)
 	return i, err
 }
 
 const listAPIKeys = `-- name: ListAPIKeys :many
-SELECT id, product_id, key_id, secret_hash, label, created_by, created_at, expires_at, revoked_at, revoked_by, last_used_at FROM product_api_keys WHERE product_id = $1 ORDER BY created_at
+SELECT id, product_id, key_id, secret_hash, label, created_by, created_at, expires_at, revoked_at, revoked_by, last_used_at, allowed_cidrs FROM product_api_keys WHERE product_id = $1 ORDER BY created_at
 `
 
 func (q *Queries) ListAPIKeys(ctx context.Context, productID uuid.UUID) ([]ProductApiKey, error) {
@@ -214,6 +227,7 @@ func (q *Queries) ListAPIKeys(ctx context.Context, productID uuid.UUID) ([]Produ
 			&i.RevokedAt,
 			&i.RevokedBy,
 			&i.LastUsedAt,
+			&i.AllowedCidrs,
 		); err != nil {
 			return nil, err
 		}
@@ -226,7 +240,7 @@ func (q *Queries) ListAPIKeys(ctx context.Context, productID uuid.UUID) ([]Produ
 }
 
 const listProducts = `-- name: ListProducts :many
-SELECT id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at FROM products ORDER BY account_prefix
+SELECT id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at FROM products ORDER BY account_prefix
 `
 
 func (q *Queries) ListProducts(ctx context.Context) ([]Product, error) {
@@ -248,6 +262,9 @@ func (q *Queries) ListProducts(ctx context.Context) ([]Product, error) {
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.WebhookSecretPrevCiphertext,
+			&i.WebhookSecretPrevKeyVersion,
+			&i.WebhookSecretPrevExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -278,7 +295,7 @@ const revokeAPIKey = `-- name: RevokeAPIKey :one
 UPDATE product_api_keys
    SET revoked_at = now(), revoked_by = $1
  WHERE product_id = $2 AND key_id = $3 AND revoked_at IS NULL
-RETURNING id, product_id, key_id, secret_hash, label, created_by, created_at, expires_at, revoked_at, revoked_by, last_used_at
+RETURNING id, product_id, key_id, secret_hash, label, created_by, created_at, expires_at, revoked_at, revoked_by, last_used_at, allowed_cidrs
 `
 
 type RevokeAPIKeyParams struct {
@@ -302,12 +319,45 @@ func (q *Queries) RevokeAPIKey(ctx context.Context, arg RevokeAPIKeyParams) (Pro
 		&i.RevokedAt,
 		&i.RevokedBy,
 		&i.LastUsedAt,
+		&i.AllowedCidrs,
+	)
+	return i, err
+}
+
+const setAPIKeyAllowedCIDRs = `-- name: SetAPIKeyAllowedCIDRs :one
+UPDATE product_api_keys SET allowed_cidrs = $1::cidr[]
+ WHERE product_id = $2 AND key_id = $3 AND revoked_at IS NULL
+RETURNING id, product_id, key_id, secret_hash, label, created_by, created_at, expires_at, revoked_at, revoked_by, last_used_at, allowed_cidrs
+`
+
+type SetAPIKeyAllowedCIDRsParams struct {
+	AllowedCidrs []netip.Prefix
+	ProductID    uuid.UUID
+	KeyID        string
+}
+
+func (q *Queries) SetAPIKeyAllowedCIDRs(ctx context.Context, arg SetAPIKeyAllowedCIDRsParams) (ProductApiKey, error) {
+	row := q.db.QueryRow(ctx, setAPIKeyAllowedCIDRs, arg.AllowedCidrs, arg.ProductID, arg.KeyID)
+	var i ProductApiKey
+	err := row.Scan(
+		&i.ID,
+		&i.ProductID,
+		&i.KeyID,
+		&i.SecretHash,
+		&i.Label,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.RevokedBy,
+		&i.LastUsedAt,
+		&i.AllowedCidrs,
 	)
 	return i, err
 }
 
 const setProductStatus = `-- name: SetProductStatus :one
-UPDATE products SET status = $1 WHERE id = $2 RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at
+UPDATE products SET status = $1 WHERE id = $2 RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at
 `
 
 type SetProductStatusParams struct {
@@ -328,6 +378,9 @@ func (q *Queries) SetProductStatus(ctx context.Context, arg SetProductStatusPara
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WebhookSecretPrevCiphertext,
+		&i.WebhookSecretPrevKeyVersion,
+		&i.WebhookSecretPrevExpiresAt,
 	)
 	return i, err
 }
@@ -347,20 +400,30 @@ func (q *Queries) TouchAPIKey(ctx context.Context, id uuid.UUID) error {
 
 const updateProductWebhookSecret = `-- name: UpdateProductWebhookSecret :one
 UPDATE products
-   SET webhook_secret_ciphertext = $1,
-       webhook_secret_key_version = $2
- WHERE id = $3
-RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at
+   SET webhook_secret_prev_ciphertext  = webhook_secret_ciphertext,
+       webhook_secret_prev_key_version = webhook_secret_key_version,
+       webhook_secret_prev_expires_at  = $1::timestamptz,
+       webhook_secret_ciphertext = $2,
+       webhook_secret_key_version = $3
+ WHERE id = $4
+RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at
 `
 
 type UpdateProductWebhookSecretParams struct {
+	PrevExpiresAt           time.Time
 	WebhookSecretCiphertext []byte
 	WebhookSecretKeyVersion int32
 	ID                      uuid.UUID
 }
 
+// The outgoing secret keeps signing until prev_expires_at (rotation grace).
 func (q *Queries) UpdateProductWebhookSecret(ctx context.Context, arg UpdateProductWebhookSecretParams) (Product, error) {
-	row := q.db.QueryRow(ctx, updateProductWebhookSecret, arg.WebhookSecretCiphertext, arg.WebhookSecretKeyVersion, arg.ID)
+	row := q.db.QueryRow(ctx, updateProductWebhookSecret,
+		arg.PrevExpiresAt,
+		arg.WebhookSecretCiphertext,
+		arg.WebhookSecretKeyVersion,
+		arg.ID,
+	)
 	var i Product
 	err := row.Scan(
 		&i.ID,
@@ -372,12 +435,15 @@ func (q *Queries) UpdateProductWebhookSecret(ctx context.Context, arg UpdateProd
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WebhookSecretPrevCiphertext,
+		&i.WebhookSecretPrevKeyVersion,
+		&i.WebhookSecretPrevExpiresAt,
 	)
 	return i, err
 }
 
 const updateProductWebhookURL = `-- name: UpdateProductWebhookURL :one
-UPDATE products SET webhook_url = $1 WHERE id = $2 RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at
+UPDATE products SET webhook_url = $1 WHERE id = $2 RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, status, created_at, updated_at, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at
 `
 
 type UpdateProductWebhookURLParams struct {
@@ -398,6 +464,9 @@ func (q *Queries) UpdateProductWebhookURL(ctx context.Context, arg UpdateProduct
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WebhookSecretPrevCiphertext,
+		&i.WebhookSecretPrevKeyVersion,
+		&i.WebhookSecretPrevExpiresAt,
 	)
 	return i, err
 }

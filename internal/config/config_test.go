@@ -67,6 +67,7 @@ func TestProductionRequiresFilesTLSAndPerms(t *testing.T) {
 		t.Fatalf("http setup link accepted in production: %v", err)
 	}
 	envF["TSP_ADMIN_SETUP_BASE_URL"] = "https://admin.talksasa.co.ke/setup/"
+	envF["TSP_PAY_BASE_URL"] = "https://pay.talksasa.co.ke/"
 	if _, err := Load(src(envF, files, 0o400)); err != nil {
 		t.Fatalf("valid production config rejected: %v", err)
 	}

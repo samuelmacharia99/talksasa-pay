@@ -43,6 +43,8 @@ type Config struct {
 	Crypto   CryptoConfig
 	Admin    AdminConfig
 	Public   PublicConfig
+	API      APIConfig
+	Worker   WorkerConfig
 	// TrustedProxies are peers (the Next.js servers, the reverse proxy)
 	// whose X-Talksasa-Client-IP header is believed. Anyone else's is ignored.
 	TrustedProxies []netip.Prefix
@@ -63,6 +65,31 @@ type PublicConfig struct {
 	// Paybill is Talksasa's M-Pesa paybill number shown on the pay page.
 	// Empty hides the manual paybill instructions.
 	Paybill string
+	// PayBaseURL is the hosted pay page base; a request's token is appended
+	// to form its pay_url. Must end in "/"; https outside development.
+	PayBaseURL string
+}
+
+// APIConfig bounds the product integration API (/v1).
+type APIConfig struct {
+	// RatePerKey / BurstPerKey: token bucket per API key (requests/second).
+	RatePerKey  float64
+	BurstPerKey int
+	// MaxInFlight caps concurrent /v1 requests; beyond it requests are shed
+	// with 503 + Retry-After instead of queueing until everything times out.
+	MaxInFlight int
+	// RequestTimeout is the deadline for one /v1 request (incl. DB work).
+	RequestTimeout time.Duration
+	// LockTimeout bounds how long a request waits for a row lock.
+	LockTimeout time.Duration
+}
+
+// WorkerConfig configures the background worker (River).
+type WorkerConfig struct {
+	WebhookConcurrency int           // parallel webhook deliveries
+	WebhookTimeout     time.Duration // per HTTP attempt
+	MaintenanceEvery   time.Duration // expiry sweep interval
+	AttemptRetention   time.Duration // webhook_attempts kept this long
 }
 
 // HTTPConfig configures the public API listener.
@@ -144,7 +171,23 @@ func Load(src Source) (*Config, error) {
 		IdleTimeout:     l.duration("TSP_ADMIN_IDLE_TIMEOUT", 15*time.Minute),
 		AbsoluteTimeout: l.duration("TSP_ADMIN_ABSOLUTE_TIMEOUT", 8*time.Hour),
 	}
-	cfg.Public = PublicConfig{Paybill: l.str("TSP_MPESA_PAYBILL", "")}
+	cfg.Public = PublicConfig{
+		Paybill:    l.str("TSP_MPESA_PAYBILL", ""),
+		PayBaseURL: l.str("TSP_PAY_BASE_URL", "http://127.0.0.1:3000/"),
+	}
+	cfg.API = APIConfig{
+		RatePerKey:     float64(l.int64("TSP_API_RATE_PER_KEY", 50)),
+		BurstPerKey:    int(l.int64("TSP_API_BURST_PER_KEY", 100)),
+		MaxInFlight:    int(l.int64("TSP_API_MAX_IN_FLIGHT", 512)),
+		RequestTimeout: l.duration("TSP_API_REQUEST_TIMEOUT", 15*time.Second),
+		LockTimeout:    l.duration("TSP_DB_LOCK_TIMEOUT", 5*time.Second),
+	}
+	cfg.Worker = WorkerConfig{
+		WebhookConcurrency: int(l.int64("TSP_WORKER_WEBHOOK_CONCURRENCY", 50)),
+		WebhookTimeout:     l.duration("TSP_WEBHOOK_TIMEOUT", 10*time.Second),
+		MaintenanceEvery:   l.duration("TSP_WORKER_MAINTENANCE_EVERY", time.Minute),
+		AttemptRetention:   l.duration("TSP_WEBHOOK_ATTEMPT_RETENTION", 90*24*time.Hour),
+	}
 	cfg.TrustedProxies = l.prefixes("TSP_TRUSTED_PROXIES", "127.0.0.1/32,::1/128")
 
 	cfg.Database = DatabaseConfig{
@@ -210,6 +253,28 @@ func (c *Config) validate() error {
 	}
 	if c.Admin.IdleTimeout > c.Admin.AbsoluteTimeout || c.Admin.AbsoluteTimeout > 24*time.Hour {
 		errs = append(errs, errors.New("TSP_ADMIN_IDLE_TIMEOUT/TSP_ADMIN_ABSOLUTE_TIMEOUT: need idle <= absolute <= 24h"))
+	}
+	if u, err := url.Parse(c.Public.PayBaseURL); err != nil || u.Host == "" || !strings.HasSuffix(u.Path, "/") ||
+		(u.Scheme != "https" && (c.Env.IsProductionLike() || u.Scheme != "http")) {
+		errs = append(errs, errors.New("TSP_PAY_BASE_URL: must be an absolute URL ending in / (https outside development)"))
+	}
+	if c.API.RatePerKey <= 0 || c.API.BurstPerKey < 1 || c.API.MaxInFlight < 1 {
+		errs = append(errs, errors.New("TSP_API_RATE_PER_KEY, TSP_API_BURST_PER_KEY, TSP_API_MAX_IN_FLIGHT: must be positive"))
+	}
+	if c.API.RequestTimeout < time.Second || c.API.RequestTimeout > c.HTTP.WriteTimeout {
+		errs = append(errs, errors.New("TSP_API_REQUEST_TIMEOUT: must be between 1s and TSP_HTTP_WRITE_TIMEOUT"))
+	}
+	if c.API.LockTimeout < 100*time.Millisecond || c.API.LockTimeout >= c.API.RequestTimeout {
+		errs = append(errs, errors.New("TSP_DB_LOCK_TIMEOUT: must be at least 100ms and below TSP_API_REQUEST_TIMEOUT"))
+	}
+	if c.Worker.WebhookConcurrency < 1 || c.Worker.WebhookConcurrency > 1000 {
+		errs = append(errs, errors.New("TSP_WORKER_WEBHOOK_CONCURRENCY: must be 1-1000"))
+	}
+	if c.Worker.WebhookTimeout < time.Second || c.Worker.WebhookTimeout > time.Minute {
+		errs = append(errs, errors.New("TSP_WEBHOOK_TIMEOUT: must be 1s-1m"))
+	}
+	if c.Worker.MaintenanceEvery < 10*time.Second || c.Worker.AttemptRetention < 24*time.Hour {
+		errs = append(errs, errors.New("TSP_WORKER_MAINTENANCE_EVERY >= 10s and TSP_WEBHOOK_ATTEMPT_RETENTION >= 24h required"))
 	}
 	if c.Public.Paybill != "" && !paybillRe.MatchString(c.Public.Paybill) {
 		errs = append(errs, errors.New("TSP_MPESA_PAYBILL: must be 5-7 digits"))

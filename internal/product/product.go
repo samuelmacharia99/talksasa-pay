@@ -236,7 +236,12 @@ func (s *Service) SetStatus(ctx context.Context, actor audit.Actor, id uuid.UUID
 	return fromRow(row), nil
 }
 
+// WebhookSecretGrace is how long the previous webhook secret keeps signing
+// after a rotation, so receivers can switch over without dropping events.
+const WebhookSecretGrace = 24 * time.Hour
+
 // RotateWebhookSecret replaces the signing secret and returns the new one once.
+// The old secret keeps signing (as a second v1 signature) for WebhookSecretGrace.
 func (s *Service) RotateWebhookSecret(ctx context.Context, actor audit.Actor, id uuid.UUID) (string, error) {
 	secretRaw, err := crypto.RandomBytes(webhookSecretBytes)
 	if err != nil {
@@ -250,6 +255,7 @@ func (s *Service) RotateWebhookSecret(ctx context.Context, actor audit.Actor, id
 	err = db.WithTx(ctx, s.pool, actor.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
 		_, err := q.UpdateProductWebhookSecret(ctx, store.UpdateProductWebhookSecretParams{
 			ID: id, WebhookSecretCiphertext: ct, WebhookSecretKeyVersion: int32(ver),
+			PrevExpiresAt: s.now().Add(WebhookSecretGrace),
 		})
 		if db.IsNotFound(err) {
 			return ErrNotFound

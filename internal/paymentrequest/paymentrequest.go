@@ -17,6 +17,7 @@ import (
 
 	"github.com/talksasa/talksasa-pay/internal/allocation"
 	"github.com/talksasa/talksasa-pay/internal/audit"
+	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/money"
 	"github.com/talksasa/talksasa-pay/internal/platform/crypto"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
@@ -53,6 +54,9 @@ type Request struct {
 	HostedToken      string
 	CreatedAt        time.Time
 	PaidAt           *time.Time
+	// AlreadyCancelled is set by Cancel when the request was cancelled before
+	// this call (idempotent retry); nothing changed.
+	AlreadyCancelled bool
 }
 
 // Outstanding is what is still owed.
@@ -79,13 +83,17 @@ type Created struct {
 type Service struct {
 	pool   *db.Pool
 	alloc  *allocation.Service
+	events *events.Emitter
 	logger *slog.Logger
 	now    func() time.Time
 }
 
 // NewService builds a payment request service.
-func NewService(pool *db.Pool, alloc *allocation.Service, logger *slog.Logger) *Service {
-	return &Service{pool: pool, alloc: alloc, logger: logger, now: time.Now}
+func NewService(pool *db.Pool, alloc *allocation.Service, ev *events.Emitter, logger *slog.Logger) *Service {
+	if ev == nil {
+		panic("paymentrequest: nil events.Emitter")
+	}
+	return &Service{pool: pool, alloc: alloc, events: ev, logger: logger, now: time.Now}
 }
 
 func (s *Service) validate(p *CreateParams) error {
@@ -190,6 +198,11 @@ func (s *Service) createTx(ctx context.Context, q *store.Queries, actor audit.Ac
 	if err != nil {
 		return fmt.Errorf("payment request: insert: %w", err)
 	}
+	// "created" first (state: open, nothing paid); credit applied below emits
+	// its own paid/partially_paid event after it.
+	if err := s.events.EmitPaymentRequest(ctx, q, productID, id, events.PaymentRequestCreated); err != nil {
+		return err
+	}
 
 	out.CreditApplied, err = s.alloc.ApplyCredit(ctx, q, actor, productID, id)
 	if err != nil {
@@ -218,13 +231,25 @@ func (s *Service) Get(ctx context.Context, productID, id uuid.UUID) (Request, er
 // Cancel closes an open request on which nothing has been paid. A partially
 // paid request cannot be cancelled: the money already allocated would need a
 // refund or a move to credit, which is an admin decision.
+//
+// Idempotent: cancelling an already-cancelled request returns it unchanged
+// (AlreadyCancelled = true) and emits nothing, so clients can retry safely.
 func (s *Service) Cancel(ctx context.Context, actor audit.Actor, productID, id uuid.UUID) (Request, error) {
 	var out Request
 	err := db.WithTx(ctx, s.pool, actor.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
 		row, err := q.CancelPaymentRequest(ctx, store.CancelPaymentRequestParams{ProductID: productID, ID: id})
 		if db.IsNotFound(err) {
-			if _, gerr := q.GetPaymentRequest(ctx, store.GetPaymentRequestParams{ProductID: productID, ID: id}); db.IsNotFound(gerr) {
+			cur, gerr := q.GetPaymentRequest(ctx, store.GetPaymentRequestParams{ProductID: productID, ID: id})
+			if db.IsNotFound(gerr) {
 				return ErrNotFound
+			}
+			if gerr != nil {
+				return gerr
+			}
+			if cur.Status == store.PaymentRequestStatusCancelled {
+				out = fromRow(cur)
+				out.AlreadyCancelled = true
+				return nil
 			}
 			return ErrNotCancellable
 		}
@@ -232,6 +257,9 @@ func (s *Service) Cancel(ctx context.Context, actor audit.Actor, productID, id u
 			return err
 		}
 		out = fromRow(row)
+		if err := s.events.EmitPaymentRequest(ctx, q, productID, id, events.PaymentRequestCancelled); err != nil {
+			return err
+		}
 		return audit.Record(ctx, q, audit.Entry{
 			Actor: actor, Action: "payment_request.cancelled", EntityType: "payment_request", EntityID: id.String(), ProductID: &productID,
 		})
