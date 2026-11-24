@@ -51,7 +51,6 @@ func runWorker(ctx context.Context, logw io.Writer) error {
 		WebhookConcurrency: a.cfg.Worker.WebhookConcurrency,
 		Webhook:            hookWorker,
 		MpesaConcurrency:   a.cfg.Worker.MpesaConcurrency,
-		// (TSP_WORKER_MPESA_CONCURRENCY, default 20); 0 = jobs default.
 	}
 	if a.stk.Available() {
 		deps.STK = a.stk
