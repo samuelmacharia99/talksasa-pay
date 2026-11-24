@@ -1,0 +1,33 @@
+{
+  "description": "Talksasa-Signature test vectors. v1 = hex(HMAC-SHA256(key = secret string as UTF-8 bytes, message = \"<t>.\" followed by the raw body bytes)). Header: t=<t>,v1=<hex>[,v1=<hex with previous secret>]. Receivers accept if ANY v1 matches and |now - t| <= 300 s. These secrets are test-only.",
+  "vectors": [
+    {
+      "secret": "whsec_test_vector_secret_not_used_anywhere_00000000",
+      "t": 1764000000,
+      "body": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2025-11-24T16:00:00Z\",\"data\":{\"object\":\"payment_request\",\"amount\":1500,\"status\":\"paid\"}}",
+      "expected_v1": "a856dd48288f9ce807286189607782e867850149965ec39e88d95d985c27972e",
+      "header": "t=1764000000,v1=a856dd48288f9ce807286189607782e867850149965ec39e88d95d985c27972e"
+    },
+    {
+      "secret": "whsec_another_test_secret_abcdefghijklmnopqrstuvwxyz",
+      "t": 1764003600,
+      "body": "{\"object\":\"event\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"type\":\"payer.credit_changed\",\"api_version\":\"2026-11-24\",\"created_at\":\"2025-11-24T17:00:00Z\",\"data\":{\"delta\":-300,\"credit_balance\":0,\"note\":\"unicode: café ✓\"}}",
+      "expected_v1": "99ba3bc7d92495e82b62fd2793887697bfe14dc613d9e78f50c0e8d6a607a030",
+      "header": "t=1764003600,v1=99ba3bc7d92495e82b62fd2793887697bfe14dc613d9e78f50c0e8d6a607a030"
+    },
+    {
+      "secret": "whsec_empty_body_case",
+      "t": 1700000000,
+      "body": "",
+      "expected_v1": "bf206160ea712c8900bf7df50a5b00829233713414d13a2bc846e253f77e08d8",
+      "header": "t=1700000000,v1=bf206160ea712c8900bf7df50a5b00829233713414d13a2bc846e253f77e08d8"
+    }
+  ],
+  "rotation": {
+    "secret_current": "whsec_test_vector_secret_not_used_anywhere_00000000",
+    "secret_previous": "whsec_another_test_secret_abcdefghijklmnopqrstuvwxyz",
+    "t": 1764000000,
+    "body": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2025-11-24T16:00:00Z\",\"data\":{\"object\":\"payment_request\",\"amount\":1500,\"status\":\"paid\"}}",
+    "header": "t=1764000000,v1=a856dd48288f9ce807286189607782e867850149965ec39e88d95d985c27972e,v1=4fcfd494ae54e883a6bb1201d1cdad4ebee7aae6464e7b47561e697042db5187"
+  }
+}
