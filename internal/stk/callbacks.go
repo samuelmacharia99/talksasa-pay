@@ -218,6 +218,16 @@ func (s *Service) stkFailure(ctx context.Context, q *store.Queries, cb store.Mpe
 	attrs := []any{slog.String("callback_id", cb.ID.String()), slog.String("stk_push_id", push.ID.String()), slog.String("result_code", r.ResultCode)}
 	switch push.Status {
 	case store.StkPushStatusSucceeded:
+		txn, err := q.GetTransactionInternal(ctx, push.TransactionID)
+		if err != nil {
+			return outcome{}, err
+		}
+		if completedByC2B(txn) {
+			// Expected: the customer paid at the paybill (which completed
+			// this prompt) and then cancelled or ignored the prompt itself.
+			lb.info("STK failure callback for a push already paid by paybill; ignored", attrs...)
+			return outcome{note: "failure after the push was paid by paybill; ignored", txnID: &push.TransactionID}, nil
+		}
 		lb.alarm("STK failure callback after the push succeeded; ignored", attrs...)
 		return outcome{note: "late failure after success; ignored", txnID: &push.TransactionID}, nil
 	case store.StkPushStatusFailed:

@@ -75,7 +75,12 @@ func (m *mpesaEnv) baseInvariants(opts invariantOpts) {
 		SELECT count(*) FROM payment_requests r WHERE r.amount_paid > 0
 		   AND NOT EXISTS (SELECT 1 FROM allocations a JOIN allocation_batches b ON b.id = a.batch_id
 		                     JOIN transactions t ON t.id = b.transaction_id
-		                    WHERE a.payment_request_id = r.id AND t.status = 'succeeded')`)
+		                    WHERE a.payment_request_id = r.id AND t.status = 'succeeded')
+		   -- Paid from credit: a credit_application batch has no transaction
+		   -- by design; the per-payer balance check above ties that credit
+		   -- back to succeeded payments.
+		   AND NOT EXISTS (SELECT 1 FROM allocations a JOIN allocation_batches b ON b.id = a.batch_id
+		                    WHERE a.payment_request_id = r.id AND b.kind = 'credit_application')`)
 	m.zero(`request status disagrees with amount_paid`, `
 		SELECT count(*) FROM payment_requests
 		 WHERE (status = 'paid') <> (amount_paid = amount)

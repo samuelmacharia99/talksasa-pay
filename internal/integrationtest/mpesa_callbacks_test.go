@@ -598,3 +598,28 @@ func TestMpesaC2BDifferentAmountLeavesPromptWaiting(t *testing.T) {
 	assertStatus(t, m.reqState(prod, req.ID), allocation.StatusPartiallyPaid, 200)
 	m.mpesaInvariants(invariantOpts{allowCreditWithPayable: true})
 }
+
+// The customer pays at the paybill (completing the waiting prompt) and then
+// cancels the prompt itself: the late failure is expected, not an alarm, and
+// changes nothing.
+func TestMpesaC2BCompletesPromptThenPromptCancelled(t *testing.T) {
+	m := newMpesaEnv(t, nil, nil)
+	prod := m.product("CANCEL").Product.ID
+	pa := m.mpesaPayer(prod)
+	req := m.request(prod, pa.ID, 500)
+	p := m.mustSend(prod, req.ID, newPhone(0))
+	if _, err := m.deliver(store.MpesaCallbackKindC2bConfirmation, c2bBody(newMpesaReceipt(), 500, pa.AccountNumber)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.deliver(store.MpesaCallbackKindStk, stkFailureBody(*p.CheckoutRequestID, "1032", "Request cancelled by user")); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.push(p.ID); got.Status != store.StkPushStatusSucceeded {
+		t.Fatalf("push %s after late cancel, want succeeded", got.Status)
+	}
+	if n := m.alarms("STK failure callback after the push succeeded"); n != 0 {
+		t.Fatalf("%d alarms for an expected cancel after a paybill payment", n)
+	}
+	assertStatus(t, m.reqState(prod, req.ID), allocation.StatusPaid, 500)
+	m.mpesaInvariants(invariantOpts{})
+}

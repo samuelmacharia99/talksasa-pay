@@ -143,9 +143,12 @@ the second goes to the customer's next unpaid bill or credit
 Events can arrive out of order: `payment_request.paid` may come before
 `stk_push.succeeded`. Act on the payment request's status, as always.
 
-A customer can also ignore the prompt and pay at the paybill. That payment
-pays the bill normally (`payment_request.paid`), and the prompt later fails
-on its own. Your code needs no special case for this.
+A customer can also ignore the prompt and pay at the paybill. For exactly
+the prompt's amount, the prompt is marked succeeded (see
+[When the customer pays by paybill instead](#when-the-customer-pays-by-paybill-instead));
+for any other amount the payment is applied normally and the prompt later
+fails on its own. Either way, act on `payment_request.paid`: your code needs
+no special case for this.
 
 ## Errors
 
