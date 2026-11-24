@@ -128,3 +128,43 @@ func TestSecretNeverFormats(t *testing.T) {
 		t.Fatal("Reveal")
 	}
 }
+
+func TestDatabaseSessionTimeoutsAndDrainDelay(t *testing.T) {
+	base := map[string]string{"TSP_DATABASE_URL": "postgres://u:p@h/db", "TSP_MASTER_KEYS": "1:x", "TSP_API_KEY_PEPPER": pepper}
+	cfg, err := Load(src(base, nil, 0o600))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Database.LockTimeout != 5*time.Second || cfg.API.LockTimeout != cfg.Database.LockTimeout ||
+		cfg.Database.IdleInTxTimeout != time.Minute || cfg.HTTP.DrainDelay != 0 {
+		t.Fatalf("defaults: %+v %+v %+v", cfg.Database, cfg.API, cfg.HTTP)
+	}
+	with := func(kv ...string) map[string]string {
+		m := map[string]string{}
+		for a, b := range base {
+			m[a] = b
+		}
+		for i := 0; i < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return m
+	}
+	cfg, err = Load(src(with("TSP_DB_LOCK_TIMEOUT", "750ms", "TSP_DB_IDLE_IN_TX_TIMEOUT", "30s", "TSP_HTTP_DRAIN_DELAY", "3s"), nil, 0o600))
+	if err != nil || cfg.Database.LockTimeout != 750*time.Millisecond || cfg.API.LockTimeout != 750*time.Millisecond ||
+		cfg.Database.IdleInTxTimeout != 30*time.Second || cfg.HTTP.DrainDelay != 3*time.Second {
+		t.Fatalf("%v %+v", err, cfg)
+	}
+	if _, err := Load(src(with("TSP_HTTP_DRAIN_DELAY", "0"), nil, 0o600)); err != nil {
+		t.Fatalf("drain delay 0 rejected: %v", err)
+	}
+	for _, kv := range [][]string{
+		{"TSP_HTTP_DRAIN_DELAY", "-1s"},
+		{"TSP_HTTP_DRAIN_DELAY", "2m"},
+		{"TSP_DB_IDLE_IN_TX_TIMEOUT", "500ms"},
+		{"TSP_DB_LOCK_TIMEOUT", "4s", "TSP_DB_STATEMENT_TIMEOUT", "2s"},
+	} {
+		if _, err := Load(src(with(kv...), nil, 0o600)); err == nil || !strings.Contains(err.Error(), kv[0]) {
+			t.Errorf("%v accepted: %v", kv, err)
+		}
+	}
+}

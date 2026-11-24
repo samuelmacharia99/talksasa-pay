@@ -10,6 +10,7 @@ import (
 
 	"github.com/talksasa/talksasa-pay/internal/adminapi"
 	"github.com/talksasa/talksasa-pay/internal/httpapi"
+	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 	"github.com/talksasa/talksasa-pay/internal/platform/metrics"
 )
@@ -22,6 +23,12 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 	defer a.close()
 
 	reg := metrics.NewRegistry()
+	if err := db.RegisterMetrics(reg.Prometheus()); err != nil {
+		return err
+	}
+	// ready flips to draining on shutdown, before the listener closes.
+	// /readyz should consult ready.Draining() and answer 503 while draining.
+	ready := &httpx.Readiness{}
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger: a.logger, Pool: a.pool, Products: a.products, Reporting: a.reporting,
 		Metrics: metrics.NewHTTP(reg, "api"), MaxBodyBytes: a.cfg.HTTP.MaxBodyBytes, Version: version,
@@ -43,7 +50,11 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 
 	a.logger.Info("starting api", slog.String("version", version))
 	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return httpx.Serve(gctx, apiSrv, a.cfg.HTTP.ShutdownTimeout, a.logger) })
+	g.Go(func() error {
+		return httpx.ServeGraceful(gctx, apiSrv, httpx.GracefulOptions{
+			ShutdownTimeout: a.cfg.HTTP.ShutdownTimeout, DrainDelay: a.cfg.HTTP.DrainDelay, Readiness: ready,
+		}, a.logger)
+	})
 	g.Go(func() error { return httpx.Serve(gctx, metricsSrv, a.cfg.HTTP.ShutdownTimeout, a.logger) })
 	g.Go(func() error { return httpx.Serve(gctx, adminSrv, a.cfg.HTTP.ShutdownTimeout, a.logger) })
 	err = g.Wait()
