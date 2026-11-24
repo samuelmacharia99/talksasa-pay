@@ -47,6 +47,9 @@ type Deps struct {
 	View              apiview.View
 	KeyLimiter        *httpx.RateLimiter // per API key; nil = productapi default
 	APIRequestTimeout time.Duration      // 0 = productapi default
+	APIMaxInFlight    int                // concurrent /v1 requests before shedding; 0 = 512
+	// Readiness flips /readyz to 503 while the server drains on shutdown.
+	Readiness *httpx.Readiness
 }
 
 // hostedTokenRe matches payment_requests.hosted_token (32 random bytes,
@@ -77,6 +80,10 @@ func NewRouter(d Deps) http.Handler {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": d.Version})
 	})
 	r.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if d.Readiness != nil && d.Readiness.Draining() {
+			httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusServiceUnavailable, "draining", "Shutting down."))
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 		if err := d.Pool.Ping(ctx); err != nil {
@@ -94,7 +101,17 @@ func NewRouter(d Deps) http.Handler {
 
 	// Product integration API: auth (key -> IP allow-list -> per-key rate
 	// limit), strict JSON, every query scoped to the key's product.
-	r.Mount("/v1", productapi.NewRouter(productapi.Deps{
+	// Timeout outside LoadShed: a slot is held until the handler really
+	// returns, so MaxInFlight truly bounds concurrent database work.
+	maxInFlight := d.APIMaxInFlight
+	if maxInFlight <= 0 {
+		maxInFlight = 512
+	}
+	apiTimeout := d.APIRequestTimeout
+	if apiTimeout <= 0 {
+		apiTimeout = productapi.DefaultRequestTimeout
+	}
+	r.With(httpx.Timeout(apiTimeout+2*time.Second), httpx.LoadShed(maxInFlight)).Mount("/v1", productapi.NewRouter(productapi.Deps{
 		Logger: d.Logger, Pool: d.Pool, Products: d.Products, Payers: d.Payers, Requests: d.Requests,
 		View: d.View, KeyLimiter: d.KeyLimiter, RequestTimeout: d.APIRequestTimeout,
 	}))

@@ -26,16 +26,16 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 	if err := db.RegisterMetrics(reg.Prometheus()); err != nil {
 		return err
 	}
-	// ready flips to draining on shutdown, before the listener closes.
-	// /readyz should consult ready.Draining() and answer 503 while draining.
+	// ready flips to draining on shutdown, before the listener closes;
+	// /readyz then answers 503 so the proxy stops routing here.
 	ready := &httpx.Readiness{}
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger: a.logger, Pool: a.pool, Products: a.products, Reporting: a.reporting,
 		Metrics: metrics.NewHTTP(reg, "api"), MaxBodyBytes: a.cfg.HTTP.MaxBodyBytes, Version: version,
 		TrustedProxies: a.cfg.TrustedProxies, Paybill: a.cfg.Public.Paybill,
 		Payers: a.payers, Requests: a.paymentRequests, View: a.events.View(),
-		KeyLimiter:        httpx.NewRateLimiter(int(a.cfg.API.RatePerKey*60), a.cfg.API.BurstPerKey),
-		APIRequestTimeout: a.cfg.API.RequestTimeout,
+		KeyLimiter:        httpx.NewRateLimiterPerSecond(a.cfg.API.RatePerKey, a.cfg.API.BurstPerKey),
+		APIRequestTimeout: a.cfg.API.RequestTimeout, APIMaxInFlight: a.cfg.API.MaxInFlight, Readiness: ready,
 	})
 	apiSrv := httpx.NewServer(a.cfg.HTTP.Addr, handler, a.cfg.HTTP, a.logger)
 

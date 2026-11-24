@@ -10,6 +10,7 @@ import (
 
 	"github.com/talksasa/talksasa-pay/internal/jobs"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
+	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/platform/metrics"
 )
 
@@ -25,6 +26,9 @@ func runWorker(ctx context.Context, logw io.Writer) error {
 
 	reg := metrics.NewRegistry()
 	m := jobs.NewMetrics(reg)
+	if err := db.RegisterMetrics(reg.Prometheus()); err != nil {
+		return err
+	}
 	deps := jobs.Deps{
 		Pool: a.pool, Events: a.events, Logger: a.logger, Metrics: m,
 		AttemptRetention:   a.cfg.Worker.AttemptRetention,

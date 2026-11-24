@@ -28,7 +28,10 @@ info:
     doubt re-read the resource or the feed.
 
     **Errors** are RFC 9457 `application/problem+json` with a stable `code`.
-    `429` and `503` carry `Retry-After`; back off and retry. Quote
+    `429` and `503` carry `Retry-After`; back off and retry. `503 busy` and
+    `503 overloaded` mean nothing was changed. `503 timeout` means the
+    outcome is unknown: retry with the SAME Idempotency-Key (or re-read), never
+    with a new one. Quote
     `request_id` (also in the `X-Request-Id` header) when asking for help.
 servers:
   - url: /v1
@@ -306,7 +309,7 @@ components:
           type: string
           description: |
             Stable machine-readable code: unauthorized, ip_not_allowed,
-            product_suspended, rate_limited, overloaded, not_found,
+            product_suspended, rate_limited, overloaded, busy, timeout, not_found,
             validation_failed, invalid_json, unsupported_media_type,
             idempotency_key_required, idempotency_conflict,
             duplicate_reference, payer_closed, not_cancellable,

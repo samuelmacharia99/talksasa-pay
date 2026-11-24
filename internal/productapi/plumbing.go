@@ -1,6 +1,7 @@
 package productapi
 
 import (
+	"time"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
@@ -22,6 +23,7 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/payer"
 	"github.com/talksasa/talksasa-pay/internal/paymentrequest"
 	"github.com/talksasa/talksasa-pay/internal/phone"
+	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 )
 
@@ -87,6 +89,9 @@ func (h *handlers) fail(w http.ResponseWriter, r *http.Request, err error) {
 		unprocessable("phones", "at most 5 phone numbers")
 	case errors.Is(err, phone.ErrInvalid):
 		unprocessable("phones", "must be Kenyan mobile numbers, e.g. 07XXXXXXXX or +2547XXXXXXXX")
+	case db.IsBusy(err):
+		// Lock/statement timeout or retries exhausted: nothing was committed.
+		httpx.Busy(w, r, time.Second)
 	case errors.Is(err, context.DeadlineExceeded):
 		w.Header().Set("Retry-After", "1")
 		problem(w, r, http.StatusServiceUnavailable, "overloaded", "The service is busy. Retry shortly.")
