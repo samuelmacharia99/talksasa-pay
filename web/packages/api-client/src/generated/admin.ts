@@ -1034,6 +1034,8 @@ export interface paths {
                     status?: components["schemas"]["RequestStatus"];
                     /** @description Reference, description or account number */
                     q?: string;
+                    /** @description Only live requests reopened by a reversal while a newer live request had the same reference */
+                    duplicates?: boolean;
                     cursor?: components["parameters"]["cursor"];
                     limit?: components["parameters"]["limit"];
                 };
@@ -1620,6 +1622,8 @@ export interface components {
             paid_at: string | null;
             /** Format: date-time */
             closed_at: string | null;
+            /** @description Reopened by a reversal while a newer live request had the same reference; staff should cancel or settle one of them. */
+            duplicate_reference: boolean;
         };
         PaymentRequestDetail: components["schemas"]["PaymentRequest"] & {
             product_name: string;
@@ -1754,6 +1758,8 @@ export interface components {
                 pending: number;
                 credit_held: number;
                 payers: number;
+                /** @description Live requests reopened by a reversal while a newer live request had the same reference; staff should resolve them. */
+                duplicate_references: number;
             };
             timezone: string;
             /** Format: date-time */

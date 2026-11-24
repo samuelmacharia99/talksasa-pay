@@ -22,7 +22,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -110,16 +109,6 @@ func requireNoErrors(t *testing.T, what string, errs []error) {
 		if err != nil {
 			t.Fatalf("%s #%d: %v", what, i, err)
 		}
-	}
-}
-
-// bugGate skips a test that demonstrates a known, reported production bug,
-// so it does not block the shared suite. Run with TSP_RUN_BUG_TESTS=1 to see
-// it fail.
-func bugGate(t *testing.T, msg string) {
-	t.Helper()
-	if os.Getenv("TSP_RUN_BUG_TESTS") != "1" {
-		t.Skip("BUG: " + msg + " (set TSP_RUN_BUG_TESTS=1 to run)")
 	}
 }
 

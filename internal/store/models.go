@@ -946,6 +946,8 @@ type PaymentRequest struct {
 	UpdatedAt      time.Time
 	PaidAt         *time.Time
 	ClosedAt       *time.Time
+	// Set by a reversal that reopened this request while another live request had the same product_reference. Maintained only by the allocations trigger.
+	DuplicateReference bool
 }
 
 // Talksasa's own products. There is deliberately no payout/settlement configuration: all money collected is Talksasa revenue.

@@ -67,18 +67,20 @@ SELECT
   (SELECT count(*) FROM transactions WHERE status = 'needs_review')::bigint AS needs_review,
   (SELECT count(*) FROM transactions WHERE status = 'pending')::bigint AS pending,
   (SELECT coalesce(sum(credit_balance), 0) FROM payer_accounts)::bigint AS credit_held,
-  (SELECT count(*) FROM payer_accounts)::bigint AS payers
+  (SELECT count(*) FROM payer_accounts)::bigint AS payers,
+  (SELECT count(*) FROM payment_requests WHERE duplicate_reference AND status IN ('open', 'partially_paid'))::bigint AS duplicate_references
 `
 
 type DashboardCountsRow struct {
-	OpenRequests   int64
-	Outstanding    int64
-	SuspenseCount  int64
-	SuspenseAmount int64
-	NeedsReview    int64
-	Pending        int64
-	CreditHeld     int64
-	Payers         int64
+	OpenRequests        int64
+	Outstanding         int64
+	SuspenseCount       int64
+	SuspenseAmount      int64
+	NeedsReview         int64
+	Pending             int64
+	CreditHeld          int64
+	Payers              int64
+	DuplicateReferences int64
 }
 
 func (q *Queries) DashboardCounts(ctx context.Context) (DashboardCountsRow, error) {
@@ -93,6 +95,7 @@ func (q *Queries) DashboardCounts(ctx context.Context) (DashboardCountsRow, erro
 		&i.Pending,
 		&i.CreditHeld,
 		&i.Payers,
+		&i.DuplicateReferences,
 	)
 	return i, err
 }
@@ -142,7 +145,7 @@ func (q *Queries) GetPayerAdmin(ctx context.Context, id uuid.UUID) (GetPayerAdmi
 }
 
 const getPaymentRequestAdmin = `-- name: GetPaymentRequestAdmin :one
-SELECT pr.id, pr.product_id, pr.payer_account_id, pr.product_reference, pr.description, pr.currency, pr.amount, pr.amount_paid, pr.status, pr.expires_at, pr.hosted_token, pr.idempotency_key, pr.created_at, pr.updated_at, pr.paid_at, pr.closed_at, p.account_prefix, p.name AS product_name, pa.account_number, pa.display_name
+SELECT pr.id, pr.product_id, pr.payer_account_id, pr.product_reference, pr.description, pr.currency, pr.amount, pr.amount_paid, pr.status, pr.expires_at, pr.hosted_token, pr.idempotency_key, pr.created_at, pr.updated_at, pr.paid_at, pr.closed_at, pr.duplicate_reference, p.account_prefix, p.name AS product_name, pa.account_number, pa.display_name
   FROM payment_requests pr
   JOIN payer_accounts pa ON pa.id = pr.payer_account_id
   JOIN products p ON p.id = pr.product_id
@@ -150,26 +153,27 @@ SELECT pr.id, pr.product_id, pr.payer_account_id, pr.product_reference, pr.descr
 `
 
 type GetPaymentRequestAdminRow struct {
-	ID               uuid.UUID
-	ProductID        uuid.UUID
-	PayerAccountID   uuid.UUID
-	ProductReference string
-	Description      string
-	Currency         string
-	Amount           int64
-	AmountPaid       int64
-	Status           PaymentRequestStatus
-	ExpiresAt        *time.Time
-	HostedToken      string
-	IdempotencyKey   string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	PaidAt           *time.Time
-	ClosedAt         *time.Time
-	AccountPrefix    string
-	ProductName      string
-	AccountNumber    string
-	DisplayName      string
+	ID                 uuid.UUID
+	ProductID          uuid.UUID
+	PayerAccountID     uuid.UUID
+	ProductReference   string
+	Description        string
+	Currency           string
+	Amount             int64
+	AmountPaid         int64
+	Status             PaymentRequestStatus
+	ExpiresAt          *time.Time
+	HostedToken        string
+	IdempotencyKey     string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	PaidAt             *time.Time
+	ClosedAt           *time.Time
+	DuplicateReference bool
+	AccountPrefix      string
+	ProductName        string
+	AccountNumber      string
+	DisplayName        string
 }
 
 func (q *Queries) GetPaymentRequestAdmin(ctx context.Context, id uuid.UUID) (GetPaymentRequestAdminRow, error) {
@@ -192,6 +196,7 @@ func (q *Queries) GetPaymentRequestAdmin(ctx context.Context, id uuid.UUID) (Get
 		&i.UpdatedAt,
 		&i.PaidAt,
 		&i.ClosedAt,
+		&i.DuplicateReference,
 		&i.AccountPrefix,
 		&i.ProductName,
 		&i.AccountNumber,
@@ -675,55 +680,59 @@ func (q *Queries) ListPayersAdmin(ctx context.Context, arg ListPayersAdminParams
 const listPaymentRequestsAdmin = `-- name: ListPaymentRequestsAdmin :many
 SELECT pr.id, pr.product_id, p.account_prefix, pr.payer_account_id, pa.account_number, pa.display_name,
        pr.product_reference, pr.description, pr.amount, pr.amount_paid, pr.status, pr.expires_at,
-       pr.created_at, pr.paid_at, pr.closed_at
+       pr.created_at, pr.paid_at, pr.closed_at, pr.duplicate_reference
   FROM payment_requests pr
   JOIN payer_accounts pa ON pa.id = pr.payer_account_id
   JOIN products p ON p.id = pr.product_id
  WHERE ($1::uuid IS NULL OR pr.product_id = $1)
-   AND ($2::uuid IS NULL OR pr.payer_account_id = $2)
-   AND ($3::payment_request_status IS NULL OR pr.status = $3)
-   AND ($4::text IS NULL
-        OR pa.account_number_norm = $5::text
-        OR lower(pr.product_reference) LIKE $4
-        OR lower(pr.description) LIKE $4)
-   AND ($6::timestamptz IS NULL
-        OR (pr.created_at, pr.id) < ($6::timestamptz, $7::uuid))
+   AND (NOT $2::boolean OR (pr.duplicate_reference AND pr.status IN ('open', 'partially_paid')))
+   AND ($3::uuid IS NULL OR pr.payer_account_id = $3)
+   AND ($4::payment_request_status IS NULL OR pr.status = $4)
+   AND ($5::text IS NULL
+        OR pa.account_number_norm = $6::text
+        OR lower(pr.product_reference) LIKE $5
+        OR lower(pr.description) LIKE $5)
+   AND ($7::timestamptz IS NULL
+        OR (pr.created_at, pr.id) < ($7::timestamptz, $8::uuid))
  ORDER BY pr.created_at DESC, pr.id DESC
- LIMIT $8
+ LIMIT $9
 `
 
 type ListPaymentRequestsAdminParams struct {
-	ProductID   *uuid.UUID
-	PayerID     *uuid.UUID
-	Status      NullPaymentRequestStatus
-	Pattern     *string
-	AccountNorm *string
-	CursorAt    *time.Time
-	CursorID    *uuid.UUID
-	Lim         int32
+	ProductID      *uuid.UUID
+	DuplicatesOnly bool
+	PayerID        *uuid.UUID
+	Status         NullPaymentRequestStatus
+	Pattern        *string
+	AccountNorm    *string
+	CursorAt       *time.Time
+	CursorID       *uuid.UUID
+	Lim            int32
 }
 
 type ListPaymentRequestsAdminRow struct {
-	ID               uuid.UUID
-	ProductID        uuid.UUID
-	AccountPrefix    string
-	PayerAccountID   uuid.UUID
-	AccountNumber    string
-	DisplayName      string
-	ProductReference string
-	Description      string
-	Amount           int64
-	AmountPaid       int64
-	Status           PaymentRequestStatus
-	ExpiresAt        *time.Time
-	CreatedAt        time.Time
-	PaidAt           *time.Time
-	ClosedAt         *time.Time
+	ID                 uuid.UUID
+	ProductID          uuid.UUID
+	AccountPrefix      string
+	PayerAccountID     uuid.UUID
+	AccountNumber      string
+	DisplayName        string
+	ProductReference   string
+	Description        string
+	Amount             int64
+	AmountPaid         int64
+	Status             PaymentRequestStatus
+	ExpiresAt          *time.Time
+	CreatedAt          time.Time
+	PaidAt             *time.Time
+	ClosedAt           *time.Time
+	DuplicateReference bool
 }
 
 func (q *Queries) ListPaymentRequestsAdmin(ctx context.Context, arg ListPaymentRequestsAdminParams) ([]ListPaymentRequestsAdminRow, error) {
 	rows, err := q.db.Query(ctx, listPaymentRequestsAdmin,
 		arg.ProductID,
+		arg.DuplicatesOnly,
 		arg.PayerID,
 		arg.Status,
 		arg.Pattern,
@@ -755,6 +764,7 @@ func (q *Queries) ListPaymentRequestsAdmin(ctx context.Context, arg ListPaymentR
 			&i.CreatedAt,
 			&i.PaidAt,
 			&i.ClosedAt,
+			&i.DuplicateReference,
 		); err != nil {
 			return nil, err
 		}

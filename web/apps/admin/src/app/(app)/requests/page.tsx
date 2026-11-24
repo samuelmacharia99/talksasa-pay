@@ -11,7 +11,7 @@ import { RequestTable } from "./RequestTable";
 
 export const metadata: Metadata = { title: "Payment requests" };
 
-const KEYS = ["product_id", "status", "q", "payer_id", "cursor"] as const;
+const KEYS = ["product_id", "status", "q", "payer_id", "duplicates", "cursor"] as const;
 
 export default async function Requests({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const p = pick(await searchParams, KEYS);
@@ -37,6 +37,12 @@ export default async function Requests({ searchParams }: { searchParams: Promise
             <option value="paid">Paid</option>
             <option value="cancelled">Cancelled</option>
             <option value="expired">Expired</option>
+          </select>
+        </FilterField>
+        <FilterField label="Show">
+          <select name="duplicates" defaultValue={p.duplicates ?? ""} className={filterInput}>
+            <option value="">All bills</option>
+            <option value="true">Reopened duplicates</option>
           </select>
         </FilterField>
       </FilterBar>

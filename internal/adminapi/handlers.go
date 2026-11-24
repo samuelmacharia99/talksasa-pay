@@ -495,7 +495,7 @@ func (h *handlers) listRequests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page, err := h.d.Reporting.ListPaymentRequests(r.Context(), reporting.RequestFilter{
-		ProductID: productID, PayerID: payerID, Status: q.Get("status"), Q: q.Get("q"), Cursor: q.Get("cursor"), Limit: queryLimit(q),
+		ProductID: productID, PayerID: payerID, Status: q.Get("status"), DuplicatesOnly: q.Get("duplicates") == "true", Q: q.Get("q"), Cursor: q.Get("cursor"), Limit: queryLimit(q),
 	})
 	if err != nil {
 		h.fail(w, r, err)

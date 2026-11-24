@@ -62,6 +62,14 @@ export default async function Overview() {
       urgent: false,
     },
   ];
+  if (c.duplicate_references > 0) {
+    attention.splice(2, 0, {
+      href: "/requests?duplicates=true",
+      label: c.duplicate_references === 1 ? "1 bill shares its reference with another" : `${c.duplicate_references} bills share their reference with another`,
+      detail: "A reversal reopened a bill the product had already billed again; cancel or settle one of each pair",
+      urgent: true,
+    });
+  }
   if (failed && failed.count > 0) {
     const n = failed.more ? `${failed.count}+` : String(failed.count);
     attention.splice(2, 0, {

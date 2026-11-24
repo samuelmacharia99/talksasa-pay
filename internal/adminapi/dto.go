@@ -186,13 +186,17 @@ type requestJSON struct {
 	CreatedAt        time.Time  `json:"created_at"`
 	PaidAt           *time.Time `json:"paid_at"`
 	ClosedAt         *time.Time `json:"closed_at"`
+	// DuplicateReference: reopened by a reversal while a newer live request
+	// had the same reference.
+	DuplicateReference bool `json:"duplicate_reference"`
 }
 
 func toRequestRow(r store.ListPaymentRequestsAdminRow) requestJSON {
 	return requestJSON{ID: r.ID, ProductID: r.ProductID, AccountPrefix: r.AccountPrefix, PayerAccountID: r.PayerAccountID,
 		AccountNumber: r.AccountNumber, PayerName: r.DisplayName, ProductReference: r.ProductReference, Description: r.Description,
 		Amount: r.Amount, AmountPaid: r.AmountPaid, Outstanding: r.Amount - r.AmountPaid, Status: string(r.Status),
-		ExpiresAt: r.ExpiresAt, CreatedAt: r.CreatedAt, PaidAt: r.PaidAt, ClosedAt: r.ClosedAt}
+		ExpiresAt: r.ExpiresAt, CreatedAt: r.CreatedAt, PaidAt: r.PaidAt, ClosedAt: r.ClosedAt,
+		DuplicateReference: r.DuplicateReference}
 }
 
 type requestAllocationJSON struct {
@@ -217,7 +221,8 @@ func toRequestDetail(d reporting.RequestDetail) requestDetailJSON {
 		requestJSON: requestJSON{ID: r.ID, ProductID: r.ProductID, AccountPrefix: r.AccountPrefix, PayerAccountID: r.PayerAccountID,
 			AccountNumber: r.AccountNumber, PayerName: r.DisplayName, ProductReference: r.ProductReference, Description: r.Description,
 			Amount: r.Amount, AmountPaid: r.AmountPaid, Outstanding: r.Amount - r.AmountPaid, Status: string(r.Status),
-			ExpiresAt: r.ExpiresAt, CreatedAt: r.CreatedAt, PaidAt: r.PaidAt, ClosedAt: r.ClosedAt},
+			ExpiresAt: r.ExpiresAt, CreatedAt: r.CreatedAt, PaidAt: r.PaidAt, ClosedAt: r.ClosedAt,
+			DuplicateReference: r.DuplicateReference},
 		ProductName: r.ProductName, UpdatedAt: r.UpdatedAt, Allocations: []requestAllocationJSON{},
 	}
 	for _, a := range d.Allocations {
@@ -435,6 +440,7 @@ func toDashboard(d reporting.Dashboard, products []product.Product) dashboardJSO
 			"suspense_count": d.Counts.SuspenseCount, "suspense_amount": d.Counts.SuspenseAmount,
 			"needs_review": d.Counts.NeedsReview, "pending": d.Counts.Pending,
 			"credit_held": d.Counts.CreditHeld, "payers": d.Counts.Payers,
+			"duplicate_references": d.Counts.DuplicateReferences,
 		},
 	}
 	for i, day := range d.Daily {

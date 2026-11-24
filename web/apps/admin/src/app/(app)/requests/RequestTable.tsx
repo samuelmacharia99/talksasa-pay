@@ -24,6 +24,9 @@ export function RequestTable({ items, showPayer = true }: { items: Array<AdminSc
                 {r.product_reference}
               </Link>
               <span className="block max-w-[22rem] truncate text-[0.8125rem] text-muted">{r.description}</span>
+              {r.duplicate_reference && (r.status === "open" || r.status === "partially_paid") ? (
+                <span className="block text-[0.8125rem] text-warn">Another live bill has this reference</span>
+              ) : null}
             </Td>
             {showPayer ? (
               <Td>

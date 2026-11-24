@@ -21,6 +21,18 @@ export default async function RequestPage({ params }: { params: Promise<{ id: st
         actions={<Status value={r.status} className="text-sm" />}
       />
       <div className="grid gap-6">
+        {r.duplicate_reference && (r.status === "open" || r.status === "partially_paid") ? (
+          <Panel>
+            <p className="text-sm text-ink-2">
+              <span className="font-medium text-warn">Another live bill has reference {r.product_reference}.</span> A reversal reopened this
+              bill after the product had billed the same reference again.{" "}
+              <Link href={`/requests?q=${encodeURIComponent(r.product_reference)}`} className="text-violet hover:underline">
+                Find the other bill
+              </Link>{" "}
+              and cancel or settle one of them.
+            </p>
+          </Panel>
+        ) : null}
         <Panel>
           <div className="flex flex-wrap items-end justify-between gap-6">
             <div>

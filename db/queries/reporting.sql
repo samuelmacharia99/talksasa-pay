@@ -30,11 +30,12 @@ SELECT pa.*, p.account_prefix, p.name AS product_name
 -- name: ListPaymentRequestsAdmin :many
 SELECT pr.id, pr.product_id, p.account_prefix, pr.payer_account_id, pa.account_number, pa.display_name,
        pr.product_reference, pr.description, pr.amount, pr.amount_paid, pr.status, pr.expires_at,
-       pr.created_at, pr.paid_at, pr.closed_at
+       pr.created_at, pr.paid_at, pr.closed_at, pr.duplicate_reference
   FROM payment_requests pr
   JOIN payer_accounts pa ON pa.id = pr.payer_account_id
   JOIN products p ON p.id = pr.product_id
  WHERE (sqlc.narg(product_id)::uuid IS NULL OR pr.product_id = sqlc.narg(product_id))
+   AND (NOT @duplicates_only::boolean OR (pr.duplicate_reference AND pr.status IN ('open', 'partially_paid')))
    AND (sqlc.narg(payer_id)::uuid IS NULL OR pr.payer_account_id = sqlc.narg(payer_id))
    AND (sqlc.narg(status)::payment_request_status IS NULL OR pr.status = sqlc.narg(status))
    AND (sqlc.narg(pattern)::text IS NULL
@@ -156,7 +157,8 @@ SELECT
   (SELECT count(*) FROM transactions WHERE status = 'needs_review')::bigint AS needs_review,
   (SELECT count(*) FROM transactions WHERE status = 'pending')::bigint AS pending,
   (SELECT coalesce(sum(credit_balance), 0) FROM payer_accounts)::bigint AS credit_held,
-  (SELECT count(*) FROM payer_accounts)::bigint AS payers;
+  (SELECT count(*) FROM payer_accounts)::bigint AS payers,
+  (SELECT count(*) FROM payment_requests WHERE duplicate_reference AND status IN ('open', 'partially_paid'))::bigint AS duplicate_references;
 
 -- name: GetPaymentRequestByHostedToken :one
 SELECT pr.id, pr.product_id, p.name AS product_name, p.account_prefix, p.status AS product_status,

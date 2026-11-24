@@ -16,7 +16,7 @@ const cancelPaymentRequest = `-- name: CancelPaymentRequest :one
 UPDATE payment_requests
    SET status = 'cancelled', closed_at = now()
  WHERE product_id = $1 AND id = $2 AND status = 'open'
-RETURNING id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at
+RETURNING id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at, duplicate_reference
 `
 
 type CancelPaymentRequestParams struct {
@@ -44,6 +44,7 @@ func (q *Queries) CancelPaymentRequest(ctx context.Context, arg CancelPaymentReq
 		&i.UpdatedAt,
 		&i.PaidAt,
 		&i.ClosedAt,
+		&i.DuplicateReference,
 	)
 	return i, err
 }
@@ -53,7 +54,7 @@ INSERT INTO payment_requests (id, product_id, payer_account_id, product_referenc
                               expires_at, hosted_token, idempotency_key)
 VALUES ($1, $2, $3, $4, $5, $6,
         $7, $8, $9)
-RETURNING id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at
+RETURNING id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at, duplicate_reference
 `
 
 type CreatePaymentRequestParams struct {
@@ -98,6 +99,7 @@ func (q *Queries) CreatePaymentRequest(ctx context.Context, arg CreatePaymentReq
 		&i.UpdatedAt,
 		&i.PaidAt,
 		&i.ClosedAt,
+		&i.DuplicateReference,
 	)
 	return i, err
 }
@@ -111,7 +113,7 @@ UPDATE payment_requests
     ORDER BY pr.expires_at
     LIMIT $1
     FOR NO KEY UPDATE SKIP LOCKED)
-RETURNING id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at
+RETURNING id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at, duplicate_reference
 `
 
 // Only untouched (open) requests expire; partially paid ones stay payable.
@@ -141,6 +143,7 @@ func (q *Queries) ExpireDuePaymentRequests(ctx context.Context, batchSize int32)
 			&i.UpdatedAt,
 			&i.PaidAt,
 			&i.ClosedAt,
+			&i.DuplicateReference,
 		); err != nil {
 			return nil, err
 		}
@@ -153,7 +156,7 @@ func (q *Queries) ExpireDuePaymentRequests(ctx context.Context, batchSize int32)
 }
 
 const getPaymentRequest = `-- name: GetPaymentRequest :one
-SELECT id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at FROM payment_requests WHERE product_id = $1 AND id = $2
+SELECT id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at, duplicate_reference FROM payment_requests WHERE product_id = $1 AND id = $2
 `
 
 type GetPaymentRequestParams struct {
@@ -181,12 +184,13 @@ func (q *Queries) GetPaymentRequest(ctx context.Context, arg GetPaymentRequestPa
 		&i.UpdatedAt,
 		&i.PaidAt,
 		&i.ClosedAt,
+		&i.DuplicateReference,
 	)
 	return i, err
 }
 
 const getPaymentRequestByIdempotencyKey = `-- name: GetPaymentRequestByIdempotencyKey :one
-SELECT id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at FROM payment_requests WHERE product_id = $1 AND idempotency_key = $2
+SELECT id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at, duplicate_reference FROM payment_requests WHERE product_id = $1 AND idempotency_key = $2
 `
 
 type GetPaymentRequestByIdempotencyKeyParams struct {
@@ -214,12 +218,13 @@ func (q *Queries) GetPaymentRequestByIdempotencyKey(ctx context.Context, arg Get
 		&i.UpdatedAt,
 		&i.PaidAt,
 		&i.ClosedAt,
+		&i.DuplicateReference,
 	)
 	return i, err
 }
 
 const listPayableRequestsForUpdate = `-- name: ListPayableRequestsForUpdate :many
-SELECT id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at FROM payment_requests
+SELECT id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at, duplicate_reference FROM payment_requests
  WHERE product_id = $1 AND payer_account_id = $2
    AND status IN ('open', 'partially_paid')
  ORDER BY created_at, id
@@ -258,6 +263,7 @@ func (q *Queries) ListPayableRequestsForUpdate(ctx context.Context, arg ListPaya
 			&i.UpdatedAt,
 			&i.PaidAt,
 			&i.ClosedAt,
+			&i.DuplicateReference,
 		); err != nil {
 			return nil, err
 		}
@@ -270,7 +276,7 @@ func (q *Queries) ListPayableRequestsForUpdate(ctx context.Context, arg ListPaya
 }
 
 const listPaymentRequestsByIDs = `-- name: ListPaymentRequestsByIDs :many
-SELECT id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at FROM payment_requests WHERE product_id = $1 AND id = ANY($2::uuid[]) ORDER BY created_at, id
+SELECT id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at, duplicate_reference FROM payment_requests WHERE product_id = $1 AND id = ANY($2::uuid[]) ORDER BY created_at, id
 `
 
 type ListPaymentRequestsByIDsParams struct {
@@ -304,6 +310,7 @@ func (q *Queries) ListPaymentRequestsByIDs(ctx context.Context, arg ListPaymentR
 			&i.UpdatedAt,
 			&i.PaidAt,
 			&i.ClosedAt,
+			&i.DuplicateReference,
 		); err != nil {
 			return nil, err
 		}
@@ -316,7 +323,7 @@ func (q *Queries) ListPaymentRequestsByIDs(ctx context.Context, arg ListPaymentR
 }
 
 const lockPaymentRequest = `-- name: LockPaymentRequest :one
-SELECT id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at FROM payment_requests WHERE product_id = $1 AND id = $2 FOR NO KEY UPDATE
+SELECT id, product_id, payer_account_id, product_reference, description, currency, amount, amount_paid, status, expires_at, hosted_token, idempotency_key, created_at, updated_at, paid_at, closed_at, duplicate_reference FROM payment_requests WHERE product_id = $1 AND id = $2 FOR NO KEY UPDATE
 `
 
 type LockPaymentRequestParams struct {
@@ -344,6 +351,7 @@ func (q *Queries) LockPaymentRequest(ctx context.Context, arg LockPaymentRequest
 		&i.UpdatedAt,
 		&i.PaidAt,
 		&i.ClosedAt,
+		&i.DuplicateReference,
 	)
 	return i, err
 }

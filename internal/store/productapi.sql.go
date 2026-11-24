@@ -13,7 +13,7 @@ import (
 )
 
 const getPaymentRequestForProduct = `-- name: GetPaymentRequestForProduct :one
-SELECT pr.id, pr.product_id, pr.payer_account_id, pr.product_reference, pr.description, pr.currency, pr.amount, pr.amount_paid, pr.status, pr.expires_at, pr.hosted_token, pr.idempotency_key, pr.created_at, pr.updated_at, pr.paid_at, pr.closed_at, pa.external_ref AS payer_external_ref, pa.account_number
+SELECT pr.id, pr.product_id, pr.payer_account_id, pr.product_reference, pr.description, pr.currency, pr.amount, pr.amount_paid, pr.status, pr.expires_at, pr.hosted_token, pr.idempotency_key, pr.created_at, pr.updated_at, pr.paid_at, pr.closed_at, pr.duplicate_reference, pa.external_ref AS payer_external_ref, pa.account_number
   FROM payment_requests pr
   JOIN payer_accounts pa ON pa.product_id = pr.product_id AND pa.id = pr.payer_account_id
  WHERE pr.product_id = $1 AND pr.id = $2
@@ -25,24 +25,25 @@ type GetPaymentRequestForProductParams struct {
 }
 
 type GetPaymentRequestForProductRow struct {
-	ID               uuid.UUID
-	ProductID        uuid.UUID
-	PayerAccountID   uuid.UUID
-	ProductReference string
-	Description      string
-	Currency         string
-	Amount           int64
-	AmountPaid       int64
-	Status           PaymentRequestStatus
-	ExpiresAt        *time.Time
-	HostedToken      string
-	IdempotencyKey   string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	PaidAt           *time.Time
-	ClosedAt         *time.Time
-	PayerExternalRef string
-	AccountNumber    string
+	ID                 uuid.UUID
+	ProductID          uuid.UUID
+	PayerAccountID     uuid.UUID
+	ProductReference   string
+	Description        string
+	Currency           string
+	Amount             int64
+	AmountPaid         int64
+	Status             PaymentRequestStatus
+	ExpiresAt          *time.Time
+	HostedToken        string
+	IdempotencyKey     string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	PaidAt             *time.Time
+	ClosedAt           *time.Time
+	DuplicateReference bool
+	PayerExternalRef   string
+	AccountNumber      string
 }
 
 func (q *Queries) GetPaymentRequestForProduct(ctx context.Context, arg GetPaymentRequestForProductParams) (GetPaymentRequestForProductRow, error) {
@@ -65,6 +66,7 @@ func (q *Queries) GetPaymentRequestForProduct(ctx context.Context, arg GetPaymen
 		&i.UpdatedAt,
 		&i.PaidAt,
 		&i.ClosedAt,
+		&i.DuplicateReference,
 		&i.PayerExternalRef,
 		&i.AccountNumber,
 	)
@@ -181,7 +183,7 @@ func (q *Queries) ListAllocationsForTransactionProduct(ctx context.Context, arg 
 
 const listPaymentRequestsForProduct = `-- name: ListPaymentRequestsForProduct :many
 
-SELECT pr.id, pr.product_id, pr.payer_account_id, pr.product_reference, pr.description, pr.currency, pr.amount, pr.amount_paid, pr.status, pr.expires_at, pr.hosted_token, pr.idempotency_key, pr.created_at, pr.updated_at, pr.paid_at, pr.closed_at, pa.external_ref AS payer_external_ref, pa.account_number
+SELECT pr.id, pr.product_id, pr.payer_account_id, pr.product_reference, pr.description, pr.currency, pr.amount, pr.amount_paid, pr.status, pr.expires_at, pr.hosted_token, pr.idempotency_key, pr.created_at, pr.updated_at, pr.paid_at, pr.closed_at, pr.duplicate_reference, pa.external_ref AS payer_external_ref, pa.account_number
   FROM payment_requests pr
   JOIN payer_accounts pa ON pa.product_id = pr.product_id AND pa.id = pr.payer_account_id
  WHERE pr.product_id = $1
@@ -205,24 +207,25 @@ type ListPaymentRequestsForProductParams struct {
 }
 
 type ListPaymentRequestsForProductRow struct {
-	ID               uuid.UUID
-	ProductID        uuid.UUID
-	PayerAccountID   uuid.UUID
-	ProductReference string
-	Description      string
-	Currency         string
-	Amount           int64
-	AmountPaid       int64
-	Status           PaymentRequestStatus
-	ExpiresAt        *time.Time
-	HostedToken      string
-	IdempotencyKey   string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	PaidAt           *time.Time
-	ClosedAt         *time.Time
-	PayerExternalRef string
-	AccountNumber    string
+	ID                 uuid.UUID
+	ProductID          uuid.UUID
+	PayerAccountID     uuid.UUID
+	ProductReference   string
+	Description        string
+	Currency           string
+	Amount             int64
+	AmountPaid         int64
+	Status             PaymentRequestStatus
+	ExpiresAt          *time.Time
+	HostedToken        string
+	IdempotencyKey     string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	PaidAt             *time.Time
+	ClosedAt           *time.Time
+	DuplicateReference bool
+	PayerExternalRef   string
+	AccountNumber      string
 }
 
 // Product-facing (/v1) reads. Every query is scoped by product_id, which the
@@ -261,6 +264,7 @@ func (q *Queries) ListPaymentRequestsForProduct(ctx context.Context, arg ListPay
 			&i.UpdatedAt,
 			&i.PaidAt,
 			&i.ClosedAt,
+			&i.DuplicateReference,
 			&i.PayerExternalRef,
 			&i.AccountNumber,
 		); err != nil {

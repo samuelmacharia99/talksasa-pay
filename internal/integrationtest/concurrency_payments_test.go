@@ -313,25 +313,66 @@ func TestConcurrencyReversalRacesPaymentsAndCredit(t *testing.T) {
 
 // A reversal reopens the requests it had paid. If the product has meanwhile
 // created a new live request with the same product reference (allowed: the
-// old one was paid), reopening collides with payment_requests_live_reference
-// and the reversal — which records money that has ALREADY left via M-Pesa —
-// cannot be booked at all.
-func TestReversalReopenCollidesWithReusedReference(t *testing.T) {
-	bugGate(t, "ledger.Reverse fails with a raw unique violation (payment_requests_live_reference) when the reopened request's reference was reused")
+// old one was paid), the reversal — money that has ALREADY left via M-Pesa —
+// must still be recorded. The reopened request is flagged duplicate_reference
+// (exempt from the live-reference index) for staff to resolve; the product
+// still cannot create a third live request for that reference.
+func TestReversalReopenWithReusedReference(t *testing.T) {
 	e := newEnv(t)
 	p := e.product("REUSE").Product
 	pr := e.payer(p.ID, "c1")
-	if _, err := e.createReq(p.ID, pr.ID, "INV-7", "k1", 1000, nil); err != nil {
+	oldReq, err := e.createReq(p.ID, pr.ID, "INV-7", "k1", 1000, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
 	pay, _ := e.pay(pr, 1000, nil, newReceipt())
 	// Old INV-7 is paid (not live), so the product may bill INV-7 again.
-	if _, err := e.createReq(p.ID, pr.ID, "INV-7", "k2", 1000, nil); err != nil {
+	newReq, err := e.createReq(p.ID, pr.ID, "INV-7", "k2", 1000, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := e.ledger.Reverse(e.ctx, operator, ledger.ReverseParams{OriginalID: pay.ID, Reason: "Safaricom reversal", ProviderReceipt: newReceipt()})
-	if err != nil {
+	if _, _, err := e.ledger.Reverse(e.ctx, operator, ledger.ReverseParams{OriginalID: pay.ID, Reason: "Safaricom reversal", ProviderReceipt: newReceipt()}); err != nil {
 		t.Fatalf("reversal of money that really left could not be recorded: %v", err)
+	}
+	assertStatus(t, e.reqState(p.ID, oldReq.Request.ID), allocation.StatusOpen, 0)
+	assertStatus(t, e.reqState(p.ID, newReq.Request.ID), allocation.StatusOpen, 0)
+	dup := func(id uuid.UUID) int64 {
+		return e.count(`SELECT count(*) FROM payment_requests WHERE id = $1 AND duplicate_reference`, id)
+	}
+	if dup(oldReq.Request.ID) != 1 || dup(newReq.Request.ID) != 0 {
+		t.Fatalf("duplicate_reference: old=%d new=%d, want 1/0", dup(oldReq.Request.ID), dup(newReq.Request.ID))
+	}
+	// The one-live-request-per-reference rule still holds for new requests.
+	if _, err := e.createReq(p.ID, pr.ID, "INV-7", "k3", 1000, nil); !errors.Is(err, paymentrequest.ErrDuplicateReference) {
+		t.Fatalf("third INV-7: %v, want ErrDuplicateReference", err)
+	}
+	// Only the allocations trigger may set the flag.
+	if _, err := e.db.App.Exec(e.ctx, `UPDATE payment_requests SET duplicate_reference = false WHERE id = $1`, oldReq.Request.ID); err == nil {
+		t.Fatal("app role cleared duplicate_reference directly")
+	}
+	e.checkInvariants(invariantOpts{allowCreditWithPayable: true})
+}
+
+// Without a reused reference, a reversal reopens the request normally: not
+// flagged, and it keeps blocking a second live request for its reference.
+func TestReversalReopenWithoutCollisionIsNotFlagged(t *testing.T) {
+	e := newEnv(t)
+	p := e.product("REOPEN").Product
+	pr := e.payer(p.ID, "c1")
+	req, err := e.createReq(p.ID, pr.ID, "INV-8", "k1", 1000, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pay, _ := e.pay(pr, 1000, nil, newReceipt())
+	if _, _, err := e.ledger.Reverse(e.ctx, operator, ledger.ReverseParams{OriginalID: pay.ID, Reason: "Safaricom reversal", ProviderReceipt: newReceipt()}); err != nil {
+		t.Fatal(err)
+	}
+	assertStatus(t, e.reqState(p.ID, req.Request.ID), allocation.StatusOpen, 0)
+	if c := e.count(`SELECT count(*) FROM payment_requests WHERE duplicate_reference`); c != 0 {
+		t.Fatalf("flagged %d requests", c)
+	}
+	if _, err := e.createReq(p.ID, pr.ID, "INV-8", "k2", 1000, nil); !errors.Is(err, paymentrequest.ErrDuplicateReference) {
+		t.Fatalf("second INV-8: %v, want ErrDuplicateReference", err)
 	}
 	e.checkInvariants(invariantOpts{allowCreditWithPayable: true})
 }

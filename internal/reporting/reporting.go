@@ -218,9 +218,12 @@ type RequestFilter struct {
 	ProductID *uuid.UUID
 	PayerID   *uuid.UUID
 	Status    string
-	Q         string
-	Cursor    string
-	Limit     int
+	// DuplicatesOnly keeps live requests reopened by a reversal while a
+	// newer live request had the same reference (staff must resolve them).
+	DuplicatesOnly bool
+	Q              string
+	Cursor         string
+	Limit          int
 }
 
 // ListPaymentRequests lists payment requests, newest first.
@@ -244,7 +247,7 @@ func (s *Service) ListPaymentRequests(ctx context.Context, f RequestFilter) (Pag
 	}
 	lim := limit(f.Limit)
 	rows, err := store.New(s.pool).ListPaymentRequestsAdmin(ctx, store.ListPaymentRequestsAdminParams{
-		ProductID: f.ProductID, PayerID: f.PayerID, Status: status, Pattern: srch.pattern, AccountNorm: srch.accountNorm,
+		ProductID: f.ProductID, PayerID: f.PayerID, DuplicatesOnly: f.DuplicatesOnly, Status: status, Pattern: srch.pattern, AccountNorm: srch.accountNorm,
 		CursorAt: at, CursorID: id, Lim: lim + 1,
 	})
 	if err != nil {

@@ -415,6 +415,7 @@ paths:
         - { name: payer_id, in: query, schema: { type: string, format: uuid } }
         - { name: status, in: query, schema: { $ref: "#/components/schemas/RequestStatus" } }
         - { name: q, in: query, schema: { type: string }, description: "Reference, description or account number" }
+        - { name: duplicates, in: query, schema: { type: boolean }, description: "Only live requests reopened by a reversal while a newer live request had the same reference" }
         - { $ref: "#/components/parameters/cursor" }
         - { $ref: "#/components/parameters/limit" }
       responses:
@@ -709,7 +710,7 @@ components:
                   created_at: { type: string, format: date-time }
     PaymentRequest:
       type: object
-      required: [id, product_id, account_prefix, payer_account_id, account_number, payer_name, product_reference, description, amount, amount_paid, outstanding, status, expires_at, created_at, paid_at, closed_at]
+      required: [id, product_id, account_prefix, payer_account_id, account_number, payer_name, product_reference, description, amount, amount_paid, outstanding, status, expires_at, created_at, paid_at, closed_at, duplicate_reference]
       properties:
         id: { type: string, format: uuid }
         product_id: { type: string, format: uuid }
@@ -727,6 +728,9 @@ components:
         created_at: { type: string, format: date-time }
         paid_at: { type: [string, "null"], format: date-time }
         closed_at: { type: [string, "null"], format: date-time }
+        duplicate_reference:
+          type: boolean
+          description: Reopened by a reversal while a newer live request had the same reference; staff should cancel or settle one of them.
     PaymentRequestDetail:
       allOf:
         - $ref: "#/components/schemas/PaymentRequest"
@@ -850,7 +854,7 @@ components:
         products: { type: array, items: { $ref: "#/components/schemas/Product" } }
         counts:
           type: object
-          required: [open_requests, outstanding, suspense_count, suspense_amount, needs_review, pending, credit_held, payers]
+          required: [open_requests, outstanding, suspense_count, suspense_amount, needs_review, pending, credit_held, payers, duplicate_references]
           properties:
             open_requests: { type: integer }
             outstanding: { type: integer }
@@ -860,6 +864,9 @@ components:
             pending: { type: integer }
             credit_held: { type: integer }
             payers: { type: integer }
+            duplicate_references:
+              type: integer
+              description: Live requests reopened by a reversal while a newer live request had the same reference; staff should resolve them.
         timezone: { type: string }
         generated_at: { type: string, format: date-time }
     Integrity:
