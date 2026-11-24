@@ -13,6 +13,7 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 	"github.com/talksasa/talksasa-pay/internal/platform/metrics"
+	"github.com/talksasa/talksasa-pay/internal/webhook"
 )
 
 func runAPI(ctx context.Context, logw io.Writer) error {
@@ -44,6 +45,7 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 	adminHandler := adminapi.NewRouter(adminapi.Deps{
 		Logger: a.logger.With(slog.String("listener", "admin")), Admin: a.admin, Products: a.products, Reporting: a.reporting,
 		Metrics: metrics.NewHTTP(reg, "admin"), TrustedProxies: a.cfg.TrustedProxies, MaxBodyBytes: 64 << 10,
+		Webhooks: webhook.NewDeliveries(a.pool, a.river),
 	})
 	adminSrv := httpx.NewServer(a.cfg.Admin.Addr, adminHandler, a.cfg.HTTP, a.logger)
 

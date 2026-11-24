@@ -12,6 +12,7 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 	"github.com/talksasa/talksasa-pay/internal/platform/metrics"
+	"github.com/talksasa/talksasa-pay/internal/webhook"
 )
 
 // runWorker runs background jobs (River): webhook delivery and maintenance
@@ -29,11 +30,24 @@ func runWorker(ctx context.Context, logw io.Writer) error {
 	if err := db.RegisterMetrics(reg.Prometheus()); err != nil {
 		return err
 	}
+	// Webhook delivery: SSRF-safe client (no private/internal addresses, no
+	// redirects); loopback is never allowed outside tests.
+	hc, err := webhook.NewHTTPClient(webhook.ClientOptions{Env: a.cfg.Env, Timeout: a.cfg.Worker.WebhookTimeout})
+	if err != nil {
+		return err
+	}
+	hookWorker, err := webhook.NewWorker(webhook.Options{
+		Pool: a.pool, Secrets: a.products, Logger: a.logger, Client: hc,
+		Env: a.cfg.Env, Timeout: a.cfg.Worker.WebhookTimeout,
+	})
+	if err != nil {
+		return err
+	}
 	deps := jobs.Deps{
 		Pool: a.pool, Events: a.events, Logger: a.logger, Metrics: m,
 		AttemptRetention:   a.cfg.Worker.AttemptRetention,
 		WebhookConcurrency: a.cfg.Worker.WebhookConcurrency,
-		// Webhook: set to the webhook delivery worker (river.Worker[queue.WebhookArgs]).
+		Webhook:            hookWorker,
 	}
 	client, err := jobs.NewClient(deps, jobs.ClientOptions{ExpiryEvery: a.cfg.Worker.MaintenanceEvery})
 	if err != nil {
