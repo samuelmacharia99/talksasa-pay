@@ -114,7 +114,7 @@ func (g *generator) c2b(ctx context.Context, r *mrand.Rand) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("fake daraja c2b: HTTP %d", resp.StatusCode)
