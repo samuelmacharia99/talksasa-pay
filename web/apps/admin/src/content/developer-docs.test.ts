@@ -4,7 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 // @ts-expect-error: plain ESM build script without type declarations
-import { build, OUTPUT, REPO_ROOT } from "../../scripts/developer-docs.mjs";
+import { build, OUTPUT, REPO_ROOT, reviewerNotes } from "../../scripts/developer-docs.mjs";
 
 import { docHref, GUIDES, REFERENCE, slugify } from "./developer-docs";
 
@@ -13,6 +13,21 @@ const haveSources = existsSync(path.join(REPO_ROOT as string, "docs/api/README.m
 describe.skipIf(!haveSources)("developer docs module", () => {
   it("matches docs/api and api/product.openapi.yaml (run pnpm --filter @talksasa/admin gen:docs)", () => {
     expect(readFileSync(OUTPUT as string, "utf8")).toBe((build as () => string)());
+  });
+});
+
+describe("reviewer notes", () => {
+  const notes = reviewerNotes as (md: string) => string[];
+  it("catches notes left for a reviewer", () => {
+    expect(notes("Intro\n> For the lead to verify: 401 or 403?")).toEqual(["2: > For the lead to verify: 401 or 403?"]);
+    expect(notes("composer require x  # (verify) tag name")).toHaveLength(1);
+    expect(notes("TODO: document cancel")).toHaveLength(1);
+  });
+  it("ignores ordinary text such as phone placeholders", () => {
+    expect(notes("as `07XXXXXXXX` or `+2547XXXXXXXX`; Verify the signature; todo list")).toEqual([]);
+  });
+  it("finds none in the published guides", () => {
+    for (const g of GUIDES) expect(notes(g.markdown), g.file).toEqual([]);
   });
 });
 

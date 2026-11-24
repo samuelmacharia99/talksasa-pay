@@ -147,6 +147,29 @@ function reference(spec) {
   };
 }
 
+/**
+ * Notes meant for a reviewer, not for product developers. The guides are
+ * published to staff as-is, so any of these stops generation.
+ */
+const REVIEWER_NOTES = [
+  /for the lead\b/i,
+  /\bto verify before publishing\b/i,
+  /\(verify\b/i,
+  /\bTODO\b/,
+  /\bFIXME\b/,
+  /\bTBD\b/,
+  /\breviewer note\b/i,
+];
+
+/** Lines of `markdown` that look like reviewer notes, as "line: text". */
+export function reviewerNotes(markdown) {
+  const found = [];
+  markdown.split("\n").forEach((line, i) => {
+    if (REVIEWER_NOTES.some((re) => re.test(line))) found.push(`${i + 1}: ${line.trim()}`);
+  });
+  return found;
+}
+
 function title(markdown, fallback) {
   const m = /^#\s+(.+)$/m.exec(markdown);
   return m ? m[1].trim() : fallback;
@@ -156,6 +179,10 @@ function title(markdown, fallback) {
 export function build(root = REPO_ROOT) {
   const guides = GUIDES.map((g) => {
     const markdown = readFileSync(path.join(root, "docs/api", g.file), "utf8");
+    const notes = reviewerNotes(markdown);
+    if (notes.length) {
+      throw new Error(`docs/api/${g.file} has reviewer notes; resolve them before publishing:\n  ${notes.join("\n  ")}`);
+    }
     return { slug: g.slug, file: g.file, nav: g.nav, title: title(markdown, g.nav), markdown };
   });
   const openapi = readFileSync(path.join(root, "api/product.openapi.yaml"), "utf8");

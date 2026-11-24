@@ -119,7 +119,7 @@ the reference.
 ## Reversals
 
 Sometimes a payment is reversed after it was applied (for example M-Pesa
-reverses a transaction). Talksasa Pay then records a new reversal transaction
+reverses a transaction). Talksasa staff then record a new reversal transaction
 that takes back exactly what the original payment applied, bill by bill and
 from credit. Nothing is edited or deleted; the original payment stays in the
 history.
@@ -129,9 +129,11 @@ Bills that lose money **reopen**: a `paid` bill becomes `partially_paid` or
 `payment_request.reopened`. Your product must handle this: for example, put
 the invoice back to unpaid and decide whether to suspend the service again.
 
-> For the lead to verify: what happens when the reversed payment's credit
-> has already been applied to a newer bill (whether credit can go negative,
-> or finance resolves it by hand), and whether to say so here.
+A credit balance never goes negative. If part of the reversed payment went to
+the payer's credit and that credit has since been spent on a newer bill, the
+reversal is refused as a whole: nothing is recorded, no bill reopens, and no
+events are sent. Talksasa finance then resolves it by hand. You only hear
+about a reversal once it has actually been recorded.
 
 ## Duplicates
 

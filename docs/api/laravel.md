@@ -5,16 +5,11 @@ wraps the API for any PHP 8.2+ app and ships a Laravel bridge: a config file,
 a facade, a webhook endpoint that verifies signatures, Laravel events for
 each Talksasa Pay event, and an Artisan command that polls the events feed.
 
-> For the lead to verify before publishing: the SDK was written in parallel
-> with this guide. Names marked *(verify)* are taken from its work in
-> progress and may have changed: the webhook controller class, the route
-> registration, the cursor migration and the command options.
-
 ## Install
 
 ```sh
 composer require talksasa/pay-php
-php artisan vendor:publish --tag=talksasa-pay-config     # (verify) tag name
+php artisan vendor:publish --tag=talksasa-pay-config
 ```
 
 The service provider and the `TalksasaPay` facade register themselves
@@ -83,24 +78,26 @@ The SDK throws a specific exception for each error `code` (all extend
 
 ## Receive webhooks
 
-Register the package's webhook controller on a route and give Talksasa staff
-the full URL *(verify: controller class and whether the package registers
-the route itself)*:
+Register the webhook route with the package's route macro and give
+Talksasa staff the full URL:
 
 ```php
 // routes/web.php or routes/api.php
-use Talksasa\Pay\Laravel\Http\WebhookController;   // (verify)
+use Illuminate\Support\Facades\Route;
 
-Route::post('/hooks/talksasa-pay', WebhookController::class);
+Route::talksasaPayWebhook('hooks/talksasa-pay');   // POST, named talksasa-pay.webhook
 ```
 
-If the route is in the `web` group, exclude it from CSRF protection (in
-Laravel 11+, `$middleware->validateCsrfTokens(except: ['hooks/talksasa-pay'])`
-in `bootstrap/app.php`). Talksasa signs every webhook instead.
+The macro puts the signature check (`VerifyWebhookSignature`) in front of
+the package's `WebhookController` and removes CSRF protection from that one
+route, because Talksasa signs every webhook instead. Don't point a route at
+`WebhookController` yourself: without the signature check it refuses every
+request with `400`.
 
-The controller verifies the signature against your configured secrets,
-rejects stale or forged requests with `400`, drops events it has already
-seen, dispatches a Laravel event, and answers `200`.
+The signature check verifies against your configured secrets and rejects
+stale or forged requests with `400`. The controller then dispatches the
+Laravel events and answers `200`; an event it has already handled is
+answered `200` without dispatching again.
 
 ## Listen for Laravel events
 
@@ -122,11 +119,11 @@ Each Talksasa Pay event type has its own Laravel event class in
 | `stk_push.succeeded` | `StkPushSucceeded` |
 | `stk_push.failed` | `StkPushFailed` |
 | `stk_push.needs_review` | `StkPushNeedsReview` |
-| any of the above | `WebhookReceived` (dispatched after the specific one) |
+| every event, including types this SDK version doesn't know yet | `WebhookReceived` (dispatched after the specific one) |
 
 Every event has `$event` (the envelope) and `$source` (`webhook` or `poll`).
 Payment request events also have `$paymentRequest`; transaction events
-`$transaction`; `stk_push.*` events `$stkPush` (a `Talksasa\Pay\Model\StkPush`
+`$transaction`; `PayerCreditChanged` has `$creditChange`; `stk_push.*` events `$stkPush` (a `Talksasa\Pay\Model\StkPush`
 with `status`, `resultCode`, `resultDesc`, `checkoutRequestId`).
 
 Use a queued listener so the webhook is answered within 10 seconds, and
@@ -261,8 +258,14 @@ Schedule::command('talksasa-pay:poll-events')
 ```
 
 Store the cursor in the database for production: set
-`TALKSASA_PAY_CURSOR_STORE=database` and run the package's migration, which
-creates a `talksasa_pay_cursors` table *(verify: migration publish tag)*.
+`TALKSASA_PAY_CURSOR_STORE=database`, then publish and run the package's
+migration, which creates a `talksasa_pay_cursors` table:
+
+```sh
+php artisan vendor:publish --tag=talksasa-pay-migrations
+php artisan migrate
+```
+
 The default `cache` store is fine only with a persistent cache; if the
 cursor is lost the command replays the whole feed, which de-duplication
 absorbs but takes time.
@@ -272,7 +275,7 @@ absorbs but takes time.
 - [ ] `tsp_live_` key in the production `.env` only, and a separate
       `tsp_test_` key for staging.
 - [ ] Webhook URL given to Talksasa staff; signing secret in `.env`.
-- [ ] Webhook route excluded from CSRF; returns `200` for a test event.
+- [ ] Webhook route registered with `Route::talksasaPayWebhook(...)`; returns `200` for a test event.
 - [ ] Listeners are queued and re-read the payment request.
 - [ ] A queue worker is running.
 - [ ] `talksasa-pay:poll-events` is scheduled, with the cursor in the
