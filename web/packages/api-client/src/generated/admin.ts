@@ -1945,6 +1945,12 @@ export interface components {
                 payers: number;
                 /** @description Live requests reopened by a reversal while a newer live request had the same reference; staff should resolve them. */
                 duplicate_references: number;
+                /** @description STK pushes a status check reported as paid but no receipt arrived; their transactions are in needs_review until staff enter the receipt. */
+                unknown_stk_pushes: number;
+                /** @description Safaricom callbacks still unprocessed 5 minutes after arrival, plus callbacks whose processing recorded an error in the last 7 days. */
+                unprocessed_callbacks: number;
+                /** @description Successful incoming payments in the last 30 days for a product that is not active or a payer account that is closed. The money was applied as normal; staff should follow up. */
+                inactive_product_payments: number;
             };
             timezone: string;
             /** Format: date-time */

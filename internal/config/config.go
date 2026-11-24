@@ -131,6 +131,7 @@ type APIConfig struct {
 // WorkerConfig configures the background worker (River).
 type WorkerConfig struct {
 	WebhookConcurrency int           // parallel webhook deliveries
+	MpesaConcurrency   int           // parallel M-Pesa callback/STK jobs
 	WebhookTimeout     time.Duration // per HTTP attempt
 	MaintenanceEvery   time.Duration // expiry sweep interval
 	AttemptRetention   time.Duration // webhook_attempts kept this long
@@ -247,6 +248,7 @@ func Load(src Source) (*Config, error) {
 	}
 	cfg.Worker = WorkerConfig{
 		WebhookConcurrency: int(l.int64("TSP_WORKER_WEBHOOK_CONCURRENCY", 50)),
+		MpesaConcurrency:   int(l.int64("TSP_WORKER_MPESA_CONCURRENCY", 20)),
 		WebhookTimeout:     l.duration("TSP_WEBHOOK_TIMEOUT", 10*time.Second),
 		MaintenanceEvery:   l.duration("TSP_WORKER_MAINTENANCE_EVERY", time.Minute),
 		AttemptRetention:   l.duration("TSP_WEBHOOK_ATTEMPT_RETENTION", 90*24*time.Hour),
@@ -361,6 +363,9 @@ func (c *Config) validate() error {
 	}
 	if c.Worker.WebhookConcurrency < 1 || c.Worker.WebhookConcurrency > 1000 {
 		errs = append(errs, errors.New("TSP_WORKER_WEBHOOK_CONCURRENCY: must be 1-1000"))
+	}
+	if c.Worker.MpesaConcurrency < 1 || c.Worker.MpesaConcurrency > 200 {
+		errs = append(errs, errors.New("TSP_WORKER_MPESA_CONCURRENCY: must be 1-200"))
 	}
 	if c.Worker.WebhookTimeout < time.Second || c.Worker.WebhookTimeout > time.Minute {
 		errs = append(errs, errors.New("TSP_WEBHOOK_TIMEOUT: must be 1s-1m"))
