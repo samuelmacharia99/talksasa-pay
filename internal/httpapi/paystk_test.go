@@ -181,7 +181,7 @@ func TestPayPageSTKStatus(t *testing.T) {
 	r := e.get(b.req.HostedToken)
 	m = r.expect(t, 200, "")
 	sp := m["stk_push"].(map[string]any)
-	if sp["status"] != "failed" || sp["message"] != "You cancelled the payment prompt." || sp["created_at"] == nil || len(sp) != 3 {
+	if sp["status"] != "failed" || sp["message"] != "You cancelled the M-Pesa prompt." || sp["created_at"] == nil || len(sp) != 3 {
 		t.Fatalf("stk_push %v", sp)
 	}
 	assertNoLeak(t, r.body, b, p.ID.String(), p.TransactionID.String(), desc)

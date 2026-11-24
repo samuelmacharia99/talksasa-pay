@@ -167,6 +167,8 @@ func CustomerMessage(resultCode string) string {
 		return "The M-Pesa PIN was wrong."
 	case mpesa.ResultTransactionExpired:
 		return "The prompt expired before it was answered."
+	case mpesa.ResultPushRequestInFlight:
+		return "Another M-Pesa payment is in progress on your phone. Wait a moment and try again."
 	}
 	return "The payment didn't go through."
 }

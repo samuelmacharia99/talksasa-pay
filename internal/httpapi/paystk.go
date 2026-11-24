@@ -74,34 +74,10 @@ func payPageSTKOf(p stk.Push) payPageSTK {
 		if p.ResultCode != nil {
 			code = *p.ResultCode
 		}
-		msg := customerMessage(code)
+		msg := stk.CustomerMessage(code)
 		out.Message = &msg
 	}
 	return out
-}
-
-// customerMessage explains a failed prompt to the payer in plain words.
-// Result codes are Daraja's (STK callback / query ResultCode).
-//
-// TODO(integration): replace with stk.CustomerMessage once the STK service
-// exports it, so the pay page and other surfaces share one wording.
-func customerMessage(resultCode string) string {
-	switch resultCode {
-	case "1032":
-		return "You cancelled the payment prompt."
-	case "1037":
-		return "The prompt timed out or your phone could not be reached. Make sure it is on and try again."
-	case "1":
-		return "Your M-Pesa balance is not enough for this payment."
-	case "2001":
-		return "The M-Pesa PIN entered was wrong. Please try again."
-	case "1001":
-		return "Another M-Pesa payment is in progress on your phone. Wait a moment and try again."
-	case "1019":
-		return "The payment prompt expired. Please try again."
-	default:
-		return "The payment did not go through. Please try again or pay by paybill."
-	}
 }
 
 // maxPayPageSTKBody bounds the prompt request body ({"phone": "..."}).
