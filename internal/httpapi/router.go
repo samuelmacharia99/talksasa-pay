@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/talksasa/talksasa-pay/internal/apiview"
+	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/payer"
 	"github.com/talksasa/talksasa-pay/internal/paymentrequest"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
@@ -40,6 +41,25 @@ type Deps struct {
 	Paybill string
 	// PayLimiter throttles pay-page lookups per client IP; nil = default.
 	PayLimiter *httpx.RateLimiter
+	// PaySTKLimiter additionally throttles pay-page prompts
+	// (POST /public/v1/pay/{token}/stk) per client IP; nil =
+	// DefaultPaySTKPerMinute / DefaultPaySTKBurst.
+	PaySTKLimiter *httpx.RateLimiter
+
+	// M-Pesa. STK nil (a nil interface, not a typed nil *stk.Service) means
+	// M-Pesa is off: stk_available is false, stk_push null, /v1 prompts 503
+	// mpesa_unavailable and no /cb routes exist. The callback routes are
+	// mounted only when STK.Available().
+	STK STKService
+	// MpesaCallbackToken is the secret path segment of the callback URLs
+	// (/cb/mpesa/{token}/...). Empty rejects every callback.
+	MpesaCallbackToken config.Secret
+	// MpesaCallbackCIDRs are Safaricom's callback source networks; empty
+	// accepts any source (development and sandbox only; config enforces).
+	MpesaCallbackCIDRs []netip.Prefix
+	// MpesaCallbackLimiter throttles callbacks per source IP (generous);
+	// nil = DefaultCallbackPerMinute / DefaultCallbackBurst.
+	MpesaCallbackLimiter *httpx.RateLimiter
 
 	// Product API (/v1).
 	Payers            *payer.Service
@@ -56,22 +76,38 @@ type Deps struct {
 // lowercase unpadded base32). Anything else is rejected before the database.
 var hostedTokenRe = regexp.MustCompile(`^[a-z2-7]{52}$`)
 
+// Defaults for optional rate limiters.
+const (
+	DefaultPaySTKPerMinute   = 6
+	DefaultPaySTKBurst       = 3
+	DefaultCallbackPerMinute = 3000
+	DefaultCallbackBurst     = 1000
+)
+
+// logPath is the path the access log (and every log line of a request)
+// shows: secret tokens in the path are replaced with [redacted].
+var logPath = httpx.RedactSegments("/cb/mpesa/*", "/cb/**", "/public/v1/pay/*")
+
 // NewRouter builds the public API handler.
 func NewRouter(d Deps) http.Handler {
 	if d.PayLimiter == nil {
 		d.PayLimiter = httpx.NewRateLimiter(60, 30)
 	}
+	if d.PaySTKLimiter == nil {
+		d.PaySTKLimiter = httpx.NewRateLimiter(DefaultPaySTKPerMinute, DefaultPaySTKBurst)
+	}
+	if d.MpesaCallbackLimiter == nil {
+		d.MpesaCallbackLimiter = httpx.NewRateLimiter(DefaultCallbackPerMinute, DefaultCallbackBurst)
+	}
 	r := chi.NewRouter()
 	r.Use(httpx.RequestID)
 	r.Use(httpx.ClientIP(d.TrustedProxies))
-	r.Use(httpx.AccessLog(d.Logger, d.Metrics))
+	r.Use(httpx.AccessLog(d.Logger, d.Metrics, httpx.LogPath(logPath)))
 	r.Use(httpx.Recover(d.Logger))
 	r.Use(httpx.SecurityHeaders)
 	r.Use(httpx.MaxBody(d.MaxBodyBytes))
 
-	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
-		httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusNotFound, "not_found", "No such resource."))
-	})
+	r.NotFound(notFound)
 	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed for this resource."))
 	})
@@ -97,7 +133,14 @@ func NewRouter(d Deps) http.Handler {
 	r.Route("/public/v1", func(pub chi.Router) {
 		pub.Use(httpx.LimitByIP(d.PayLimiter, "pay-page"))
 		pub.Get("/pay/{token}", payPage(d))
+		pub.With(httpx.LimitByIP(d.PaySTKLimiter, "pay-stk")).Post("/pay/{token}/stk", payPageSTKPush(d))
 	})
+
+	// Safaricom callbacks: no product-API auth; the secret path token and
+	// the source-IP allow-list decide. Absent entirely while M-Pesa is off.
+	if d.STK != nil && d.STK.Available() {
+		r.Route("/cb/mpesa/{token}", newCallbacks(d).routes)
+	}
 
 	// Product integration API: auth (key -> IP allow-list -> per-key rate
 	// limit), strict JSON, every query scoped to the key's product.
@@ -113,9 +156,24 @@ func NewRouter(d Deps) http.Handler {
 	}
 	r.With(httpx.Timeout(apiTimeout+2*time.Second), httpx.LoadShed(maxInFlight)).Mount("/v1", productapi.NewRouter(productapi.Deps{
 		Logger: d.Logger, Pool: d.Pool, Products: d.Products, Payers: d.Payers, Requests: d.Requests,
-		View: d.View, KeyLimiter: d.KeyLimiter, RequestTimeout: d.APIRequestTimeout,
+		View: d.View, KeyLimiter: d.KeyLimiter, RequestTimeout: d.APIRequestTimeout, STK: productSTK(d.STK),
 	}))
 	return r
+}
+
+// productSTK keeps a nil STK a nil productapi.STKService (not a non-nil
+// interface holding nil).
+func productSTK(s STKService) productapi.STKService {
+	if s == nil {
+		return nil
+	}
+	return s
+}
+
+// notFound is the one 404 for unknown paths (and rejected callbacks, which
+// must look exactly like unknown paths).
+func notFound(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusNotFound, "not_found", "No such resource."))
 }
 
 type paybillJSON struct {
@@ -152,35 +210,47 @@ type payPageSTK struct {
 // the endpoint cannot be used to probe for valid tokens. It returns only
 // what the payer needs to pay: no name, phone, email or internal ids.
 func payPage(d Deps) http.HandlerFunc {
-	notFound := func(w http.ResponseWriter, r *http.Request) {
-		httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusNotFound, "not_found", "This payment link is not valid."))
-	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
-		token := chi.URLParam(r, "token")
-		if !hostedTokenRe.MatchString(token) {
-			notFound(w, r)
-			return
-		}
-		p, err := d.Reporting.PayPageByToken(r.Context(), token)
-		if errors.Is(err, reporting.ErrNotFound) {
-			notFound(w, r)
-			return
-		}
-		if err != nil {
-			httpx.InternalError(w, r, d.Logger, err)
+		p, ok := lookupPayPage(d, w, r)
+		if !ok {
 			return
 		}
 		out := payPageJSON{
 			ProductName: p.ProductName, Reference: p.ProductReference, Description: p.Description, Currency: "KES",
 			Amount: p.Amount, AmountPaid: p.AmountPaid, Outstanding: p.Amount - p.AmountPaid, Status: string(p.Status),
 			Payable: p.Payable, ExpiresAt: p.ExpiresAt, PaidAt: p.PaidAt,
-			// STK push arrives with the Daraja integration (Phase 2).
-			STKAvailable: false,
+			STKAvailable: stkAvailable(d, p),
+			STKPush:      latestSTK(d, r, p),
 		}
 		if d.Paybill != "" && p.Payable {
 			out.Paybill = &paybillJSON{BusinessNumber: d.Paybill, AccountNumber: p.AccountNumber}
 		}
 		httpx.WriteJSON(w, http.StatusOK, out)
 	}
+}
+
+// payLinkNotFound is the pay page's single 404.
+func payLinkNotFound(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusNotFound, "not_found", "This payment link is not valid."))
+}
+
+// lookupPayPage resolves {token}. Malformed, unknown and suspended-product
+// tokens all get the same 404 (written here; ok is then false).
+func lookupPayPage(d Deps, w http.ResponseWriter, r *http.Request) (reporting.PayPage, bool) {
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	token := chi.URLParam(r, "token")
+	if !hostedTokenRe.MatchString(token) {
+		payLinkNotFound(w, r)
+		return reporting.PayPage{}, false
+	}
+	p, err := d.Reporting.PayPageByToken(r.Context(), token)
+	if errors.Is(err, reporting.ErrNotFound) {
+		payLinkNotFound(w, r)
+		return reporting.PayPage{}, false
+	}
+	if err != nil {
+		httpx.InternalError(w, r, d.Logger, err)
+		return reporting.PayPage{}, false
+	}
+	return p, true
 }

@@ -4,6 +4,18 @@
 	email {$TSP_ACME_EMAIL}
 	# No trusted_proxies: the client IP is always the TCP peer, so incoming
 	# X-Forwarded-For headers cannot fake an address (admin allow-list, logs).
+
+	# Caddy's own (non-access) logs, e.g. reverse_proxy errors, include the
+	# request URI: hide the M-Pesa callback token there too.
+	log default {
+		output stderr
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp "(?i)^/+cb/+mpesa/+[^/?#]*" "/cb/mpesa/[redacted]"
+			}
+		}
+	}
 }
 
 (edge) {
@@ -15,9 +27,16 @@
 		-Server
 		-X-Powered-By
 	}
+	# Access log. The M-Pesa callback URLs carry a secret token in the path
+	# (/cb/mpesa/<token>/...): it is replaced before anything is written.
 	log {
 		output stdout
-		format json
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp "(?i)^/+cb/+mpesa/+[^/?#]*" "/cb/mpesa/[redacted]"
+			}
+		}
 	}
 }
 
