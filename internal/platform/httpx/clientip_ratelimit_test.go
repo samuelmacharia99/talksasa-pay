@@ -59,12 +59,12 @@ func TestRateLimiterBurstRefillAndIsolation(t *testing.T) {
 
 func TestRateLimiterBoundedMemory(t *testing.T) {
 	l := NewRateLimiter(60, 1)
-	l.maxKeys = 10
+	l.maxKeys = 10 // rounds up to one key per shard
 	for i := 0; i < 1000; i++ {
 		l.Allow(fmt.Sprint("k", i))
 	}
-	if len(l.buckets) > 10 {
-		t.Fatalf("buckets grew to %d", len(l.buckets))
+	if n := l.Len(); n > rateShards {
+		t.Fatalf("buckets grew to %d", n)
 	}
 }
 

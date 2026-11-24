@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"strconv"
 	"time"
 
@@ -23,7 +24,16 @@ import (
 // Pool is the shared connection pool.
 type Pool = pgxpool.Pool
 
-// Open creates and verifies a connection pool.
+// Open creates and verifies a connection pool. Every connection starts with
+// these session settings (sent in the startup packet, so they hold before
+// the first query and survive DISCARD ALL):
+//
+//   - statement_timeout = cfg.StatementTimeout: no single statement runs away;
+//   - lock_timeout = cfg.LockTimeout: a statement waiting for a row lock fails
+//     with lock_not_available (IsLockTimeout) instead of queueing forever;
+//   - idle_in_transaction_session_timeout = cfg.IdleInTxTimeout: a leaked
+//     open transaction is killed and its locks released;
+//   - application_name = appName, timezone = UTC.
 func Open(ctx context.Context, cfg config.DatabaseConfig, appName string, logger *slog.Logger) (*pgxpool.Pool, error) {
 	pc, err := pgxpool.ParseConfig(cfg.URL.Reveal())
 	if err != nil {
@@ -35,12 +45,7 @@ func Open(ctx context.Context, cfg config.DatabaseConfig, appName string, logger
 	pc.MaxConnLifetime = cfg.MaxConnLifetime
 	pc.MaxConnLifetimeJitter = cfg.MaxConnLifetime / 10
 	pc.HealthCheckPeriod = 30 * time.Second
-	rp := pc.ConnConfig.RuntimeParams
-	rp["application_name"] = appName
-	rp["statement_timeout"] = strconv.FormatInt(cfg.StatementTimeout.Milliseconds(), 10)
-	rp["idle_in_transaction_session_timeout"] = "60000"
-	rp["lock_timeout"] = "10000"
-	rp["timezone"] = "UTC"
+	applySessionParams(pc.ConnConfig.RuntimeParams, cfg, appName)
 	pc.ConnConfig.Tracer = &slowQueryTracer{logger: logger, threshold: 250 * time.Millisecond}
 
 	pool, err := pgxpool.NewWithConfig(ctx, pc)
@@ -56,7 +61,35 @@ func Open(ctx context.Context, cfg config.DatabaseConfig, appName string, logger
 	return pool, nil
 }
 
+// Session defaults used when the config leaves a value at zero.
+const (
+	defaultLockTimeout     = 5 * time.Second
+	defaultIdleInTxTimeout = 60 * time.Second
+)
+
+func applySessionParams(rp map[string]string, cfg config.DatabaseConfig, appName string) {
+	ms := func(d, def time.Duration) string {
+		if d <= 0 {
+			d = def
+		}
+		return strconv.FormatInt(d.Milliseconds(), 10)
+	}
+	rp["application_name"] = appName
+	if cfg.StatementTimeout > 0 {
+		rp["statement_timeout"] = ms(cfg.StatementTimeout, 0)
+	}
+	rp["lock_timeout"] = ms(cfg.LockTimeout, defaultLockTimeout)
+	rp["idle_in_transaction_session_timeout"] = ms(cfg.IdleInTxTimeout, defaultIdleInTxTimeout)
+	rp["timezone"] = "UTC"
+}
+
 // TxFunc runs inside a database transaction.
+//
+// WithTx may call it more than once (see WithTx), each time with a fresh
+// transaction, so it must only change state through q/tx: no HTTP calls,
+// no sends on channels, no writes to captured variables that a later
+// attempt does not overwrite. Results meant for the caller should be
+// assigned (not appended) so the last, committed attempt wins.
 type TxFunc func(ctx context.Context, q *store.Queries, tx pgx.Tx) error
 
 // Beginner is satisfied by *pgxpool.Pool and pgx.Tx (nested = savepoint).
@@ -64,13 +97,80 @@ type Beginner interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
+// MaxTxAttempts bounds how many times WithTx runs fn when PostgreSQL aborts
+// the transaction with serialization_failure or deadlock_detected.
+const MaxTxAttempts = 3
+
+// Retry backoff: full jitter over an exponentially growing window.
+const (
+	retryBaseDelay = 10 * time.Millisecond
+	retryMaxDelay  = 250 * time.Millisecond
+)
+
 // WithTx runs fn in a READ COMMITTED transaction and commits if fn returns
 // nil. actor ("cli:alice", "system:c2b-worker", "product:<id>") is recorded
 // by triggers on every ledger status change in this transaction.
-func WithTx(ctx context.Context, b Beginner, actor string, fn TxFunc) (err error) {
+//
+// If the transaction fails with serialization_failure (40001) or
+// deadlock_detected (40P01) — from fn or from COMMIT — the transaction is
+// rolled back and the WHOLE of fn is run again in a fresh transaction, up
+// to MaxTxAttempts times in total, after a short jittered backoff. No other
+// error is retried, and nothing is retried once ctx is done. Savepoints
+// (b is itself a pgx.Tx) are never retried: the enclosing transaction owns
+// the retry. lock_not_available and statement timeouts are not retried
+// either (the lock holder is likely still busy); see IsBusy.
+func WithTx(ctx context.Context, b Beginner, actor string, fn TxFunc) error {
 	if actor == "" {
 		return errors.New("db: actor is required for every write transaction")
 	}
+	attempts := MaxTxAttempts
+	if _, nested := b.(pgx.Tx); nested {
+		attempts = 1
+	}
+	return retryTx(ctx, attempts, sleepCtx, func(ctx context.Context) error {
+		return runTx(ctx, b, actor, fn)
+	})
+}
+
+// retryTx runs once until it succeeds, fails with a non-retryable error,
+// runs out of attempts, or ctx ends.
+func retryTx(ctx context.Context, attempts int, sleep func(context.Context, time.Duration) error, once func(context.Context) error) error {
+	for attempt := 1; ; attempt++ {
+		err := once(ctx)
+		if err == nil || attempt >= attempts || !IsRetryable(err) || ctx.Err() != nil {
+			if err != nil && attempt > 1 && IsRetryable(err) {
+				txRetryExhausted.Inc()
+			}
+			return err
+		}
+		txRetries.WithLabelValues(retryReason(err)).Inc()
+		if serr := sleep(ctx, backoff(attempt)); serr != nil {
+			return err // ctx ended while waiting: report the database error
+		}
+	}
+}
+
+// backoff returns a random delay in [0, min(max, base*2^(attempt-1))].
+func backoff(attempt int) time.Duration {
+	window := retryBaseDelay << (attempt - 1)
+	if window > retryMaxDelay || window <= 0 {
+		window = retryMaxDelay
+	}
+	return rand.N(window + 1) //nolint:gosec // jitter, not security sensitive
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func runTx(ctx context.Context, b Beginner, actor string, fn TxFunc) (err error) {
 	tx, err := b.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("db: begin: %w", sanitize(err))
@@ -96,6 +196,51 @@ func WithTx(ctx context.Context, b Beginner, actor string, fn TxFunc) (err error
 		return fmt.Errorf("db: commit: %w", sanitize(err))
 	}
 	return nil
+}
+
+// SQLSTATE codes classified by this package.
+const (
+	codeSerializationFailure = "40001"
+	codeDeadlockDetected     = "40P01"
+	codeLockNotAvailable     = "55P03"
+	codeQueryCanceled        = "57014"
+)
+
+func pgCode(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
+}
+
+// IsRetryable reports whether err is a transient concurrency failure
+// (serialization_failure or deadlock_detected) after which the whole
+// transaction may be safely re-run. WithTx already retries these; seeing
+// one from WithTx means the retries were exhausted.
+func IsRetryable(err error) bool {
+	c := pgCode(err)
+	return c == codeSerializationFailure || c == codeDeadlockDetected
+}
+
+// IsLockTimeout reports lock_not_available (55P03): lock_timeout expired or
+// NOWAIT found the row locked. Another request holds the lock; the client
+// should retry later (503 busy + Retry-After), not immediately.
+func IsLockTimeout(err error) bool { return pgCode(err) == codeLockNotAvailable }
+
+// IsStatementTimeout reports query_canceled (57014): statement_timeout
+// expired or an operator cancelled the query.
+func IsStatementTimeout(err error) bool { return pgCode(err) == codeQueryCanceled }
+
+// IsBusy reports any transient contention/overload failure that handlers
+// should answer with 503 "busy" and Retry-After rather than 500: lock
+// timeouts, statement timeouts and exhausted serialization/deadlock retries.
+func IsBusy(err error) bool {
+	switch pgCode(err) {
+	case codeLockNotAvailable, codeQueryCanceled, codeSerializationFailure, codeDeadlockDetected:
+		return true
+	}
+	return false
 }
 
 // IsNotFound reports whether err means no row matched.

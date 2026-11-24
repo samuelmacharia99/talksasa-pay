@@ -105,7 +105,11 @@ type HTTPConfig struct {
 	WriteTimeout      time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
-	MaxBodyBytes      int64
+	// DrainDelay is how long readiness reports "draining" (503) before the
+	// listener stops accepting, so load balancers stop routing new traffic
+	// first. 0 (the default) shuts down immediately after flipping readiness.
+	DrainDelay   time.Duration
+	MaxBodyBytes int64
 }
 
 // MetricsConfig configures the internal-only metrics listener.
@@ -120,6 +124,14 @@ type DatabaseConfig struct {
 	MinConns         int32
 	MaxConnLifetime  time.Duration
 	StatementTimeout time.Duration
+	// LockTimeout is the session lock_timeout (TSP_DB_LOCK_TIMEOUT; also
+	// mirrored in APIConfig.LockTimeout). A statement waiting longer for a
+	// row lock fails with lock_not_available instead of piling up.
+	LockTimeout time.Duration
+	// IdleInTxTimeout is idle_in_transaction_session_timeout: a session left
+	// idle inside an open transaction (a leaked tx) is terminated, releasing
+	// its locks.
+	IdleInTxTimeout time.Duration
 }
 
 // CryptoConfig points at key material used for envelope encryption and API
@@ -167,6 +179,7 @@ func Load(src Source) (*Config, error) {
 		WriteTimeout:      l.duration("TSP_HTTP_WRITE_TIMEOUT", 30*time.Second),
 		IdleTimeout:       l.duration("TSP_HTTP_IDLE_TIMEOUT", 120*time.Second),
 		ShutdownTimeout:   l.duration("TSP_HTTP_SHUTDOWN_TIMEOUT", 20*time.Second),
+		DrainDelay:        l.nonNegDuration("TSP_HTTP_DRAIN_DELAY", 0),
 		MaxBodyBytes:      l.int64("TSP_HTTP_MAX_BODY_BYTES", 1<<20),
 	}
 	cfg.Metrics = MetricsConfig{Addr: l.str("TSP_METRICS_ADDR", "127.0.0.1:9464")}
@@ -180,12 +193,13 @@ func Load(src Source) (*Config, error) {
 		Paybill:    l.str("TSP_MPESA_PAYBILL", ""),
 		PayBaseURL: l.str("TSP_PAY_BASE_URL", "http://127.0.0.1:3000/"),
 	}
+	lockTimeout := l.duration("TSP_DB_LOCK_TIMEOUT", 5*time.Second)
 	cfg.API = APIConfig{
 		RatePerKey:     float64(l.int64("TSP_API_RATE_PER_KEY", 50)),
 		BurstPerKey:    int(l.int64("TSP_API_BURST_PER_KEY", 100)),
 		MaxInFlight:    int(l.int64("TSP_API_MAX_IN_FLIGHT", 512)),
 		RequestTimeout: l.duration("TSP_API_REQUEST_TIMEOUT", 15*time.Second),
-		LockTimeout:    l.duration("TSP_DB_LOCK_TIMEOUT", 5*time.Second),
+		LockTimeout:    lockTimeout,
 	}
 	cfg.Worker = WorkerConfig{
 		WebhookConcurrency: int(l.int64("TSP_WORKER_WEBHOOK_CONCURRENCY", 50)),
@@ -203,6 +217,8 @@ func Load(src Source) (*Config, error) {
 		MinConns:         int32(l.int64("TSP_DB_MIN_CONNS", 2)),
 		MaxConnLifetime:  l.duration("TSP_DB_MAX_CONN_LIFETIME", time.Hour),
 		StatementTimeout: l.duration("TSP_DB_STATEMENT_TIMEOUT", 15*time.Second),
+		LockTimeout:      lockTimeout,
+		IdleInTxTimeout:  l.duration("TSP_DB_IDLE_IN_TX_TIMEOUT", 60*time.Second),
 	}
 	cfg.Crypto = CryptoConfig{
 		MasterKeys:       l.secret("TSP_MASTER_KEYS", cfg.Env, true),
@@ -273,6 +289,15 @@ func (c *Config) validate() error {
 	}
 	if c.API.LockTimeout < 100*time.Millisecond || c.API.LockTimeout >= c.API.RequestTimeout {
 		errs = append(errs, errors.New("TSP_DB_LOCK_TIMEOUT: must be at least 100ms and below TSP_API_REQUEST_TIMEOUT"))
+	}
+	if c.Database.LockTimeout > c.Database.StatementTimeout {
+		errs = append(errs, errors.New("TSP_DB_LOCK_TIMEOUT: must not exceed TSP_DB_STATEMENT_TIMEOUT"))
+	}
+	if c.Database.IdleInTxTimeout < time.Second {
+		errs = append(errs, errors.New("TSP_DB_IDLE_IN_TX_TIMEOUT: must be at least 1s"))
+	}
+	if c.HTTP.DrainDelay > time.Minute {
+		errs = append(errs, errors.New("TSP_HTTP_DRAIN_DELAY: must be at most 1m"))
 	}
 	if c.Worker.WebhookConcurrency < 1 || c.Worker.WebhookConcurrency > 1000 {
 		errs = append(errs, errors.New("TSP_WORKER_WEBHOOK_CONCURRENCY: must be 1-1000"))
@@ -348,6 +373,20 @@ func (l *loader) duration(name string, def time.Duration) time.Duration {
 	d, err := time.ParseDuration(v)
 	if err != nil || d <= 0 {
 		l.fail(name, errors.New("must be a positive Go duration such as 15s"))
+		return def
+	}
+	return d
+}
+
+// nonNegDuration is duration but also accepts "0" (disabled).
+func (l *loader) nonNegDuration(name string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(l.src.Getenv(name))
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		l.fail(name, errors.New("must be a non-negative Go duration such as 5s"))
 		return def
 	}
 	return d
