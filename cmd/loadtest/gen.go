@@ -157,6 +157,15 @@ type generator struct {
 	cursorMu    sync.Mutex
 	eventCursor string
 	st          *stats
+
+	// M-Pesa ops.
+	fakeDaraja  string       // fake Daraja base URL ending in "/" ("" = no c2b)
+	fakeHTTP    *http.Client // for the fake Daraja
+	accounts    sync.Map     // payer index -> account number
+	waiting     promptPool
+	stkSent     atomic.Int64
+	c2bSent     atomic.Int64
+	c2bMatching atomic.Int64
 }
 
 func newRunID() string {
@@ -176,7 +185,10 @@ func (g *generator) setup(ctx context.Context, concurrency int) error {
 	for range max(concurrency, 1) {
 		wg.Go(func() {
 			for i := range idx {
-				_, _, err := g.client.UpsertPayer(ctx, g.payerRef(i), talksasapay.PayerInput{DisplayName: fmt.Sprintf("Load test payer %d", i)})
+				p, _, err := g.client.UpsertPayer(ctx, g.payerRef(i), talksasapay.PayerInput{DisplayName: fmt.Sprintf("Load test payer %d", i)})
+				if err == nil {
+					g.accounts.Store(i, p.AccountNumber)
+				}
 				if err != nil {
 					mu.Lock()
 					if firstErr == nil {
@@ -250,6 +262,10 @@ func (g *generator) exec(ctx context.Context, op string, r *mrand.Rand) error {
 	case opWhoami:
 		_, err := c.Whoami(ctx)
 		return err
+	case opSTK:
+		return g.stk(ctx, r)
+	case opC2B:
+		return g.c2b(ctx, r)
 	case opEvents:
 		g.cursorMu.Lock()
 		after := g.eventCursor

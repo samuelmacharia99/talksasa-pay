@@ -11,6 +11,12 @@
 // delivery is at least once), missing events and rejected signatures.
 // Point the product's webhook URL at the listener before starting.
 //
+// M-Pesa mix (local stack with the fake Daraja ONLY — prompts against a real
+// Daraja would go to real phones): add stk=N (bill + STK push, outcome by
+// the phone's last digit, see mpesa.go) and c2b=N (paybill payments posted
+// to the fake Daraja's /fake/c2b for the run's payers, half of them
+// matching a waiting prompt) with -fake-daraja http://127.0.0.1:8090/.
+//
 // Exit status: 0 ok; 1 a threshold failed (any 5xx, p99 above -max-p99,
 // missing webhook deliveries, rejected webhooks) or the run could not start;
 // 2 bad flags.
@@ -55,6 +61,7 @@ type config struct {
 	webhookSecretFile        string
 	webhookGrace             time.Duration
 	webhookSecret, keySecret []byte
+	fakeDaraja               string
 }
 
 func parseFlags(args []string, stderr io.Writer) (*config, error) {
@@ -73,6 +80,7 @@ func parseFlags(args []string, stderr io.Writer) (*config, error) {
 	fs.IntVar(&c.retries, "retries", 0, "client retries for safe requests (0 measures raw server behaviour)")
 	fs.StringVar(&c.webhookListen, "webhook-listen", "", "address for a webhook receiver, e.g. :9099 (optional)")
 	fs.StringVar(&c.webhookSecretFile, "webhook-secret-file", "", "file holding the webhook signing secret (required with -webhook-listen)")
+	fs.StringVar(&c.fakeDaraja, "fake-daraja", "", "fake Daraja base URL for the c2b op, e.g. http://127.0.0.1:8090/ (local stack only)")
 	fs.DurationVar(&c.webhookGrace, "webhook-grace", 30*time.Second, "how long to wait for outstanding webhook deliveries after the load")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -101,8 +109,13 @@ func parseFlags(args []string, stderr io.Writer) (*config, error) {
 		return nil, errors.New("-payers must be >= 1")
 	case c.retries < 0:
 		return nil, errors.New("-retries must be >= 0")
+	case c.mix.Weight(opC2B) > 0 && c.fakeDaraja == "":
+		return nil, errors.New("the c2b op needs -fake-daraja")
 	case c.webhookListen != "" && c.webhookSecretFile == "":
 		return nil, errors.New("-webhook-listen needs -webhook-secret-file")
+	}
+	if c.fakeDaraja != "" && !strings.HasSuffix(c.fakeDaraja, "/") {
+		c.fakeDaraja += "/"
 	}
 	if c.keySecret, err = readSecretFile(c.keyFile); err != nil {
 		return nil, fmt.Errorf("-key-file: %w", err)
@@ -179,7 +192,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "webhook receiver on %s\n", ln.Addr())
 	}
 
-	g := &generator{client: client, mix: cfg.mix, payers: cfg.payers, runID: newRunID(), st: st}
+	g := &generator{client: client, mix: cfg.mix, payers: cfg.payers, runID: newRunID(), st: st,
+		fakeDaraja: cfg.fakeDaraja, fakeHTTP: newFakeHTTP()}
 	var elapsed time.Duration
 	if cfg.concurrency > 0 {
 		fmt.Fprintf(stdout, "run %s: upserting %d payers...\n", g.runID, cfg.payers)
@@ -207,6 +221,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintln(stdout)
 	res := st.report(stdout, elapsed, cfg.mix.Ops())
+	if cfg.mix.Weight(opSTK)+cfg.mix.Weight(opC2B) > 0 {
+		fmt.Fprintf(stdout, "m-pesa: %d prompts sent, %d paybill payments (%d aimed at a waiting prompt)\n",
+			g.stkSent.Load(), g.c2bSent.Load(), g.c2bMatching.Load())
+	}
 	failed := false
 	if res.fiveXX > 0 {
 		fmt.Fprintf(stdout, "FAIL: %d attempts returned 5xx\n", res.fiveXX)

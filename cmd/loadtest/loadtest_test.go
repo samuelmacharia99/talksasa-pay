@@ -441,6 +441,7 @@ func TestRunFlagErrors(t *testing.T) {
 		{"-base-url", f.srv.URL, "-key-file", writeFile(t, "a\nb")},
 		{"-base-url", f.srv.URL, "-key-file", filepath.Join(t.TempDir(), "missing")},
 		{"-base-url", f.srv.URL, "-key-file", key, "extra"},
+		{"-base-url", f.srv.URL, "-key-file", key, "-mix", "stk=1,c2b=1"}, // c2b without -fake-daraja
 	} {
 		var out, errOut syncBuffer
 		if code := run(context.Background(), args, &out, &errOut); code != 2 {
@@ -522,5 +523,23 @@ func TestRunWithWebhookListener(t *testing.T) {
 	}
 	if strings.Contains(s, "whsec_fake") {
 		t.Fatal("webhook secret printed")
+	}
+}
+
+func TestSTKPhoneEndings(t *testing.T) {
+	r := rand.New(rand.NewPCG(1, 2))
+	for _, d := range stkEndings {
+		p := stkPhone(r, d)
+		if len(p) != 10 || p[:2] != "07" || int(p[9]-'0') != d {
+			t.Fatalf("stkPhone(%d) = %q", d, p)
+		}
+	}
+	var pp promptPool
+	pp.add(waitingPrompt{payer: 1, amount: 5})
+	if w, ok := pp.take(r); !ok || w.amount != 5 {
+		t.Fatal("prompt pool")
+	}
+	if _, ok := pp.take(r); ok {
+		t.Fatal("prompt taken twice")
 	}
 }
