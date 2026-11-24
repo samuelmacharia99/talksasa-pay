@@ -6,7 +6,7 @@ import { Facts, PageHeader, Panel } from "@/components/PageHeader";
 import { getMe, load } from "@/lib/api";
 import { actorLabel } from "@/lib/labels";
 
-import { IssueKeyForm, RevokeKeyButton, RotateSecretForm, StatusForm, WebhookForm } from "../forms";
+import { AllowedIPs, IssueKeyForm, RevokeKeyButton, RotateSecretForm, StatusForm, WebhookForm } from "../forms";
 
 export const metadata: Metadata = { title: "Product" };
 
@@ -55,6 +55,9 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
             <Link href={`/transactions?product_id=${p.id}`} className="text-violet hover:underline">
               Transactions
             </Link>
+            <Link href={`/webhooks?product_id=${p.id}`} className="text-violet hover:underline">
+              Webhook deliveries
+            </Link>
           </div>
         </Panel>
 
@@ -68,6 +71,7 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
                   <Th>Label</Th>
                   <Th>Key id</Th>
                   <Th>Status</Th>
+                  <Th>Allowed IPs</Th>
                   <Th>Last used</Th>
                   <Th>Issued</Th>
                   {canManage ? <Th align="right"><span className="sr-only">Actions</span></Th> : null}
@@ -80,6 +84,9 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
                     <Td className="font-mono text-[0.8125rem] text-ink-2">{k.key_id}</Td>
                     <Td>
                       <Status value={keyState(k)} />
+                    </Td>
+                    <Td>
+                      <AllowedIPs id={p.id} keyID={k.key_id} current={k.allowed_ips ?? null} canEdit={canManage && keyState(k) === "active"} />
                     </Td>
                     <Td>
                       <DateTime value={k.last_used_at} fallback="Never" />

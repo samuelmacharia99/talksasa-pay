@@ -6,6 +6,13 @@ export interface Problem {
   detail?: string;
   code?: string;
   request_id?: string;
+  /** Per-field validation messages, when the service reports them. */
+  errors?: FieldError[];
+}
+
+export interface FieldError {
+  field: string;
+  message: string;
 }
 
 /**
@@ -17,6 +24,7 @@ export class ApiError extends Error {
   readonly code: string;
   readonly detail: string;
   readonly requestId: string | undefined;
+  readonly fieldErrors: FieldError[];
 
   constructor(p: Problem) {
     super(p.detail || p.title || `HTTP ${p.status}`);
@@ -25,6 +33,9 @@ export class ApiError extends Error {
     this.code = p.code ?? "error";
     this.detail = p.detail ?? p.title ?? "Something went wrong.";
     this.requestId = p.request_id;
+    this.fieldErrors = Array.isArray(p.errors)
+      ? p.errors.filter((f): f is FieldError => typeof f?.field === "string" && typeof f?.message === "string")
+      : [];
   }
 }
 

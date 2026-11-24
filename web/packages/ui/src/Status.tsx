@@ -22,6 +22,9 @@ const STATUSES: Record<string, { label: string; tone: Tone }> = {
   disabled: { label: "Disabled", tone: "neutral" },
   revoked: { label: "Revoked", tone: "neutral" },
   expired_key: { label: "Expired", tone: "neutral" },
+  // webhook deliveries (pending and failed are shared with transactions)
+  delivered: { label: "Delivered", tone: "ok" },
+  skipped: { label: "Skipped", tone: "neutral" },
 };
 
 const dot: Record<Tone, string> = {

@@ -25,4 +25,14 @@ describe("toApiError", () => {
     expect(e.detail).not.toContain("nginx");
     expect(e.code).toBe("upstream_error");
   });
+  it("keeps well-formed field errors and drops malformed ones", () => {
+    const e = toApiError(400, {
+      status: 400,
+      code: "validation_failed",
+      detail: "Check the highlighted fields.",
+      errors: [{ field: "allowed_ips[1]", message: "not an IP address" }, { field: 3 }, null],
+    });
+    expect(e.fieldErrors).toEqual([{ field: "allowed_ips[1]", message: "not an IP address" }]);
+    expect(toApiError(404, { status: 404 }).fieldErrors).toEqual([]);
+  });
 });

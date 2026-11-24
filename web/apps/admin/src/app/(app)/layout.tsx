@@ -33,6 +33,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
           <NavLink href="/requests">Payment requests</NavLink>
           <NavLink href="/payers">Payers</NavLink>
           <NavLink href="/products">Products</NavLink>
+          <NavLink href="/webhooks">Webhooks</NavLink>
           <NavLink href="/audit">Audit log</NavLink>
           {canManageUsers ? <NavLink href="/staff">Staff</NavLink> : null}
         </nav>

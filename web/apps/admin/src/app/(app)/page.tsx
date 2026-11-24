@@ -5,14 +5,32 @@ import Link from "next/link";
 import { Suspense } from "react";
 
 import { Panel } from "@/components/PageHeader";
-import { load } from "@/lib/api";
+import { api, load } from "@/lib/api";
+import { log } from "@/lib/log";
 
 export const metadata: Metadata = { title: "Overview" };
 
 const UNASSIGNED = "00000000-0000-0000-0000-000000000000";
 
+const FAILED_SAMPLE = 100;
+
+/**
+ * How many webhook deliveries have failed (capped: "100+"). Best effort: the
+ * overview still renders if this lookup fails.
+ */
+async function failedDeliveries(): Promise<{ count: number; more: boolean } | null> {
+  try {
+    const c = await api();
+    const { data } = await c.GET("/webhook-deliveries", { params: { query: { status: "failed", limit: FAILED_SAMPLE } } });
+    return data ? { count: data.items.length, more: Boolean(data.next_cursor) } : null;
+  } catch (e) {
+    log.error({ err: e instanceof Error ? e.message : String(e) }, "could not count failed webhook deliveries");
+    return null;
+  }
+}
+
 export default async function Overview() {
-  const d = await load((c) => c.GET("/dashboard"));
+  const [d, failed] = await Promise.all([load((c) => c.GET("/dashboard")), failedDeliveries()]);
   const names = new Map(d.products.map((p) => [p.id, `${p.name} (${p.account_prefix})`]));
   names.set(UNASSIGNED, "Unmatched (not yet assigned)");
   const split = Object.entries(d.last_30_days.by_product).sort((a, b) => b[1] - a[1]);
@@ -44,6 +62,15 @@ export default async function Overview() {
       urgent: false,
     },
   ];
+  if (failed && failed.count > 0) {
+    const n = failed.more ? `${failed.count}+` : String(failed.count);
+    attention.splice(2, 0, {
+      href: "/webhooks?status=failed",
+      label: failed.count === 1 && !failed.more ? "1 webhook failed" : `${n} webhooks failed`,
+      detail: "Products did not receive these events by webhook; fix the cause, then redeliver",
+      urgent: true,
+    });
+  }
 
   return (
     <div className="grid gap-8">
