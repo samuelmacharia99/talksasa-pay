@@ -1,0 +1,55 @@
+{
+    "name": "talksasa/pay-php",
+    "description": "PHP client for the Talksasa Pay product API (/v1), webhook verification and a Laravel bridge.",
+    "type": "library",
+    "license": "proprietary",
+    "keywords": ["talksasa", "mpesa", "payments", "webhooks", "laravel"],
+    "require": {
+        "php": "^8.2",
+        "ext-json": "*",
+        "psr/http-client": "^1.0",
+        "psr/http-factory": "^1.0",
+        "psr/http-message": "^1.1 || ^2.0",
+        "php-http/discovery": "^1.19"
+    },
+    "require-dev": {
+        "guzzlehttp/guzzle": "^7.8",
+        "orchestra/testbench": "^10.0 || ^11.0",
+        "phpunit/phpunit": "^11.0 || ^12.0"
+    },
+    "suggest": {
+        "guzzlehttp/guzzle": "Recommended HTTP client (already installed in every Laravel app); enables the timeout settings.",
+        "laravel/framework": "^12.0 || ^13.0 for the Laravel bridge (Talksasa\\Pay\\Laravel)."
+    },
+    "autoload": {
+        "psr-4": {
+            "Talksasa\\Pay\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Talksasa\\Pay\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Talksasa\\Pay\\Laravel\\TalksasaPayServiceProvider"
+            ],
+            "aliases": {
+                "TalksasaPay": "Talksasa\\Pay\\Laravel\\Facades\\TalksasaPay"
+            }
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "php-http/discovery": false
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
