@@ -10,16 +10,18 @@ import (
 	"net/http"
 	"net/netip"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talksasa/talksasa-pay/internal/apiview"
+	"github.com/talksasa/talksasa-pay/internal/payer"
+	"github.com/talksasa/talksasa-pay/internal/paymentrequest"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
-	tlog "github.com/talksasa/talksasa-pay/internal/platform/log"
 	"github.com/talksasa/talksasa-pay/internal/platform/metrics"
 	"github.com/talksasa/talksasa-pay/internal/product"
+	"github.com/talksasa/talksasa-pay/internal/productapi"
 	"github.com/talksasa/talksasa-pay/internal/reporting"
 )
 
@@ -38,6 +40,13 @@ type Deps struct {
 	Paybill string
 	// PayLimiter throttles pay-page lookups per client IP; nil = default.
 	PayLimiter *httpx.RateLimiter
+
+	// Product API (/v1).
+	Payers            *payer.Service
+	Requests          *paymentrequest.Service
+	View              apiview.View
+	KeyLimiter        *httpx.RateLimiter // per API key; nil = productapi default
+	APIRequestTimeout time.Duration      // 0 = productapi default
 }
 
 // hostedTokenRe matches payment_requests.hosted_token (32 random bytes,
@@ -83,53 +92,13 @@ func NewRouter(d Deps) http.Handler {
 		pub.Get("/pay/{token}", payPage(d))
 	})
 
-	r.Route("/v1", func(v1 chi.Router) {
-		v1.Use(requireProduct(d.Products, d.Logger))
-		v1.Get("/whoami", func(w http.ResponseWriter, r *http.Request) {
-			p := principalFrom(r.Context())
-			httpx.WriteJSON(w, http.StatusOK, map[string]string{
-				"product_id": p.ProductID.String(), "product_name": p.ProductName,
-				"account_prefix": p.AccountPrefix, "key_id": p.KeyID,
-			})
-		})
-	})
+	// Product integration API: auth (key -> IP allow-list -> per-key rate
+	// limit), strict JSON, every query scoped to the key's product.
+	r.Mount("/v1", productapi.NewRouter(productapi.Deps{
+		Logger: d.Logger, Pool: d.Pool, Products: d.Products, Payers: d.Payers, Requests: d.Requests,
+		View: d.View, KeyLimiter: d.KeyLimiter, RequestTimeout: d.APIRequestTimeout,
+	}))
 	return r
-}
-
-type principalKey struct{}
-
-func principalFrom(ctx context.Context) product.Principal {
-	p, _ := ctx.Value(principalKey{}).(product.Principal)
-	return p
-}
-
-// requireProduct authenticates "Authorization: Bearer tsp_..." and scopes the
-// request to that key's product.
-func requireProduct(products *product.Service, logger *slog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			auth := r.Header.Get("Authorization")
-			token, ok := strings.CutPrefix(auth, "Bearer ")
-			if !ok || token == "" {
-				w.Header().Set("WWW-Authenticate", `Bearer realm="talksasa-pay"`)
-				httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusUnauthorized, "unauthorized", "A valid API key is required."))
-				return
-			}
-			p, err := products.Authenticate(r.Context(), strings.TrimSpace(token))
-			if err != nil {
-				if !errors.Is(err, product.ErrUnauthorized) {
-					httpx.InternalError(w, r, logger, err)
-					return
-				}
-				w.Header().Set("WWW-Authenticate", `Bearer realm="talksasa-pay", error="invalid_token"`)
-				httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusUnauthorized, "unauthorized", "A valid API key is required."))
-				return
-			}
-			ctx := context.WithValue(r.Context(), principalKey{}, p)
-			ctx = tlog.WithAttrs(ctx, slog.String("product_id", p.ProductID.String()), slog.String("key_id", p.KeyID))
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
 }
 
 type paybillJSON struct {

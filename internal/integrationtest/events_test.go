@@ -3,6 +3,7 @@ package integrationtest
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -14,6 +15,23 @@ import (
 // feed returns every event visible in the gap-free feed for a product.
 func (e *env) feed(productID uuid.UUID) []store.Event {
 	e.t.Helper()
+	// The feed hides events until every older transaction on the SERVER has
+	// finished (txids are cluster-wide), so parallel test packages can delay
+	// it. Wait until it has caught up with this product's newest event.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var settled bool
+		if err := e.db.Owner.QueryRow(e.ctx, `SELECT coalesce(max(txid), 0) < (pg_snapshot_xmin(pg_current_snapshot())::text)::bigint FROM events WHERE product_id = $1`, productID).Scan(&settled); err != nil {
+			e.t.Fatal(err)
+		}
+		if settled {
+			break
+		}
+		if time.Now().After(deadline) {
+			e.t.Fatal("events feed did not settle within 30s")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	var out []store.Event
 	afterTxid, afterID := int64(0), uuid.Nil
 	for {

@@ -26,6 +26,9 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 		Logger: a.logger, Pool: a.pool, Products: a.products, Reporting: a.reporting,
 		Metrics: metrics.NewHTTP(reg, "api"), MaxBodyBytes: a.cfg.HTTP.MaxBodyBytes, Version: version,
 		TrustedProxies: a.cfg.TrustedProxies, Paybill: a.cfg.Public.Paybill,
+		Payers: a.payers, Requests: a.paymentRequests, View: a.events.View(),
+		KeyLimiter:        httpx.NewRateLimiter(int(a.cfg.API.RatePerKey*60), a.cfg.API.BurstPerKey),
+		APIRequestTimeout: a.cfg.API.RequestTimeout,
 	})
 	apiSrv := httpx.NewServer(a.cfg.HTTP.Addr, handler, a.cfg.HTTP, a.logger)
 

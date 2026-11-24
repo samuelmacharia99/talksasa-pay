@@ -23,3 +23,4 @@ coverage.out
 # Node (web/)
 node_modules/
 .next/
+.claude/worktrees/
