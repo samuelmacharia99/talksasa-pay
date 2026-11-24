@@ -9,7 +9,7 @@ LINT  := docker run --rm -u $(shell id -u):$(shell id -g) -v $(CURDIR):/src -w /
 SECRETS := deploy/dev-secrets
 VERSION ?= $(shell git describe --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: help dev-secrets up down db-reset migrate migrate-down migrate-version sqlc build test test-unit lint vuln fmt run admin worker-logs image smoke verify web-install web-gen web-check web-build e2e deploy-local deploy-staging deploy-production
+.PHONY: help dev-secrets up down db-reset migrate migrate-down migrate-version sqlc build test test-unit lint vuln fmt run admin worker-logs image smoke verify web-install web-gen web-check web-build e2e e2e-mpesa deploy-local deploy-staging deploy-production
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -73,13 +73,14 @@ worker-logs: ## follow the Docker stack's worker logs
 smoke: ## end-to-end smoke test against the Docker stack
 	./scripts/smoke.sh
 
-verify: ## everything: Go tests, lint, vuln scan, web checks, smoke and browser tests
+verify: ## everything: Go tests, lint, vuln scan, web checks, smoke, browser and M-Pesa end-to-end tests
 	$(MAKE) test
 	$(MAKE) lint
 	$(MAKE) vuln
 	$(MAKE) web-check
 	$(MAKE) smoke
 	$(MAKE) e2e
+	$(MAKE) e2e-mpesa
 
 PNPM := cd web && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 NEXT_TELEMETRY_DISABLED=1 corepack pnpm
 
@@ -100,6 +101,9 @@ web-build: ## production builds of the admin and pay apps
 
 e2e: ## browser end-to-end tests against the Docker stack (Playwright container)
 	./scripts/e2e.sh
+
+e2e-mpesa: ## M-Pesa end to end: API -> fake Daraja -> callback -> signed webhook verified by the PHP SDK
+	./scripts/e2e-mpesa.sh
 
 # Deploys: see docs/runbooks/deploy.md. Host via TSP_DEPLOY_HOST or ARGS='--host user@host'.
 deploy-local: ## rebuild + restart the local stack, then smoke test

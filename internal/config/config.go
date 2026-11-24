@@ -133,8 +133,13 @@ type WorkerConfig struct {
 	WebhookConcurrency int           // parallel webhook deliveries
 	MpesaConcurrency   int           // parallel M-Pesa callback/STK jobs
 	WebhookTimeout     time.Duration // per HTTP attempt
-	MaintenanceEvery   time.Duration // expiry sweep interval
-	AttemptRetention   time.Duration // webhook_attempts kept this long
+	// WebhookAllowLoopback lets webhooks reach 127.0.0.0/8 / ::1 so a local
+	// receiver sharing the worker's network namespace can be used for
+	// end-to-end tests (TSP_WEBHOOK_ALLOW_LOOPBACK). Development only;
+	// private networks and every other blocked range stay blocked.
+	WebhookAllowLoopback bool
+	MaintenanceEvery     time.Duration // expiry sweep interval
+	AttemptRetention     time.Duration // webhook_attempts kept this long
 	// HealthAddr serves the worker's /healthz and /metrics. Internal only.
 	HealthAddr string
 	// ShutdownTimeout: running jobs get this long to finish on SIGTERM
@@ -247,13 +252,14 @@ func Load(src Source) (*Config, error) {
 		LockTimeout:    lockTimeout,
 	}
 	cfg.Worker = WorkerConfig{
-		WebhookConcurrency: int(l.int64("TSP_WORKER_WEBHOOK_CONCURRENCY", 50)),
-		MpesaConcurrency:   int(l.int64("TSP_WORKER_MPESA_CONCURRENCY", 20)),
-		WebhookTimeout:     l.duration("TSP_WEBHOOK_TIMEOUT", 10*time.Second),
-		MaintenanceEvery:   l.duration("TSP_WORKER_MAINTENANCE_EVERY", time.Minute),
-		AttemptRetention:   l.duration("TSP_WEBHOOK_ATTEMPT_RETENTION", 90*24*time.Hour),
-		HealthAddr:         l.str("TSP_WORKER_HEALTH_ADDR", "127.0.0.1:9465"),
-		ShutdownTimeout:    l.duration("TSP_WORKER_SHUTDOWN_TIMEOUT", 25*time.Second),
+		WebhookConcurrency:   int(l.int64("TSP_WORKER_WEBHOOK_CONCURRENCY", 50)),
+		MpesaConcurrency:     int(l.int64("TSP_WORKER_MPESA_CONCURRENCY", 20)),
+		WebhookTimeout:       l.duration("TSP_WEBHOOK_TIMEOUT", 10*time.Second),
+		WebhookAllowLoopback: l.boolean("TSP_WEBHOOK_ALLOW_LOOPBACK", false),
+		MaintenanceEvery:     l.duration("TSP_WORKER_MAINTENANCE_EVERY", time.Minute),
+		AttemptRetention:     l.duration("TSP_WEBHOOK_ATTEMPT_RETENTION", 90*24*time.Hour),
+		HealthAddr:           l.str("TSP_WORKER_HEALTH_ADDR", "127.0.0.1:9465"),
+		ShutdownTimeout:      l.duration("TSP_WORKER_SHUTDOWN_TIMEOUT", 25*time.Second),
 	}
 	cfg.TrustedProxies = l.prefixes("TSP_TRUSTED_PROXIES", "127.0.0.1/32,::1/128")
 	cfg.Mpesa = MpesaConfig{
@@ -366,6 +372,9 @@ func (c *Config) validate() error {
 	}
 	if c.Worker.MpesaConcurrency < 1 || c.Worker.MpesaConcurrency > 200 {
 		errs = append(errs, errors.New("TSP_WORKER_MPESA_CONCURRENCY: must be 1-200"))
+	}
+	if c.Worker.WebhookAllowLoopback && c.Env != EnvDevelopment {
+		errs = append(errs, errors.New("TSP_WEBHOOK_ALLOW_LOOPBACK: only allowed in development"))
 	}
 	if c.Worker.WebhookTimeout < time.Second || c.Worker.WebhookTimeout > time.Minute {
 		errs = append(errs, errors.New("TSP_WEBHOOK_TIMEOUT: must be 1s-1m"))
@@ -484,6 +493,19 @@ func (l *loader) int64(name string, def int64) int64 {
 		return def
 	}
 	return n
+}
+
+func (l *loader) boolean(name string, def bool) bool {
+	v := strings.TrimSpace(l.src.Getenv(name))
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		l.fail(name, errors.New("must be true or false"))
+		return def
+	}
+	return b
 }
 
 func (l *loader) duration(name string, def time.Duration) time.Duration {
