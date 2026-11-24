@@ -306,6 +306,80 @@ paths:
       responses:
         "204": { description: Revoked }
         "404": { $ref: "#/components/responses/Problem" }
+  /products/{id}/api-keys/{keyID}/allowed-ips:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: keyID, in: path, required: true, schema: { type: string } }
+    put:
+      summary: Restrict an API key to IP addresses / CIDR ranges (admin); null or [] = any address
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [allowed_ips]
+              properties:
+                allowed_ips: { type: [array, "null"], maxItems: 50, items: { type: string } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/APIKey" } } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /webhook-deliveries:
+    get:
+      summary: Webhook deliveries, newest first
+      parameters:
+        - { $ref: "#/components/parameters/product_id" }
+        - { name: status, in: query, schema: { type: string, enum: [pending, delivered, failed, skipped] } }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/WebhookDelivery" } }
+                  next_cursor: { type: string }
+        "400": { $ref: "#/components/responses/Problem" }
+  /webhook-deliveries/{eventID}:
+    parameters:
+      - { name: eventID, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: One delivery with every attempt and the event body
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [delivery, attempts, event]
+                properties:
+                  delivery: { $ref: "#/components/schemas/WebhookDelivery" }
+                  attempts: { type: array, items: { $ref: "#/components/schemas/WebhookAttempt" } }
+                  event:
+                    type: object
+                    required: [id, type, created_at, data]
+                    properties:
+                      id: { type: string, format: uuid }
+                      type: { type: string }
+                      created_at: { type: string, format: date-time }
+                      data: { type: object }
+        "404": { $ref: "#/components/responses/Problem" }
+  /webhook-deliveries/{eventID}/redeliver:
+    parameters:
+      - { name: eventID, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      summary: Queue a failed or skipped delivery again (admin)
+      responses:
+        "200": { description: Queued, content: { application/json: { schema: { $ref: "#/components/schemas/WebhookDelivery" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
   /payers:
     get:
       summary: Search payer accounts
@@ -562,6 +636,35 @@ components:
         expires_at: { type: [string, "null"], format: date-time }
         revoked_at: { type: [string, "null"], format: date-time }
         last_used_at: { type: [string, "null"], format: date-time }
+        allowed_ips: { type: [array, "null"], items: { type: string }, description: "null = any address" }
+    WebhookDelivery:
+      type: object
+      required: [event_id, product_id, account_prefix, event_type, subject_type, subject_id, status, attempts, last_attempt_at, last_status_code, last_error, delivered_at, created_at]
+      properties:
+        event_id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        account_prefix: { type: string }
+        event_type: { type: string }
+        subject_type: { type: string }
+        subject_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, delivered, failed, skipped] }
+        attempts: { type: integer }
+        last_attempt_at: { type: [string, "null"], format: date-time }
+        last_status_code: { type: [integer, "null"] }
+        last_error: { type: [string, "null"] }
+        delivered_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+    WebhookAttempt:
+      type: object
+      required: [attempt, attempted_at, url_host, status_code, latency_ms, error, response_body]
+      properties:
+        attempt: { type: integer }
+        attempted_at: { type: string, format: date-time }
+        url_host: { type: string }
+        status_code: { type: [integer, "null"] }
+        latency_ms: { type: integer }
+        error: { type: [string, "null"] }
+        response_body: { type: [string, "null"], description: "First 1 KB of the receiver's response" }
     Payer:
       type: object
       required: [id, product_id, account_prefix, external_ref, account_number, display_name, email, status, credit_balance, created_at]

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -48,6 +49,23 @@ type Principal struct {
 	ProductName   string
 	AccountPrefix string
 	KeyID         string
+	// AllowedCIDRs, when non-empty, restricts which client IPs may use the
+	// key. Enforced by the /v1 auth middleware (403 ip_not_allowed).
+	AllowedCIDRs []netip.Prefix
+}
+
+// Allows reports whether ip may use this key.
+func (p Principal) Allows(ip netip.Addr) bool {
+	if len(p.AllowedCIDRs) == 0 {
+		return true
+	}
+	ip = ip.Unmap()
+	for _, c := range p.AllowedCIDRs {
+		if c.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // APIKey is the non-secret view of a key.
@@ -60,6 +78,8 @@ type APIKey struct {
 	ExpiresAt  *time.Time
 	RevokedAt  *time.Time
 	LastUsedAt *time.Time
+	// AllowedCIDRs nil = any address.
+	AllowedCIDRs []netip.Prefix
 }
 
 // IssuedKey is returned exactly once when a key is created.
@@ -190,7 +210,7 @@ func (s *Service) Authenticate(ctx context.Context, presented string) (Principal
 		// Non-fatal: last_used_at is informational.
 		s.logger.WarnContext(ctx, "could not update api key last_used_at", slog.String("key_id", keyID), slog.String("error", err.Error()))
 	}
-	return Principal{ProductID: row.ProductID, ProductName: row.ProductName, AccountPrefix: row.AccountPrefix, KeyID: keyID}, nil
+	return Principal{ProductID: row.ProductID, ProductName: row.ProductName, AccountPrefix: row.AccountPrefix, KeyID: keyID, AllowedCIDRs: row.AllowedCidrs}, nil
 }
 
 func (s *Service) parseKey(presented string) (keyID, secret string, ok bool) {
@@ -222,6 +242,80 @@ func isB32Lower(s string) bool {
 func keyFromRow(r store.ProductApiKey) APIKey {
 	return APIKey{
 		ID: r.ID, KeyID: r.KeyID, Label: r.Label, CreatedBy: r.CreatedBy, CreatedAt: r.CreatedAt,
-		ExpiresAt: r.ExpiresAt, RevokedAt: r.RevokedAt, LastUsedAt: r.LastUsedAt,
+		ExpiresAt: r.ExpiresAt, RevokedAt: r.RevokedAt, LastUsedAt: r.LastUsedAt, AllowedCIDRs: r.AllowedCidrs,
 	}
+}
+
+// MaxAllowedCIDRs bounds a key's allow-list.
+const MaxAllowedCIDRs = 50
+
+// ErrInvalidCIDRs is returned for an empty, oversized or malformed list.
+var ErrInvalidCIDRs = errors.New("product: allowed IPs must be 1-50 valid addresses or CIDR ranges (or none to allow any)")
+
+// ParseCIDRs parses "203.0.113.4", "203.0.113.0/24", "2001:db8::/32" style
+// entries (a bare address means a single host). Nil/empty input means "any".
+func ParseCIDRs(in []string) ([]netip.Prefix, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	if len(in) > MaxAllowedCIDRs {
+		return nil, ErrInvalidCIDRs
+	}
+	out := make([]netip.Prefix, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		var p netip.Prefix
+		if strings.Contains(s, "/") {
+			pp, err := netip.ParsePrefix(s)
+			if err != nil {
+				return nil, ErrInvalidCIDRs
+			}
+			p = pp.Masked()
+		} else {
+			a, err := netip.ParseAddr(s)
+			if err != nil {
+				return nil, ErrInvalidCIDRs
+			}
+			a = a.Unmap()
+			p = netip.PrefixFrom(a, a.BitLen())
+		}
+		// A /0 would silently mean "any": make the operator say none instead.
+		if p.Bits() == 0 {
+			return nil, ErrInvalidCIDRs
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// SetAllowedCIDRs replaces a key's IP allow-list (nil = any address). Takes
+// effect on the key's next request. Audited.
+func (s *Service) SetAllowedCIDRs(ctx context.Context, actor audit.Actor, productID uuid.UUID, keyID string, cidrs []netip.Prefix) (APIKey, error) {
+	if len(cidrs) > MaxAllowedCIDRs {
+		return APIKey{}, ErrInvalidCIDRs
+	}
+	var out APIKey
+	err := db.WithTx(ctx, s.pool, actor.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
+		var arg []netip.Prefix
+		if len(cidrs) > 0 {
+			arg = cidrs
+		}
+		row, err := q.SetAPIKeyAllowedCIDRs(ctx, store.SetAPIKeyAllowedCIDRsParams{ProductID: productID, KeyID: keyID, AllowedCidrs: arg})
+		if db.IsNotFound(err) {
+			return ErrKeyNotFound
+		}
+		if err != nil {
+			return err
+		}
+		out = keyFromRow(row)
+		list := make([]string, 0, len(cidrs))
+		for _, c := range cidrs {
+			list = append(list, c.String())
+		}
+		return audit.Record(ctx, q, audit.Entry{
+			Actor: actor, Action: "api_key.allowed_ips_changed", EntityType: "api_key", EntityID: keyID, ProductID: &productID,
+			Details: map[string]any{"allowed_ips": list},
+		})
+	})
+	return out, err
 }
