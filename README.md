@@ -13,7 +13,7 @@ notifies the product. It only ever collects Talksasa's own revenue
 | 0 | Foundations: config, logging, DB, HTTP, metrics, CI | done |
 | 1 | Core model: products, keys, payers, requests, ledger, allocation | done |
 | 2 | Daraja STK + C2B collections, River worker | next |
-| 3 | Product API `/v1`, webhooks, clients, launch-product integration | |
+| 3 | Product API `/v1` (+ events feed), signed webhooks via River worker, Go + PHP/Laravel SDKs, docs in [docs/api](docs/api/README.md) | done (product integration pending codebase access) |
 | 4 | B2C refunds (maker-checker) | |
 | UI | Admin panel + hosted pay page (Next.js), staff sign-in with 2FA, read-only views | done (pulled forward) |
 | 5 | Reconciliation (STK sweeper, suspense assignment, statement import), reports | |
@@ -36,8 +36,9 @@ make verify                      # everything below; run before every merge
 make test                        # Go unit + database integration tests (-race)
 make lint                        # golangci-lint (incl. gosec) + sqlc drift
 make web-check                   # TS types match OpenAPI, typecheck, eslint, vitest
-make smoke                       # 44 checks against the running Docker stack
+make smoke                       # 49 checks against the running Docker stack
 make e2e                         # Playwright browser tests (sign-in with real TOTP, every screen)
+make worker-logs                 # follow the background worker (webhooks, expiry)
 ```
 Deploying: `scripts/deploy.sh staging|production --host user@host` (see
 [docs/runbooks/deploy.md](docs/runbooks/deploy.md)).

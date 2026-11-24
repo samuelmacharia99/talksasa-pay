@@ -18,6 +18,12 @@ In practice new events show up in the feed within a second or two. The
 practical upshot: once you have read past a cursor, nothing new will ever
 appear before it.
 
+The trade-off: while a long-running database transaction is open on our side
+(for example the backup taken just before a deploy), the newest events wait
+in the feed until it finishes. Nothing is lost and webhooks are not
+affected; the feed simply catches up afterwards. Don't treat a quiet feed as
+"no payments": treat it as "nothing new yet".
+
 ## Reading the feed
 
 ```sh
