@@ -1,19 +1,22 @@
 "use client";
 
-import { Button, Field, SecretOnce } from "@talksasa/ui";
+import { Button, cx, Field, SecretOnce } from "@talksasa/ui";
 import Link from "next/link";
 import { useActionState, useState } from "react";
 
 import { FormError } from "@/components/FormError";
 import { SubmitButton } from "@/components/SubmitButton";
 import type { ActionResult } from "@/lib/api";
+import { MAX_ALLOWED_IPS, validateAllowedIPs } from "@/lib/webhooks";
 
 import {
+  type AllowedIPsResult,
   createProduct,
   issueAPIKey,
   revokeAPIKey,
   rotateWebhookSecret,
   type SecretResult,
+  setAllowedIPs,
   setProductStatus,
   setWebhookURL,
 } from "./actions";
@@ -97,7 +100,7 @@ export function RotateSecretForm({ id }: { id: string }) {
     return (
       <SecretOnce
         title="New webhook signing secret"
-        help="The old secret stopped working just now. Update the product's configuration with this one."
+        help="For the next 24 hours every webhook carries two signatures, one per secret. Update the product's configuration with this one before then."
         value={state.data.secret}
       />
     );
@@ -106,7 +109,8 @@ export function RotateSecretForm({ id }: { id: string }) {
     <form action={action} className="grid gap-3">
       <FormError message={err(state)} />
       <p className="text-sm text-ink-2">
-        Replace the secret the product uses to verify our webhooks. The old one stops working immediately.
+        Replace the secret the product uses to verify our webhooks. We keep signing with the old one as well for 24 hours,
+        so the product can switch over without rejecting events.
       </p>
       {confirming ? (
         <div className="flex flex-wrap gap-2">
@@ -206,6 +210,102 @@ export function RevokeKeyButton({ id, keyID }: { id: string; keyID: string }) {
       <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
         Cancel
       </Button>
+    </form>
+  );
+}
+
+/**
+ * A key's IP allow-list: shown to everyone, editable by admins. The light
+ * check here catches typos; the Go service is authoritative.
+ */
+export function AllowedIPs({ id, keyID, current, canEdit }: { id: string; keyID: string; current: string[] | null; canEdit: boolean }) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState("");
+  const [state, action] = useActionState(async (prev: AllowedIPsResult, fd: FormData) => {
+    const r = await setAllowedIPs(id, keyID, prev, fd);
+    if (r?.ok) setEditing(false);
+    return r;
+  }, undefined as AllowedIPsResult);
+  const list = current && current.length > 0 ? current : null;
+
+  if (!editing) {
+    return (
+      <div className="flex items-start gap-3">
+        {list ? (
+          <ul className="grid gap-0.5 font-mono text-[0.8125rem] text-ink-2">
+            {list.map((ip) => (
+              <li key={ip}>{ip}</li>
+            ))}
+          </ul>
+        ) : (
+          <span className="text-muted">Any address</span>
+        )}
+        {canEdit ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="-my-1"
+            onClick={() => {
+              setText((list ?? []).join("\n"));
+              setEditing(true);
+            }}
+          >
+            Edit<span className="sr-only"> allowed IPs for key {keyID}</span>
+          </Button>
+        ) : null}
+      </div>
+    );
+  }
+
+  const problems = validateAllowedIPs(text);
+  const failed = state && !state.ok ? state : undefined;
+  const fieldErrors = (failed?.fieldErrors ?? []).filter((f) => f.field.startsWith("allowed_ips"));
+  const inputId = `allowed-ips-${keyID}`;
+  const invalid = problems.length > 0 || fieldErrors.length > 0;
+  return (
+    <form action={action} className="grid w-72 gap-2">
+      {failed && fieldErrors.length === 0 ? <FormError message={failed.error} /> : null}
+      <label htmlFor={inputId} className="text-[0.8125rem] font-medium text-ink-2">
+        Allowed IPs, one per line
+      </label>
+      <textarea
+        id={inputId}
+        name="allowed_ips"
+        rows={4}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder={"203.0.113.4\n198.51.100.0/24"}
+        aria-invalid={invalid || undefined}
+        aria-describedby={`${inputId}-help`}
+        className={cx(
+          "block w-full rounded-md border border-line-strong bg-surface px-3 py-2 font-mono text-[0.8125rem] text-ink placeholder:text-faint",
+          "focus:border-violet focus:outline-2 focus:outline-violet/25 aria-[invalid=true]:border-bad",
+        )}
+      />
+      <div id={`${inputId}-help`} className="text-[0.8125rem]">
+        {invalid ? (
+          <ul role="alert" className="grid gap-0.5 text-bad">
+            {problems.map((p) => (
+              <li key={p}>{p}</li>
+            ))}
+            {fieldErrors.map((f) => (
+              <li key={f.field + f.message}>{f.message}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-muted">
+            Addresses or CIDR ranges, up to {MAX_ALLOWED_IPS}. Leave empty to allow any address. Applies from the key&apos;s next request.
+          </p>
+        )}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <SubmitButton variant="secondary" pending="Saving…" disabled={problems.length > 0} className="h-8 px-3 text-[0.8125rem]">
+          Save
+        </SubmitButton>
+        <Button variant="ghost" size="sm" onClick={() => setEditing(false)}>
+          Cancel
+        </Button>
+      </div>
     </form>
   );
 }

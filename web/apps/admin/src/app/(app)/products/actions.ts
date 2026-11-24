@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 
 import { act, type ActionResult } from "@/lib/api";
+import { splitAllowedIPs } from "@/lib/webhooks";
 
 // Permissions are enforced by the Go service on every call; the UI only
 // hides controls a role cannot use.
@@ -65,4 +66,17 @@ export async function revokeAPIKey(id: string, keyID: string, _: ActionResult | 
   if (!r.ok) return r;
   revalidatePath(`/products/${id}`);
   return { ok: true, data: undefined };
+}
+
+export type AllowedIPsResult = ActionResult<{ allowed_ips: string[] | null }> | undefined;
+
+export async function setAllowedIPs(id: string, keyID: string, _: AllowedIPsResult, fd: FormData): Promise<AllowedIPsResult> {
+  // The Go service parses and validates the list; this only splits the textarea.
+  const allowed_ips = splitAllowedIPs(str(fd, "allowed_ips"));
+  const r = await act((c) =>
+    c.PUT("/products/{id}/api-keys/{keyID}/allowed-ips", { params: { path: { id, keyID } }, body: { allowed_ips } }),
+  );
+  if (!r.ok) return r;
+  revalidatePath(`/products/${id}`);
+  return { ok: true, data: { allowed_ips: r.data.allowed_ips ?? null } };
 }

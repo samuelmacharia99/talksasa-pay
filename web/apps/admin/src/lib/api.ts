@@ -70,7 +70,9 @@ export async function requireMe(perm?: Permission): Promise<Me> {
 }
 
 /** Result shape for Server Actions used with useActionState. */
-export type ActionResult<T = undefined> = { ok: true; data: T } | { ok: false; error: string; field?: string };
+export type ActionResult<T = undefined> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; field?: string; fieldErrors?: Array<{ field: string; message: string }> };
 
 /**
  * Runs a mutating call from a Server Action, turning API errors into a
@@ -86,6 +88,9 @@ export async function act<T>(fn: (c: AdminClient) => Promise<{ data?: T }>): Pro
     if (isApiError(e)) {
       if (e.status === 401) redirect("/session-ended");
       if (e.status >= 500) log.error({ status: e.status, code: e.code, request_id: e.requestId }, "admin API error");
+      if (e.fieldErrors.length > 0) {
+        return { ok: false, error: e.detail, field: e.fieldErrors[0]?.field, fieldErrors: e.fieldErrors };
+      }
       return { ok: false, error: e.detail };
     }
     log.error({ err: e instanceof Error ? e.message : String(e) }, "admin API call failed");

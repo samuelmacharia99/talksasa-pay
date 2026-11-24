@@ -1,0 +1,196 @@
+# Laravel integration
+
+The PHP SDK `talksasa/pay-php` (source in [`clients/php`](../../clients/php))
+wraps the API for any PHP 8.2+ app and ships a Laravel bridge: a config file,
+a facade, a webhook endpoint that verifies signatures, Laravel events for
+each Talksasa Pay event, and an Artisan command that polls the events feed.
+
+> For the lead to verify before publishing: the SDK was written in parallel
+> with this guide. Names marked *(verify)* are taken from its work in
+> progress and may have changed: the webhook controller class, the route
+> registration, the cursor migration and the command options.
+
+## Install
+
+```sh
+composer require talksasa/pay-php
+php artisan vendor:publish --tag=talksasa-pay-config     # (verify) tag name
+```
+
+The service provider and the `TalksasaPay` facade register themselves
+through package discovery.
+
+## Configure
+
+Add to `.env` (never commit real values):
+
+```dotenv
+TALKSASA_PAY_BASE_URL=https://<api-host>          # ask Talksasa staff; the client adds /v1
+TALKSASA_PAY_API_KEY=tsp_test_...                  # tsp_live_... in production
+TALKSASA_PAY_WEBHOOK_SECRET=whsec_...
+# Only during a secret rotation (24 hours): the old secret.
+TALKSASA_PAY_WEBHOOK_SECRET_PREVIOUS=
+```
+
+Other settings in `config/talksasa-pay.php` have sensible defaults: timeouts
+(15 s per attempt, 5 s to connect), automatic retries on network errors,
+`429`, `502`, `503` and `504`, the cache store used to de-duplicate events,
+and where the poller keeps its cursor.
+
+Use a cache store that all your app servers share (Redis, database or
+Memcached) for de-duplication. The `file` and `array` stores only work on a
+single server.
+
+## Make calls
+
+```php
+use TalksasaPay;   // facade
+
+// When a customer signs up or changes their details.
+$payer = TalksasaPay::upsertPayer(
+    externalRef: (string) $customer->id,
+    displayName: $customer->name,
+    email: $customer->email,
+    phones: [$customer->phone],
+);
+$customer->update(['mpesa_account' => $payer->accountNumber]);
+
+// When an invoice is issued.
+$request = TalksasaPay::createPaymentRequest(
+    payer: (string) $customer->id,
+    reference: $invoice->number,
+    description: "Cloud Hosting, {$invoice->period}",
+    amount: $invoice->total_kes,                    // integer KES
+    idempotencyKey: "invoice-{$invoice->id}",       // stable: safe to retry
+);
+$invoice->update([
+    'talksasa_request_id' => $request->id,
+    'pay_url' => $request->payUrl,
+]);
+
+return redirect()->away($request->payUrl);
+```
+
+Always pass `idempotencyKey` derived from your own record. Without it the
+SDK makes up a random key, which protects only the retries inside that one
+call, not a retry of your whole job after a crash.
+
+The SDK throws a specific exception for each error `code` (all extend
+`Talksasa\Pay\Exception\TalksasaPayException`), for example
+`DuplicateReferenceException`, `IdempotencyConflictException`,
+`NotCancellableException`, `ValidationException` (with the field errors) and
+`RateLimitedException`. See [errors](errors.md) for what each means.
+
+## Receive webhooks
+
+Register the package's webhook controller on a route and give Talksasa staff
+the full URL *(verify: controller class and whether the package registers
+the route itself)*:
+
+```php
+// routes/web.php or routes/api.php
+use Talksasa\Pay\Laravel\Http\WebhookController;   // (verify)
+
+Route::post('/hooks/talksasa-pay', WebhookController::class);
+```
+
+If the route is in the `web` group, exclude it from CSRF protection (in
+Laravel 11+, `$middleware->validateCsrfTokens(except: ['hooks/talksasa-pay'])`
+in `bootstrap/app.php`). Talksasa signs every webhook instead.
+
+The controller verifies the signature against your configured secrets,
+rejects stale or forged requests with `400`, drops events it has already
+seen, dispatches a Laravel event, and answers `200`.
+
+## Listen for Laravel events
+
+Each Talksasa Pay event type has its own Laravel event class in
+`Talksasa\Pay\Laravel\Events`:
+
+| Talksasa Pay event | Laravel event |
+|---|---|
+| `payment_request.created` | `PaymentRequestCreated` |
+| `payment_request.partially_paid` | `PaymentRequestPartiallyPaid` |
+| `payment_request.paid` | `PaymentRequestPaid` |
+| `payment_request.reopened` | `PaymentRequestReopened` |
+| `payment_request.cancelled` | `PaymentRequestCancelled` |
+| `payment_request.expired` | `PaymentRequestExpired` |
+| `transaction.allocated` | `TransactionAllocated` |
+| `transaction.reversed` | `TransactionReversed` |
+| `payer.credit_changed` | `PayerCreditChanged` |
+| any of the above | `WebhookReceived` (dispatched after the specific one) |
+
+Every event has `$event` (the envelope) and `$source` (`webhook` or `poll`).
+Payment request events also have `$paymentRequest`.
+
+Use a queued listener so the webhook is answered within 10 seconds, and
+re-read the request before you change an invoice:
+
+```php
+namespace App\Listeners;
+
+use App\Models\Invoice;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Talksasa\Pay\Laravel\Events\PaymentRequestEvent;
+use TalksasaPay;
+
+class SyncInvoice implements ShouldQueue
+{
+    // Handles paid, partially_paid, reopened, cancelled and expired alike.
+    public function handle(PaymentRequestEvent $e): void
+    {
+        $invoice = Invoice::where('talksasa_request_id', $e->paymentRequest->id)->first();
+        if ($invoice === null) {
+            return; // not ours, or created outside this app
+        }
+        // Events can arrive late or out of order: act on the current state.
+        $current = TalksasaPay::getPaymentRequest($e->paymentRequest->id);
+        $invoice->update([
+            'status' => $current->status,
+            'amount_paid' => $current->amountPaid,
+        ]);
+    }
+}
+```
+
+Register it the usual way (Laravel discovers listeners by type-hint, or add
+it in `EventServiceProvider`). Keep listeners idempotent: setting a status is
+safe to repeat, adding to a balance is not.
+
+## Poll the events feed
+
+The `talksasa-pay:poll-events` command reads [`GET /events`](events-feed.md)
+from the stored cursor and dispatches the same Laravel events, skipping any
+already handled by a webhook. Schedule it as the backstop:
+
+```php
+// routes/console.php (Laravel 11+)
+use Illuminate\Support\Facades\Schedule;
+
+Schedule::command('talksasa-pay:poll-events')
+    ->everyMinute()
+    ->withoutOverlapping()
+    ->onOneServer();
+```
+
+Store the cursor in the database for production: set
+`TALKSASA_PAY_CURSOR_STORE=database` and run the package's migration, which
+creates a `talksasa_pay_cursors` table *(verify: migration publish tag)*.
+The default `cache` store is fine only with a persistent cache; if the
+cursor is lost the command replays the whole feed, which de-duplication
+absorbs but takes time.
+
+## Checklist before going live
+
+- [ ] `tsp_live_` key in the production `.env` only, and a separate
+      `tsp_test_` key for staging.
+- [ ] Webhook URL given to Talksasa staff; signing secret in `.env`.
+- [ ] Webhook route excluded from CSRF; returns `200` for a test event.
+- [ ] Listeners are queued and re-read the payment request.
+- [ ] A queue worker is running.
+- [ ] `talksasa-pay:poll-events` is scheduled, with the cursor in the
+      database.
+- [ ] Shared cache store for de-duplication.
+- [ ] Your production servers' outbound IPs sent to staff for the key's
+      allow-list.
+- [ ] You handle `payment_request.reopened` (reversals) as well as `paid`.

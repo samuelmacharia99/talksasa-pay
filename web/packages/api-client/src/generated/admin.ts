@@ -742,6 +742,195 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/products/{id}/api-keys/{keyID}/allowed-ips": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+                keyID: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** Restrict an API key to IP addresses / CIDR ranges (admin); null or [] = any address */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["id"];
+                    keyID: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        allowed_ips: string[] | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["APIKey"];
+                    };
+                };
+                400: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/webhook-deliveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Webhook deliveries, newest first */
+        get: {
+            parameters: {
+                query?: {
+                    product_id?: components["parameters"]["product_id"];
+                    status?: "pending" | "delivered" | "failed" | "skipped";
+                    cursor?: components["parameters"]["cursor"];
+                    limit?: components["parameters"]["limit"];
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["WebhookDelivery"][];
+                            next_cursor?: string;
+                        };
+                    };
+                };
+                400: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/webhook-deliveries/{eventID}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                eventID: string;
+            };
+            cookie?: never;
+        };
+        /** One delivery with every attempt and the event body */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    eventID: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            delivery: components["schemas"]["WebhookDelivery"];
+                            attempts: components["schemas"]["WebhookAttempt"][];
+                            event: {
+                                /** Format: uuid */
+                                id: string;
+                                type: string;
+                                /** Format: date-time */
+                                created_at: string;
+                                data: Record<string, never>;
+                            };
+                        };
+                    };
+                };
+                404: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/webhook-deliveries/{eventID}/redeliver": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                eventID: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Queue a failed or skipped delivery again (admin) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    eventID: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Queued */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["WebhookDelivery"];
+                    };
+                };
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/payers": {
         parameters: {
             query?: never;
@@ -1334,6 +1523,41 @@ export interface components {
             revoked_at: string | null;
             /** Format: date-time */
             last_used_at: string | null;
+            /** @description null = any address */
+            allowed_ips?: string[] | null;
+        };
+        WebhookDelivery: {
+            /** Format: uuid */
+            event_id: string;
+            /** Format: uuid */
+            product_id: string;
+            account_prefix: string;
+            event_type: string;
+            subject_type: string;
+            /** Format: uuid */
+            subject_id: string;
+            /** @enum {string} */
+            status: "pending" | "delivered" | "failed" | "skipped";
+            attempts: number;
+            /** Format: date-time */
+            last_attempt_at: string | null;
+            last_status_code: number | null;
+            last_error: string | null;
+            /** Format: date-time */
+            delivered_at: string | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        WebhookAttempt: {
+            attempt: number;
+            /** Format: date-time */
+            attempted_at: string;
+            url_host: string;
+            status_code: number | null;
+            latency_ms: number;
+            error: string | null;
+            /** @description First 1 KB of the receiver's response */
+            response_body: string | null;
         };
         Payer: {
             /** Format: uuid */
