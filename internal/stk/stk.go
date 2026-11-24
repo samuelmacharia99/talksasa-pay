@@ -21,14 +21,12 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net/netip"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/talksasa/talksasa-pay/internal/allocation"
-	"github.com/talksasa/talksasa-pay/internal/audit"
 	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/ledger"
 	"github.com/talksasa/talksasa-pay/internal/mpesa"
@@ -50,6 +48,7 @@ var (
 	ErrReceiptTaken        = errors.New("stk: this receipt is already recorded on another transaction")       // 409 receipt_taken
 	ErrInvalidReceipt      = errors.New("stk: receipt must be 1-64 letters or digits")                        // 422 validation_failed
 	ErrReasonRequired      = errors.New("stk: a reason of at least 3 characters is required")                 // 422 validation_failed
+	ErrInvalidCallback     = errors.New("stk: callback body must be a JSON object of at most 16 KiB")         // 400
 	// ErrInvalidPhone is phone.ErrInvalid (422 validation_failed, field "phone").
 )
 
@@ -107,6 +106,14 @@ type Options struct {
 	InitiatingTimeout time.Duration
 	// Now is the clock (tests). nil = time.Now.
 	Now func() time.Time
+	// ShortCode is the configured paybill. A C2B confirmation for any other
+	// BusinessShortCode is not recorded (alarm). Empty: not checked.
+	ShortCode string
+	// SweepLease: how long a sweeper holds a due push while it asks
+	// Daraja (default 2 minutes). SweepConcurrency bounds parallel status
+	// queries per sweep (default 8).
+	SweepLease       time.Duration
+	SweepConcurrency int
 }
 
 // Service is the STK / callback service. Safe for concurrent use.
@@ -128,92 +135,17 @@ func NewService(o Options) *Service {
 	if o.InitiatingTimeout <= 0 {
 		o.InitiatingTimeout = 2 * time.Minute
 	}
+	if o.SweepLease <= 0 {
+		o.SweepLease = 2 * time.Minute
+	}
+	if o.SweepConcurrency <= 0 {
+		o.SweepConcurrency = 8
+	}
+	if o.Logger == nil {
+		o.Logger = slog.Default()
+	}
 	return &Service{o: o}
 }
 
 // Available reports whether pushes can be sent at all.
 func (s *Service) Available() bool { return s.o.Client != nil }
-
-// Send sends a prompt for the request's full outstanding balance.
-//
-//  1. Tx A: lock the request; check payable, amount <= mpesa.MaxAmount, no
-//     live push; insert the pending mpesa_stk transaction and the push
-//     (initiating). Replays (same product + idempotency key) return the
-//     existing push with replayed=true.
-//  2. Call Daraja OUTSIDE any transaction.
-//  3. Tx B: accepted -> push sent (+ checkout ids, next_query_at), emit
-//     stk_push.sent; rejected -> push failed, transaction failed, emit
-//     stk_push.failed, return the push with ErrDaraja; transient (outcome
-//     unknown) -> leave initiating for the sweeper, return the push.
-func (s *Service) Send(ctx context.Context, actor audit.Actor, p SendParams) (push Push, replayed bool, err error) {
-	return Push{}, false, errors.New("stk: Send not implemented")
-}
-
-// Get returns a product's push.
-func (s *Service) Get(ctx context.Context, productID, id uuid.UUID) (Push, error) {
-	return Push{}, errors.New("stk: Get not implemented")
-}
-
-// LatestForRequest returns the newest push for a request created after
-// since, or nil (pay page).
-func (s *Service) LatestForRequest(ctx context.Context, requestID uuid.UUID, since time.Time) (*Push, error) {
-	return nil, errors.New("stk: LatestForRequest not implemented")
-}
-
-// ListForRequest lists a request's pushes, newest first (admin).
-func (s *Service) ListForRequest(ctx context.Context, requestID uuid.UUID, limit int) ([]Push, error) {
-	return nil, errors.New("stk: ListForRequest not implemented")
-}
-
-// CallbackKind is what a callback carries.
-type CallbackKind = store.MpesaCallbackKind
-
-// StoreCallback stores a callback body verbatim and enqueues its processing
-// job in the same transaction. Called by the /cb HTTP handler BEFORE it
-// acknowledges Safaricom. raw must be a JSON object (<= 16 KiB).
-func (s *Service) StoreCallback(ctx context.Context, kind CallbackKind, remoteIP netip.Addr, raw []byte) (uuid.UUID, error) {
-	return uuid.Nil, errors.New("stk: StoreCallback not implemented")
-}
-
-// ProcessCallback processes one stored callback (worker job). Idempotent:
-// an already-processed callback is a no-op.
-//
-// STK success: complete the push's pending transaction with the receipt and
-// allocate it (target request first); amount mismatch or a receipt already
-// on another row -> needs_review + alarm; unknown CheckoutRequestID -> match
-// a single orphan push by phone+amount, else record unmatched. STK failure:
-// fail the push and its transaction (a late failure after "unknown" also
-// fails it). C2B: RecordAndAllocate routed by BillRef (unmatched ->
-// suspense; inactive -> still allocated, warning).
-func (s *Service) ProcessCallback(ctx context.Context, callbackID uuid.UUID) error {
-	return errors.New("stk: ProcessCallback not implemented")
-}
-
-// SweepResult counts what one sweep did.
-type SweepResult struct {
-	Queried, Failed, NeedsReview, Rescheduled int
-}
-
-// Sweep checks due live pushes (worker periodic job): initiating past
-// InitiatingTimeout -> failed; sent and due -> STK query: succeeded ->
-// unknown + needs_review; failed -> failed; pending -> reschedule with
-// backoff, or needs_review past GiveUpAfter.
-func (s *Service) Sweep(ctx context.Context, limit int) (SweepResult, error) {
-	return SweepResult{}, errors.New("stk: Sweep not implemented")
-}
-
-// ResolveParams is a staff decision on a needs_review M-Pesa transaction.
-type ResolveParams struct {
-	TransactionID uuid.UUID
-	// Confirm with the receipt from the M-Pesa portal (marks it succeeded
-	// and allocates it), or Fail (no money arrived).
-	Confirm bool
-	Receipt string
-	Reason  string
-}
-
-// Resolve applies a staff decision (finance or admin; audited). Returns the
-// updated transaction.
-func (s *Service) Resolve(ctx context.Context, actor audit.Actor, p ResolveParams) (store.Transaction, error) {
-	return store.Transaction{}, errors.New("stk: Resolve not implemented")
-}
