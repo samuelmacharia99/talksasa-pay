@@ -143,6 +143,58 @@ func (c *Client) CancelPaymentRequest(ctx context.Context, id string) (*PaymentR
 	return &out, nil
 }
 
+// STKPush sends an M-Pesa payment prompt to phone (07XXXXXXXX, 01XXXXXXXX,
+// 2547XXXXXXXX or +2547XXXXXXXX) for the request's full outstanding balance.
+// replayed is true when the server returned the push of an earlier call with
+// the same idempotency key.
+//
+// The call always carries an Idempotency-Key, and its automatic retries
+// (network errors, 429, 503 overloaded/timeout) reuse it, so one call sends
+// at most one prompt. 409 stk_in_progress / not_payable / amount_too_large,
+// 503 mpesa_unavailable and 502 mpesa_error are returned at once (check with
+// IsCode). The outcome arrives as stk_push.* events; the bill is paid only
+// when payment_request.paid arrives.
+func (c *Client) STKPush(ctx context.Context, requestID, phone string, opts STKPushOptions) (push *STKPush, replayed bool, err error) {
+	if err := requireID("payment request id", requestID); err != nil {
+		return nil, false, err
+	}
+	phone = strings.TrimSpace(phone)
+	if phone == "" || len(phone) > 20 {
+		return nil, false, invalid("phone must be 1-20 characters")
+	}
+	key := opts.IdempotencyKey
+	if key == "" {
+		key = NewIdempotencyKey()
+	}
+	if len(key) > 255 {
+		return nil, false, invalid("idempotency key longer than 255 characters")
+	}
+	var out STKPush
+	r := request{
+		method:  http.MethodPost,
+		path:    "/payment-requests/" + pathSegment(requestID) + "/stk-push",
+		body:    map[string]string{"phone": phone},
+		idemKey: key,
+	}
+	resp, err := c.do(ctx, r, &out)
+	if err != nil {
+		return nil, false, err
+	}
+	return &out, resp.status == http.StatusOK || resp.header.Get("Idempotent-Replayed") == "true", nil
+}
+
+// GetSTKPush returns one payment prompt.
+func (c *Client) GetSTKPush(ctx context.Context, id string) (*STKPush, error) {
+	if err := requireID("id", id); err != nil {
+		return nil, err
+	}
+	var out STKPush
+	if _, err := c.do(ctx, request{method: http.MethodGet, path: "/stk-pushes/" + pathSegment(id)}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ListPaymentRequestsParams filters ListPaymentRequests. Zero values are omitted.
 type ListPaymentRequestsParams struct {
 	Status    string // open | partially_paid | paid | cancelled | expired

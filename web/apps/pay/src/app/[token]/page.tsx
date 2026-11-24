@@ -6,7 +6,8 @@ import { notFound } from "next/navigation";
 import { getPayPage } from "@/lib/pay";
 
 import { Slip } from "../Slip";
-import { LiveStatus } from "./LiveStatus";
+import { LiveProvider, LiveStatus } from "./LiveStatus";
+import { StkPanel } from "./StkPanel";
 
 export const metadata: Metadata = { title: "Pay your bill", referrer: "no-referrer" };
 
@@ -69,62 +70,68 @@ export default async function PayPage({ params }: { params: Promise<{ token: str
     );
   }
 
+  const showStk = b.stk_available || b.stk_push !== null;
+  const initialStk = b.stk_push ? { status: b.stk_push.status, message: b.stk_push.message } : null;
+
   return (
-    <Slip
-      top={
-        <>
-          {header}
-          <p className="mt-7 text-sm text-muted">{b.amount_paid > 0 ? "Left to pay" : "Amount due"}</p>
-          <p className="num font-display text-[2.6rem] leading-[1.05] font-semibold tracking-[-0.03em]">
-            {formatKes(b.outstanding)}
-          </p>
-          {b.amount_paid > 0 ? (
-            <p className="mt-2 text-sm text-ink-2">
-              <Amount value={b.amount_paid} /> of <Amount value={b.amount} /> already received.
-            </p>
-          ) : null}
-          {b.expires_at ? <p className="mt-2 text-sm text-ink-2">Pay by {formatDate(b.expires_at)}.</p> : null}
-          <LiveStatus token={token} status={b.status} amountPaid={b.amount_paid} />
-        </>
-      }
-      bottom={
-        b.paybill ? (
+    <LiveProvider token={token} status={b.status} amountPaid={b.amount_paid} initialStk={initialStk}>
+      <Slip
+        top={
           <>
-            <h2 className="font-display text-base font-semibold">Pay with M-Pesa</h2>
-            <ol className="mt-4 grid gap-4 text-[0.9375rem]">
-              <li className="grid grid-cols-[1.5rem_1fr] gap-2">
-                <Step n={1} />
-                <span>
-                  On your phone open <span className="font-medium">M-Pesa</span>, then{" "}
-                  <span className="font-medium">Lipa na M-Pesa</span>, then <span className="font-medium">Pay Bill</span>.
-                </span>
-              </li>
-              <li className="grid grid-cols-[1.5rem_1fr] gap-2">
-                <Step n={2} />
-                <Copyable label="Business number" value={b.paybill.business_number} />
-              </li>
-              <li className="grid grid-cols-[1.5rem_1fr] gap-2">
-                <Step n={3} />
-                <Copyable label="Account number" value={b.paybill.account_number} />
-              </li>
-              <li className="grid grid-cols-[1.5rem_1fr] gap-2">
-                <Step n={4} />
-                <Copyable label="Amount" value={String(b.outstanding)} display={formatKes(b.outstanding)} />
-              </li>
-              <li className="grid grid-cols-[1.5rem_1fr] gap-2">
-                <Step n={5} />
-                <span>Enter your M-Pesa PIN and confirm. You’ll get an SMS from M-Pesa.</span>
-              </li>
-            </ol>
-            <p className="mt-5 text-[0.8125rem] text-muted">
-              Paying less is fine: the rest stays on this bill. Paying more is kept as credit on your account.
+            {header}
+            <p className="mt-7 text-sm text-muted">{b.amount_paid > 0 ? "Left to pay" : "Amount due"}</p>
+            <p className="num font-display text-[2.6rem] leading-[1.05] font-semibold tracking-[-0.03em]">
+              {formatKes(b.outstanding)}
             </p>
+            {b.amount_paid > 0 ? (
+              <p className="mt-2 text-sm text-ink-2">
+                <Amount value={b.amount_paid} /> of <Amount value={b.amount} /> already received.
+              </p>
+            ) : null}
+            {b.expires_at ? <p className="mt-2 text-sm text-ink-2">Pay by {formatDate(b.expires_at)}.</p> : null}
+            <LiveStatus />
           </>
-        ) : (
-          <p className="text-[0.9375rem] text-ink-2">Online payment instructions aren’t available right now. Contact {b.product_name} to pay.</p>
-        )
-      }
-    />
+        }
+        bottom={
+          b.paybill ? (
+            <>
+              {showStk ? <StkPanel token={token} amountLabel={formatKes(b.outstanding)} canSend={b.stk_available} /> : null}
+              <h2 className="font-display text-base font-semibold">{showStk ? "Or pay with Paybill" : "Pay with M-Pesa"}</h2>
+              <ol className="mt-4 grid gap-4 text-[0.9375rem]">
+                <li className="grid grid-cols-[1.5rem_1fr] gap-2">
+                  <Step n={1} />
+                  <span>
+                    On your phone open <span className="font-medium">M-Pesa</span>, then{" "}
+                    <span className="font-medium">Lipa na M-Pesa</span>, then <span className="font-medium">Pay Bill</span>.
+                  </span>
+                </li>
+                <li className="grid grid-cols-[1.5rem_1fr] gap-2">
+                  <Step n={2} />
+                  <Copyable label="Business number" value={b.paybill.business_number} />
+                </li>
+                <li className="grid grid-cols-[1.5rem_1fr] gap-2">
+                  <Step n={3} />
+                  <Copyable label="Account number" value={b.paybill.account_number} />
+                </li>
+                <li className="grid grid-cols-[1.5rem_1fr] gap-2">
+                  <Step n={4} />
+                  <Copyable label="Amount" value={String(b.outstanding)} display={formatKes(b.outstanding)} />
+                </li>
+                <li className="grid grid-cols-[1.5rem_1fr] gap-2">
+                  <Step n={5} />
+                  <span>Enter your M-Pesa PIN and confirm. You’ll get an SMS from M-Pesa.</span>
+                </li>
+              </ol>
+              <p className="mt-5 text-[0.8125rem] text-muted">
+                Paying less is fine: the rest stays on this bill. Paying more is kept as credit on your account.
+              </p>
+            </>
+          ) : (
+            <p className="text-[0.9375rem] text-ink-2">Online payment instructions aren’t available right now. Contact {b.product_name} to pay.</p>
+          )
+        }
+      />
+    </LiveProvider>
   );
 }
 

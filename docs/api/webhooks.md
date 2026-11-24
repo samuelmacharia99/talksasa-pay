@@ -21,12 +21,21 @@ a backstop.
 | `transaction.allocated` | Transaction | A payment was matched to one of your payers and applied. `allocations` lists each bill it paid and any amount added to credit. |
 | `transaction.reversed` | Transaction | A payment was reversed (for example M-Pesa reversed it). `data` is the reversal; `reverses_transaction_id` points to the original, and its allocations are negative. |
 | `payer.credit_changed` | CreditChange | A payer's credit balance went up (overpayment) or down (credit applied to a new request, or a reversal). `delta` is the change, `credit_balance` the new total. |
+| `stk_push.sent` | STKPush | An M-Pesa payment prompt is on the customer's phone. **Not paid.** |
+| `stk_push.succeeded` | STKPush | Safaricom confirmed the prompt with a receipt. `transaction.allocated` and `payment_request.paid` (or `partially_paid`) come with it; act on those. |
+| `stk_push.failed` | STKPush | The prompt was not paid: cancelled, timed out, insufficient funds, wrong PIN... `result_code` / `result_desc` say which. Nothing was charged. |
+| `stk_push.needs_review` | STKPush | Safaricom reported success without a receipt; Talksasa staff are confirming it. **Not paid** until `payment_request.paid` arrives. |
 
 One change can produce several events. A payment that settles one bill and
 leaves change produces, in this order: `transaction.allocated`,
 `payment_request.paid`, and `payer.credit_changed`. A new request that is
 covered by existing credit produces `payment_request.created` followed by
 `payment_request.paid` (or `partially_paid`) and `payer.credit_changed`.
+
+A paid M-Pesa prompt produces `stk_push.sent`, then `stk_push.succeeded`,
+`transaction.allocated` and `payment_request.paid` (order not guaranteed).
+**Mark a bill paid only on `payment_request.paid`**, never on a `stk_push.*`
+event. See [M-Pesa payment prompts](stk-push.md).
 
 `data` is the resource as it was when the event happened. New event types
 may be added; ignore types you don't know (answer `200`).

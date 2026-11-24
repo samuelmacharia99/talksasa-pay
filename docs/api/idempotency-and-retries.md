@@ -12,11 +12,12 @@ so that you can simply send it again.
 | `PUT /payers/{external_ref}` | Yes | An upsert: the payer ends up with the details you sent, however many times you send them. |
 | `POST /payment-requests` | Yes, **with the same `Idempotency-Key` and the same body** | The key identifies the request. A repeat returns the original instead of creating a second bill. |
 | `POST /payment-requests/{id}/cancel` | Yes | Cancelling a request that is already cancelled returns it with `200`. |
+| `POST /payment-requests/{id}/stk-push` | Yes, **with the same `Idempotency-Key` and the same phone** | A repeat returns the same prompt instead of sending a second one to the customer's phone. Use a new key only to try again after a prompt failed. Never retry `502 mpesa_error` or `503 mpesa_unavailable` automatically. See [M-Pesa payment prompts](stk-push.md). |
 
 ## The `Idempotency-Key` header
 
-`POST /payment-requests` requires an `Idempotency-Key` header (1-255
-printable characters). Without it you get `400 idempotency_key_required`.
+`POST /payment-requests` and `POST /payment-requests/{id}/stk-push` require
+an `Idempotency-Key` header (1-255 printable characters). Without it you get `400 idempotency_key_required`.
 
 Rules:
 
@@ -42,6 +43,8 @@ Rules:
 | `duplicate_reference` | You already have an open or partially paid request with this `reference`. | Look it up with `GET /payment-requests?reference=...` and use it. If you really mean to replace it, cancel it first (only possible if nothing has been paid). |
 | `not_cancellable` | You tried to cancel a request that has money on it, or that is paid or expired. | Don't retry. Talk to Talksasa finance if the bill is wrong. |
 | `payer_closed` | The payer's account has been closed by Talksasa staff. | Don't retry. Contact Talksasa. |
+| `stk_in_progress` | A payment prompt for this request is already on the customer's phone. | Don't send another; wait for its `stk_push.*` event. |
+| `not_payable` / `amount_too_large` | The request can't be prompted (paid, closed, or above KES 250,000). | Don't retry. Show the request's status or the paybill steps. |
 
 `duplicate_reference` also protects you if your first `POST` succeeded, the
 response was lost, and your retry used a different key: you get a `409`

@@ -320,7 +320,10 @@ func (c *Client) shouldRetry(ctx context.Context, r request, attempt int, ae *at
 	}
 	wait := c.backoff(attempt)
 	var apiErr *APIError
-	if errors.As(ae.err, &apiErr) && apiErr.RetryAfter > 0 {
+	if errors.As(ae.err, &apiErr) && finalCode(apiErr.Code) {
+		return 0, false
+	}
+	if apiErr != nil && apiErr.RetryAfter > 0 {
 		if apiErr.RetryAfter > maxRetryAfter {
 			return 0, false
 		}

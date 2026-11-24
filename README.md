@@ -12,7 +12,7 @@ notifies the product. It only ever collects Talksasa's own revenue
 |---|---|---|
 | 0 | Foundations: config, logging, DB, HTTP, metrics, CI | done |
 | 1 | Core model: products, keys, payers, requests, ledger, allocation | done |
-| 2 | Daraja STK + C2B collections, River worker | next |
+| 2 | Daraja STK + C2B collections: M-Pesa prompts from `/v1` and the pay page, callbacks inbox, status checks, needs-review resolution, SDKs, [runbook](docs/runbooks/mpesa.md) | in progress (sandbox run pending) |
 | 3 | Product API `/v1` (+ events feed), signed webhooks via River worker, Go + PHP/Laravel SDKs, docs in [docs/api](docs/api/README.md) | done (product integration pending codebase access) |
 | 4 | B2C refunds (maker-checker) | |
 | UI | Admin panel + hosted pay page (Next.js), staff sign-in with 2FA, read-only views | done (pulled forward) |
@@ -31,6 +31,9 @@ make admin ARGS='user invite --email you@talksasa.co.ke --name "Your Name" --rol
 #   open the printed setup link, set a password, scan the QR code, save the recovery codes,
 #   then sign in at http://127.0.0.1:3001
 #   pay pages: http://127.0.0.1:3000/<token printed by seed demo>
+#   M-Pesa runs against a fake Daraja (127.0.0.1:8090): on a pay page, a phone ending in 0
+#   pays, 1 cancels, 2 ends in needs review (docs/runbooks/mpesa.md lists them all).
+#   Paybill payment: curl -X POST 127.0.0.1:8090/fake/c2b -d '{"bill_ref":"HOST-1042","amount":100}'
 
 make verify                      # everything below; run before every merge
 make test                        # Go unit + database integration tests (-race)
@@ -45,6 +48,9 @@ Deploying: `scripts/deploy.sh staging|production --host user@host` (see
 
 Product API keys: `make admin ARGS='key issue --product HOST --label staging --actor "Your Name"'`,
 then `curl -H "Authorization: Bearer tsp_test_..." localhost:8088/v1/whoami`.
+M-Pesa (Daraja sandbox setup, going live, daily checks, resolving payments
+Safaricom confirmed without a receipt): [docs/runbooks/mpesa.md](docs/runbooks/mpesa.md);
+for product developers: [docs/api/stk-push.md](docs/api/stk-push.md).
 `make help` lists every target. Metrics are on `127.0.0.1:9464/metrics`
 (never on the public port). The admin API (`:8089`) is never published; see
 [docs/runbooks/admin-access.md](docs/runbooks/admin-access.md).
@@ -64,6 +70,7 @@ internal/platform     config-independent plumbing: db, crypto, log, httpx, metri
 internal/admin        staff accounts: argon2id, TOTP, sessions, roles
 internal/adminapi     /admin/v1 (internal listener only)
 internal/reporting    read-only views for the panel and the pay page
+internal/mpesa       Daraja client, callback parsing; mpesatest = fake Daraja
 internal/integrationtest  tests against real Postgres with production privileges
 api/*.openapi.yaml    API contracts; TypeScript types are generated from them
 web/apps/admin        staff panel (Next.js; talks to Go server-side only)

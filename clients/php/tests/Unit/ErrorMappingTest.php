@@ -29,6 +29,11 @@ final class ErrorMappingTest extends ClientTestCase
         yield 'not_cancellable' => [409, 'not_cancellable', Exception\NotCancellableException::class];
         yield 'payer_closed' => [409, 'payer_closed', Exception\PayerClosedException::class];
         yield 'payer_closed as 422' => [422, 'payer_closed', Exception\PayerClosedException::class];
+        yield 'not_payable' => [409, 'not_payable', Exception\NotPayableException::class];
+        yield 'amount_too_large' => [409, 'amount_too_large', Exception\AmountTooLargeException::class];
+        yield 'stk_in_progress' => [409, 'stk_in_progress', Exception\StkInProgressException::class];
+        yield 'mpesa_unavailable' => [503, 'mpesa_unavailable', Exception\MpesaUnavailableException::class];
+        yield 'mpesa_error' => [502, 'mpesa_error', Exception\MpesaErrorException::class];
         yield 'rate_limited' => [429, 'rate_limited', Exception\RateLimitedException::class];
         yield 'overloaded' => [503, 'overloaded', Exception\ServerException::class];
         yield 'internal_error' => [500, 'internal_error', Exception\ServerException::class];

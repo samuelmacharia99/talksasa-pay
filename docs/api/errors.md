@@ -44,10 +44,19 @@ response with `Content-Type: application/problem+json`:
 | `duplicate_reference` | 409 | An `open` or `partially_paid` request with this `reference` already exists. | Fetch it with `GET /payment-requests?reference=...` and use it, or cancel it first if nothing is paid. |
 | `payer_closed` | 409 | Talksasa staff have closed this payer's account, so it can't receive new bills. | Contact Talksasa. |
 | `not_cancellable` | 409 | The request has money on it or is already paid or expired. Only open requests with nothing paid can be cancelled. | Don't retry. Talk to Talksasa finance if the bill is wrong. |
+| `not_payable` | 409 | `stk-push` on a request that is paid, cancelled or expired. | Re-read the request and show its status. |
+| `amount_too_large` | 409 | `stk-push` on a request whose outstanding balance is above KES 250,000 (the M-Pesa prompt limit). | Show the paybill instructions instead. |
+| `stk_in_progress` | 409 | `stk-push` while a prompt for this request is still on the customer's phone. `detail` has the live prompt's id. | Tell the customer to check their phone. Don't send another. |
+| `mpesa_error` | 502 | Safaricom refused or failed to send the prompt. Nothing was charged. | Don't retry automatically. Offer the paybill, or let the customer try again later with a new `Idempotency-Key`. |
+| `mpesa_unavailable` | 503 | M-Pesa prompts are not enabled in this environment. | Show the paybill instructions. Not worth retrying. |
+| `timeout` | 503 | The request took too long; it may or may not have been done. | Retry with the **same** `Idempotency-Key`. |
 | `internal_error` | 500 | Something went wrong on Talksasa's side. Nothing secret is in the response. | Retry with backoff (writes are idempotent). If it persists, send the `request_id` to Talksasa. |
 
 New codes may be added. Treat an unknown `4xx` code as "don't retry, log
-and alert", and an unknown `5xx` as retryable.
+and alert", and an unknown `5xx` as retryable, except `mpesa_error` and
+`mpesa_unavailable`, which are final answers. The prompt's own failures
+(cancelled, timed out...) arrive as `stk_push.failed` events, not errors;
+see [M-Pesa payment prompts](stk-push.md).
 
 > For the lead to verify: the status column against the final
 > `internal/productapi` handlers (taken from the work in progress), in

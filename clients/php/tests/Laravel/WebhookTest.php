@@ -9,6 +9,11 @@ use Illuminate\Testing\TestResponse;
 use Talksasa\Pay\Laravel\Events\PayerCreditChanged;
 use Talksasa\Pay\Laravel\Events\PaymentRequestPaid;
 use Talksasa\Pay\Laravel\Events\PaymentRequestPartiallyPaid;
+use Talksasa\Pay\Laravel\Events\StkPushEvent;
+use Talksasa\Pay\Laravel\Events\StkPushFailed;
+use Talksasa\Pay\Laravel\Events\StkPushNeedsReview;
+use Talksasa\Pay\Laravel\Events\StkPushSent;
+use Talksasa\Pay\Laravel\Events\StkPushSucceeded;
 use Talksasa\Pay\Laravel\Events\TalksasaPayEvent;
 use Talksasa\Pay\Laravel\Events\TransactionAllocated;
 use Talksasa\Pay\Laravel\Events\WebhookReceived;
@@ -74,6 +79,31 @@ final class WebhookTest extends LaravelTestCase
         EventFacade::assertDispatchedTimes(PaymentRequestPartiallyPaid::class, 1);
         EventFacade::assertDispatched(TransactionAllocated::class, fn (TransactionAllocated $e) => $e->transaction->amount === 2000);
         EventFacade::assertDispatched(PayerCreditChanged::class, fn (PayerCreditChanged $e) => $e->creditChange->creditBalance === 900);
+        EventFacade::assertDispatchedTimes(WebhookReceived::class, 4);
+    }
+
+    public function testStkPushEventsMapToTheirEventsAndNeverToPaid(): void
+    {
+        EventFacade::fake([StkPushSent::class, StkPushSucceeded::class, StkPushFailed::class, StkPushNeedsReview::class, PaymentRequestPaid::class, WebhookReceived::class]);
+        $failed = Fixtures::stkPush(['status' => 'failed', 'result_code' => '1032', 'result_desc' => 'Request cancelled by user']);
+        $bodies = [
+            json_encode(Fixtures::event('stk_push.sent', id: 's1'), JSON_THROW_ON_ERROR),
+            json_encode(Fixtures::event('stk_push.needs_review', Fixtures::stkPush(['status' => 'needs_review']), 's2'), JSON_THROW_ON_ERROR),
+            json_encode(Fixtures::event('stk_push.failed', $failed, 's3'), JSON_THROW_ON_ERROR),
+            json_encode(Fixtures::event('stk_push.succeeded', Fixtures::stkPush(['status' => 'succeeded']), 's4'), JSON_THROW_ON_ERROR),
+        ];
+        foreach ($bodies as $body) {
+            $this->deliver($body, Verifier::sign($body, self::SECRET))->assertOk();
+        }
+
+        EventFacade::assertDispatchedTimes(StkPushSent::class, 1);
+        EventFacade::assertDispatchedTimes(StkPushNeedsReview::class, 1);
+        EventFacade::assertDispatchedTimes(StkPushSucceeded::class, 1);
+        EventFacade::assertDispatched(StkPushFailed::class, fn (StkPushFailed $e): bool => $e instanceof StkPushEvent
+            && $e->stkPush->resultDesc === 'Request cancelled by user'
+            && $e->stkPush->wasCancelledByCustomer());
+        // A prompt's fate is never the bill's: only payment_request.paid is.
+        EventFacade::assertNotDispatched(PaymentRequestPaid::class);
         EventFacade::assertDispatchedTimes(WebhookReceived::class, 4);
     }
 

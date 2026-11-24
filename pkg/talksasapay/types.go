@@ -157,11 +157,58 @@ const (
 	EventTransactionAllocated        = "transaction.allocated"
 	EventTransactionReversed         = "transaction.reversed"
 	EventPayerCreditChanged          = "payer.credit_changed" //nolint:gosec // event name, not a credential
+
+	// The stk_push.* events report a payment prompt, not the bill. Mark an
+	// invoice paid only on payment_request.paid, never on stk_push.sent or
+	// stk_push.needs_review.
+	EventSTKPushSent        = "stk_push.sent"         // prompt on the customer's phone; not paid
+	EventSTKPushSucceeded   = "stk_push.succeeded"    // receipt recorded; payment_request.paid/partially_paid follows
+	EventSTKPushFailed      = "stk_push.failed"       // cancelled, timed out, insufficient funds...: see ResultDesc
+	EventSTKPushNeedsReview = "stk_push.needs_review" // success without a receipt; staff are confirming; not paid
 )
+
+// STK push statuses.
+const (
+	STKInitiating  = "initiating"   // being sent to Safaricom
+	STKSent        = "sent"         // on the customer's phone
+	STKSucceeded   = "succeeded"    // paid: receipt recorded
+	STKFailed      = "failed"       // see ResultCode / ResultDesc
+	STKNeedsReview = "needs_review" // success without a receipt; staff are confirming; NOT paid
+)
+
+// STKPushOptions are the optional settings of STKPush.
+type STKPushOptions struct {
+	// IdempotencyKey makes the push safe to retry: the same key returns the
+	// same push instead of sending a second prompt. Empty: a random key is
+	// generated, which protects only this call's own retries. Reuse a key
+	// only for the same phone; after a failed prompt use a new key.
+	IdempotencyKey string
+}
+
+// STKPush is an M-Pesa payment prompt sent to a customer's phone for a
+// payment request's full outstanding balance.
+type STKPush struct {
+	Object            string     `json:"object"`
+	ID                string     `json:"id"`
+	PaymentRequestID  string     `json:"payment_request_id"`
+	TransactionID     string     `json:"transaction_id"` // pending until Safaricom answers
+	Status            string     `json:"status"`         // STKInitiating ... STKNeedsReview
+	Amount            int64      `json:"amount"`
+	Phone             string     `json:"phone"`               // masked
+	CheckoutRequestID *string    `json:"checkout_request_id"` // Safaricom's id; quote it to support
+	ResultCode        *string    `json:"result_code"`         // e.g. "1032" = cancelled by the customer
+	ResultDesc        *string    `json:"result_desc"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	CompletedAt       *time.Time `json:"completed_at"`
+}
+
+// Pending reports a prompt still waiting for the customer or Safaricom.
+func (p *STKPush) Pending() bool { return p.Status == STKInitiating || p.Status == STKSent }
 
 // Event is a webhook body and an item of the events feed. Data holds the
 // resource as it was when the event happened; decode it with
-// PaymentRequest, Transaction or CreditChange according to Type.
+// PaymentRequest, Transaction, CreditChange or STKPush according to Type.
 type Event struct {
 	Object     string          `json:"object"`
 	ID         string          `json:"id"`
@@ -187,6 +234,12 @@ func (e Event) Transaction() (*Transaction, error) {
 func (e Event) CreditChange() (*CreditChange, error) {
 	var v CreditChange
 	return &v, e.decode(EventPayerCreditChanged, &v)
+}
+
+// STKPush decodes Data of a stk_push.* event.
+func (e Event) STKPush() (*STKPush, error) {
+	var v STKPush
+	return &v, e.decode("stk_push.", &v)
 }
 
 func (e Event) decode(prefix string, v any) error {
