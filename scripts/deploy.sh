@@ -130,6 +130,10 @@ cmd_init_secrets() {
     printf 'migrate_database_url: postgres://talksasa_owner:%s@postgres:5432/talksasa_pay?sslmode=require\n' "$owner"
     printf 'master_keys: "1:%s"\n' "$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
     printf 'api_key_pepper: %s\n' "$(rnd 64)"
+    # Secret path segment of the Safaricom callback URLs. The Daraja
+    # consumer key/secret and passkey are added by hand: sops <bundle>
+    # (docs/runbooks/mpesa.md).
+    printf 'mpesa_callback_token: %s\n' "$(rnd 48)"
   } | sops_local --encrypt --filename-override "$out" --input-type yaml --output-type yaml /dev/stdin >"$out.tmp" || {
     rm -f "$out.tmp"
     die "sops --encrypt failed; nothing written"
