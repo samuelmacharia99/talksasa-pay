@@ -30,6 +30,12 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 	// ready flips to draining on shutdown, before the listener closes;
 	// /readyz then answers 503 so the proxy stops routing here.
 	ready := &httpx.Readiness{}
+	// httpapi needs a nil interface (not a typed-nil service) when M-Pesa is
+	// off: no STK endpoints, no callback routes.
+	var apiSTK httpapi.STKService
+	if a.stk.Available() {
+		apiSTK = a.stk
+	}
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger: a.logger, Pool: a.pool, Products: a.products, Reporting: a.reporting,
 		Metrics: metrics.NewHTTP(reg, "api"), MaxBodyBytes: a.cfg.HTTP.MaxBodyBytes, Version: version,
@@ -37,10 +43,7 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 		Payers: a.payers, Requests: a.paymentRequests, View: a.events.View(),
 		KeyLimiter:        httpx.NewRateLimiterPerSecond(a.cfg.API.RatePerKey, a.cfg.API.BurstPerKey),
 		APIRequestTimeout: a.cfg.API.RequestTimeout, APIMaxInFlight: a.cfg.API.MaxInFlight, Readiness: ready,
-		// TODO(integrator): M-Pesa fields added by the HTTP agent, e.g.
-		//   STK: a.stk, MpesaCallbackToken: a.cfg.Mpesa.CallbackToken,
-		//   MpesaCallbackCIDRs: a.cfg.Mpesa.CallbackCIDRs,
-		// (callbacks are mounted only when a.stk.Available()).
+		STK: apiSTK, MpesaCallbackToken: a.cfg.Mpesa.CallbackToken, MpesaCallbackCIDRs: a.cfg.Mpesa.CallbackCIDRs,
 	})
 	apiSrv := httpx.NewServer(a.cfg.HTTP.Addr, handler, a.cfg.HTTP, a.logger)
 

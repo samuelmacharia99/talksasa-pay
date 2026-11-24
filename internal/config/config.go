@@ -262,7 +262,7 @@ func Load(src Source) (*Config, error) {
 		ShortCode:       l.str("TSP_MPESA_SHORTCODE", cfg.Public.Paybill),
 		CallbackBaseURL: l.str("TSP_MPESA_CALLBACK_BASE_URL", ""),
 		CallbackCIDRs:   l.prefixes("TSP_MPESA_CALLBACK_CIDRS", ""),
-		RequestTimeout:  l.duration("TSP_MPESA_REQUEST_TIMEOUT", 15*time.Second),
+		RequestTimeout:  l.duration("TSP_MPESA_REQUEST_TIMEOUT", 10*time.Second),
 		QueryAfter:      l.duration("TSP_MPESA_QUERY_AFTER", 60*time.Second),
 		GiveUpAfter:     l.duration("TSP_MPESA_GIVE_UP_AFTER", 30*time.Minute),
 	}
@@ -422,8 +422,10 @@ func (c *Config) validateMpesa() []error {
 	if m.Env == MpesaProduction && len(m.CallbackCIDRs) == 0 {
 		errs = append(errs, errors.New("TSP_MPESA_CALLBACK_CIDRS: required with the production Daraja environment (Safaricom's callback IPs)"))
 	}
-	if m.RequestTimeout < time.Second || m.RequestTimeout > time.Minute {
-		errs = append(errs, errors.New("TSP_MPESA_REQUEST_TIMEOUT: must be 1s-1m"))
+	if m.RequestTimeout < time.Second || m.RequestTimeout > time.Minute || m.RequestTimeout+2*time.Second > c.API.RequestTimeout {
+		// The STK push call runs inside a /v1 request: it must finish (and
+		// leave time to save Daraja's answer) before the request times out.
+		errs = append(errs, errors.New("TSP_MPESA_REQUEST_TIMEOUT: must be 1s-1m and at least 2s below TSP_API_REQUEST_TIMEOUT"))
 	}
 	if m.QueryAfter < 15*time.Second || m.GiveUpAfter < 5*time.Minute || m.GiveUpAfter > 24*time.Hour || m.QueryAfter >= m.GiveUpAfter {
 		errs = append(errs, errors.New("TSP_MPESA_QUERY_AFTER >= 15s and 5m <= TSP_MPESA_GIVE_UP_AFTER <= 24h (and greater) required"))
