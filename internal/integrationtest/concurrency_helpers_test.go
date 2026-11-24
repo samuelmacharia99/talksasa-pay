@@ -264,7 +264,8 @@ func (e *env) checkEvents(productID uuid.UUID) {
 		SELECT count(*) FROM events ev WHERE ev.product_id = $1 AND NOT (
 		     (ev.subject_type = 'payment_request' AND EXISTS (SELECT 1 FROM payment_requests r WHERE r.id = ev.subject_id AND r.product_id = ev.product_id))
 		  OR (ev.subject_type = 'transaction' AND EXISTS (SELECT 1 FROM transactions t WHERE t.id = ev.subject_id AND t.product_id = ev.product_id))
-		  OR (ev.subject_type = 'payer' AND EXISTS (SELECT 1 FROM payer_accounts p WHERE p.id = ev.subject_id AND p.product_id = ev.product_id)))`, productID)
+		  OR (ev.subject_type = 'payer' AND EXISTS (SELECT 1 FROM payer_accounts p WHERE p.id = ev.subject_id AND p.product_id = ev.product_id))
+		  OR (ev.subject_type = 'stk_push' AND EXISTS (SELECT 1 FROM stk_pushes s WHERE s.id = ev.subject_id AND s.product_id = ev.product_id)))`, productID)
 	e.zero("expired/cancelled requests that also reported money", `
 		SELECT count(*) FROM payment_requests r WHERE r.product_id = $1 AND r.status IN ('cancelled', 'expired')
 		   AND EXISTS (SELECT 1 FROM events ev WHERE ev.subject_id = r.id

@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,15 +40,6 @@ import (
 )
 
 const mpesaShortCode = "174379"
-
-// mpesaBugGate skips a test that demonstrates a known, reported bug unless
-// TSP_RUN_BUG_TESTS=1, so the suite stays green while the bug is open.
-func mpesaBugGate(t *testing.T, bug string) {
-	t.Helper()
-	if os.Getenv("TSP_RUN_BUG_TESTS") != "1" {
-		t.Skipf("known bug (set TSP_RUN_BUG_TESTS=1 to run): %s", bug)
-	}
-}
 
 // ctlClient is an in-process mpesa.Client the tests steer. Every STKPush
 // is recorded with a fresh CheckoutRequestID BEFORE the hook runs, i.e.

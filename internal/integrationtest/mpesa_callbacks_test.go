@@ -396,7 +396,6 @@ func TestMpesaAmountMismatchAfterSweeperReview(t *testing.T) {
 	txn := m.txn(p.TransactionID)
 	_, err := m.svc.Resolve(m.ctx, mpesaStaff(), stk.ResolveParams{TransactionID: txn.ID, Confirm: true, Receipt: receipt, Reason: "portal shows the receipt"})
 	if err == nil {
-		mpesaBugGate(t, "needs_review from the sweeper keeps failure_code no_receipt when a mismatched callback arrives later, so staff can confirm the wrong amount")
 		t.Fatalf("staff confirmed KES %d with receipt %s although Safaricom reported KES 10 for it (failure_code=%s); request now %+v",
 			txn.Amount, receipt, deref(txn.FailureCode), m.reqState(prod, req.ID).Status)
 	}

@@ -95,7 +95,6 @@ func TestMpesaOrphanAfterRetryGoesToSuspense(t *testing.T) {
 	t.Logf("push A %s, push B %s, unmatched %d, request %s", m.push(a.ID).Status, gotB.Status, unmatched, m.reqState(prod, req.ID).Status)
 	m.mpesaInvariants(invariantOpts{})
 	if unmatched != 0 || gotB.Status != store.StkPushStatusSucceeded {
-		mpesaBugGate(t, "orphan success callback goes to suspense when an earlier not_sent push for the same request/phone/amount exists")
 		t.Fatalf("B's receipt recorded unmatched (%d rows in suspense); push B %s; request %s, want paid",
 			unmatched, gotB.Status, m.reqState(prod, req.ID).Status)
 	}
