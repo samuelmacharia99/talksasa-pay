@@ -21,6 +21,11 @@ AGE_KEY="${TSP_AGE_KEY_FILE:-$ETC/age.key}"
 APP_UID=65532 # distroless nonroot (Go service)
 PG_UID=70     # postgres:alpine
 SECRET_NAMES=(pg_superuser_password pg_owner_password pg_app_password database_url migrate_database_url master_keys api_key_pepper)
+# Required only when TSP_MPESA_ENV is set. With M-Pesa off, any that are
+# missing from the bundle get a placeholder file so the compose secret mounts
+# still resolve; the service never reads them then.
+MPESA_SECRET_NAMES=(mpesa_consumer_key mpesa_consumer_secret mpesa_passkey mpesa_callback_token)
+MPESA_OFF_PLACEHOLDER="unused: M-Pesa is off (TSP_MPESA_ENV is empty)"
 PG_SECRETS=" pg_superuser_password pg_owner_password pg_app_password "
 
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
@@ -63,6 +68,17 @@ load_env() {
     [[ "$TSP_PAY_DOMAIN $TSP_ADMIN_DOMAIN $TSP_API_DOMAIN" != *localhost* ]] || die "production domains cannot be localhost"
   fi
   [[ $TSP_ADMIN_ALLOW_CIDRS != *203.0.113.10/32* ]] || die "TSP_ADMIN_ALLOW_CIDRS still has the example address"
+  # M-Pesa (the service validates fully; fail here with clearer messages).
+  case ${TSP_MPESA_ENV:-} in
+  "" | sandbox | production) ;;
+  *) die "TSP_MPESA_ENV must be empty, sandbox or production" ;;
+  esac
+  if [[ $ENV_NAME == production && -n ${TSP_MPESA_ENV:-} && $TSP_MPESA_ENV != production ]]; then
+    die "TSP_MPESA_ENV: production must use the production Daraja environment"
+  fi
+  if [[ ${TSP_MPESA_ENV:-} == production && -z ${TSP_MPESA_CALLBACK_CIDRS:-} ]]; then
+    die "TSP_MPESA_CALLBACK_CIDRS is required with TSP_MPESA_ENV=production (Safaricom's callback IPs)"
+  fi
 
   export TSP_ENV="$ENV_NAME"
   export TSP_SECRETS_DIR="$RUN/$ENV_NAME/secrets"
@@ -117,6 +133,20 @@ decrypt_secrets() {
     chown "$owner:$owner" "$tmp/$name"
     chmod 0400 "$tmp/$name"
   done
+  # The required secrets decrypted, so the key is right: a failure here
+  # means the value is not in the bundle.
+  local mpesa_note="M-Pesa ${TSP_MPESA_ENV:-off}"
+  for name in "${MPESA_SECRET_NAMES[@]}"; do
+    if ! sops_bin --decrypt --extract "[\"$name\"]" "$enc" >"$tmp/$name" 2>/dev/null || [[ ! -s $tmp/$name ]]; then
+      [[ -z ${TSP_MPESA_ENV:-} ]] || die "TSP_MPESA_ENV=$TSP_MPESA_ENV but \"$name\" is missing or empty in $(basename "$enc") (docs/runbooks/secrets.md)"
+      printf '%s\n' "$MPESA_OFF_PLACEHOLDER" >"$tmp/$name"
+    fi
+    chown "$APP_UID:$APP_UID" "$tmp/$name"
+    chmod 0400 "$tmp/$name"
+  done
+  if [[ -n ${TSP_MPESA_ENV:-} ]]; then
+    grep -Eqx '[A-Za-z0-9_-]{32,}' "$tmp/mpesa_callback_token" || die "mpesa_callback_token must be at least 32 URL-safe characters (A-Z a-z 0-9 _ -)"
+  fi
   # The service also enforces these, but fail here with a clearer message.
   grep -Eq 'sslmode=(require|verify-ca|verify-full)' "$tmp/database_url" || die "database_url must use sslmode=require (or stricter)"
   grep -Eq 'sslmode=(require|verify-ca|verify-full)' "$tmp/migrate_database_url" || die "migrate_database_url must use sslmode=require (or stricter)"
@@ -128,7 +158,7 @@ decrypt_secrets() {
   mv "$tmp" "$dir"
   rm -rf "$dir.old"
   trap - RETURN
-  say "secrets decrypted to tmpfs (${#SECRET_NAMES[@]} files, 0400)"
+  say "secrets decrypted to tmpfs ($((${#SECRET_NAMES[@]} + ${#MPESA_SECRET_NAMES[@]})) files, 0400; $mpesa_note)"
 }
 
 ensure_pg_tls() {

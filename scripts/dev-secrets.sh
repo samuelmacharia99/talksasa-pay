@@ -15,6 +15,12 @@ gen() { head -c "$1" /dev/urandom | base64 | tr -d '\n=+/' | head -c "$2"; }
 [ -f "$dir/pg_app_password" ]       || gen 48 40 > "$dir/pg_app_password"
 [ -f "$dir/api_key_pepper" ]        || gen 96 64 > "$dir/api_key_pepper"
 [ -f "$dir/master_keys" ]           || printf '1:%s\n' "$(head -c 32 /dev/urandom | base64 | tr -d '\n')" > "$dir/master_keys"
+# M-Pesa (Daraja) credentials for the dev fake-daraja service; the fake
+# checks the api/worker use these exact values. Callback token: 48 URL-safe chars.
+[ -f "$dir/mpesa_consumer_key" ]    || gen 48 32 > "$dir/mpesa_consumer_key"
+[ -f "$dir/mpesa_consumer_secret" ] || gen 48 32 > "$dir/mpesa_consumer_secret"
+[ -f "$dir/mpesa_passkey" ]         || gen 96 64 > "$dir/mpesa_passkey"
+[ -f "$dir/mpesa_callback_token" ]  || gen 96 48 > "$dir/mpesa_callback_token"
 
 port="${TSP_DEV_PG_PORT:-54329}"
 printf 'postgres://talksasa_app:%s@127.0.0.1:%s/talksasa_pay?sslmode=disable\n' "$(cat "$dir/pg_app_password")" "$port" > "$dir/database_url"

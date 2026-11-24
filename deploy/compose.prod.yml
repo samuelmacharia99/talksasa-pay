@@ -111,10 +111,20 @@ services:
       # end user's IP. Nothing else can.
       TSP_TRUSTED_PROXIES: "${TSP_NET:-172.30.20}.2/32,${TSP_NET:-172.30.20}.20/32,${TSP_NET:-172.30.20}.21/32"
       TSP_MPESA_PAYBILL: ${TSP_MPESA_PAYBILL:?}
+      # M-Pesa (Daraja). Empty TSP_MPESA_ENV = off: the mpesa_* secret files
+      # are then placeholders apply.sh writes and the service never reads.
+      TSP_MPESA_ENV: ${TSP_MPESA_ENV:-}
+      TSP_MPESA_SHORTCODE: ${TSP_MPESA_SHORTCODE:-}
+      TSP_MPESA_CALLBACK_BASE_URL: ${TSP_MPESA_CALLBACK_BASE_URL:-https://${TSP_API_DOMAIN:?}/}
+      TSP_MPESA_CALLBACK_CIDRS: ${TSP_MPESA_CALLBACK_CIDRS:-}
+      TSP_MPESA_CONSUMER_KEY_FILE: /run/secrets/mpesa_consumer_key
+      TSP_MPESA_CONSUMER_SECRET_FILE: /run/secrets/mpesa_consumer_secret
+      TSP_MPESA_PASSKEY_FILE: /run/secrets/mpesa_passkey
+      TSP_MPESA_CALLBACK_TOKEN_FILE: /run/secrets/mpesa_callback_token
       TSP_DATABASE_URL_FILE: /run/secrets/database_url
       TSP_MASTER_KEYS_FILE: /run/secrets/master_keys
       TSP_API_KEY_PEPPER_FILE: /run/secrets/api_key_pepper
-    secrets: [database_url, master_keys, api_key_pepper]
+    secrets: [database_url, master_keys, api_key_pepper, mpesa_consumer_key, mpesa_consumer_secret, mpesa_passkey, mpesa_callback_token]
     ports:
       - "127.0.0.1:${TSP_METRICS_PORT:-9464}:9464"
     networks:
@@ -127,8 +137,9 @@ services:
       retries: 3
       start_period: 10s
 
-  # Background jobs: webhook delivery, payment request expiry, retention.
-  # Talks only to Postgres (and outbound to product webhook URLs). Its
+  # Background jobs: webhook delivery, payment request expiry, retention,
+  # M-Pesa callback processing and STK status checks. Talks to Postgres and
+  # outbound to product webhook URLs and Safaricom Daraja. Its
   # /healthz and /metrics listener is bound to the host's loopback only.
   worker:
     <<: *app
@@ -145,10 +156,20 @@ services:
       TSP_PAY_BASE_URL: "https://${TSP_PAY_DOMAIN:?}/"
       TSP_ADMIN_SETUP_BASE_URL: "https://${TSP_ADMIN_DOMAIN:?}/setup/"
       TSP_MPESA_PAYBILL: ${TSP_MPESA_PAYBILL:?}
+      # M-Pesa (Daraja). Empty TSP_MPESA_ENV = off: the mpesa_* secret files
+      # are then placeholders apply.sh writes and the service never reads.
+      TSP_MPESA_ENV: ${TSP_MPESA_ENV:-}
+      TSP_MPESA_SHORTCODE: ${TSP_MPESA_SHORTCODE:-}
+      TSP_MPESA_CALLBACK_BASE_URL: ${TSP_MPESA_CALLBACK_BASE_URL:-https://${TSP_API_DOMAIN:?}/}
+      TSP_MPESA_CALLBACK_CIDRS: ${TSP_MPESA_CALLBACK_CIDRS:-}
+      TSP_MPESA_CONSUMER_KEY_FILE: /run/secrets/mpesa_consumer_key
+      TSP_MPESA_CONSUMER_SECRET_FILE: /run/secrets/mpesa_consumer_secret
+      TSP_MPESA_PASSKEY_FILE: /run/secrets/mpesa_passkey
+      TSP_MPESA_CALLBACK_TOKEN_FILE: /run/secrets/mpesa_callback_token
       TSP_DATABASE_URL_FILE: /run/secrets/database_url
       TSP_MASTER_KEYS_FILE: /run/secrets/master_keys
       TSP_API_KEY_PEPPER_FILE: /run/secrets/api_key_pepper
-    secrets: [database_url, master_keys, api_key_pepper]
+    secrets: [database_url, master_keys, api_key_pepper, mpesa_consumer_key, mpesa_consumer_secret, mpesa_passkey, mpesa_callback_token]
     ports:
       - "127.0.0.1:${TSP_WORKER_METRICS_PORT:-9465}:9465"
     networks:
@@ -252,3 +273,8 @@ secrets:
   migrate_database_url: { file: "${TSP_SECRETS_DIR}/migrate_database_url" }
   master_keys: { file: "${TSP_SECRETS_DIR}/master_keys" }
   api_key_pepper: { file: "${TSP_SECRETS_DIR}/api_key_pepper" }
+  # Optional in the bundle while M-Pesa is off (apply.sh writes placeholders).
+  mpesa_consumer_key: { file: "${TSP_SECRETS_DIR}/mpesa_consumer_key" }
+  mpesa_consumer_secret: { file: "${TSP_SECRETS_DIR}/mpesa_consumer_secret" }
+  mpesa_passkey: { file: "${TSP_SECRETS_DIR}/mpesa_passkey" }
+  mpesa_callback_token: { file: "${TSP_SECRETS_DIR}/mpesa_callback_token" }

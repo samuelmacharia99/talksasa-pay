@@ -17,7 +17,17 @@
 | Migration DB URL (role `talksasa_owner`) | `TSP_MIGRATE_DATABASE_URL_FILE` | migrate only | as above |
 | Master keyring (AES-256-GCM, versioned) | `TSP_MASTER_KEYS_FILE` | encrypting product webhook secrets (later: other DB-stored secrets) | add a new version line, deploy, re-encrypt, remove old line |
 | API key pepper | `TSP_API_KEY_PEPPER_FILE` | hashing product API keys | rotating invalidates all keys: plan a key re-issue |
-| Daraja consumer key/secret, passkey, B2C initiator credential | added in Phases 2 and 4 | worker/api | per Safaricom process |
+| Daraja consumer key (bundle key `mpesa_consumer_key`) | `TSP_MPESA_CONSUMER_KEY_FILE` | api, worker (OAuth for STK push/query, C2B URL registration) | regenerate on the Daraja portal app, update the bundle, redeploy |
+| Daraja consumer secret (`mpesa_consumer_secret`) | `TSP_MPESA_CONSUMER_SECRET_FILE` | api, worker | as above (rotate together with the key) |
+| Lipa na M-Pesa Online passkey (`mpesa_passkey`) | `TSP_MPESA_PASSKEY_FILE` | api, worker (STK password) | issued by Safaricom for the shortcode; request a new one, update the bundle, redeploy |
+| M-Pesa callback token (`mpesa_callback_token`, >= 32 URL-safe chars, e.g. `head -c 32 /dev/urandom \| base64 \| tr '+/' '-_' \| tr -d '='`) | `TSP_MPESA_CALLBACK_TOKEN_FILE` | api (checks `/cb/mpesa/{token}/...`), worker/CLI (builds callback URLs) | new value, redeploy, then re-register C2B URLs (`admin mpesa register-urls`); STK pushes in flight keep the old URL, so rotate when none are pending |
+| B2C initiator credential | added in Phase 4 | worker | per Safaricom process |
+
+The four `mpesa_*` keys are only required when `TSP_MPESA_ENV` is set in
+`/etc/talksasa-pay/<env>.env`; `apply.sh` refuses to deploy if one is
+missing then. With M-Pesa off they may be absent from the bundle (apply.sh
+mounts placeholder files the service never reads). Add them with
+`sops secrets/<env>.enc.yaml` (never paste values into chat or tickets).
 
 ## Storage: SOPS + age
 1. Each environment has an age key pair. The private key lives only on the

@@ -58,12 +58,61 @@ services:
         target: migrate_database_url
     restart: "no"
 
+  # In-memory Safaricom Daraja (internal/mpesa/mpesatest) so STK push, STK
+  # query, callbacks and C2B work locally without the sandbox. The phone's
+  # last digit picks the outcome (see the mpesatest package doc). Simulate a
+  # paybill payment with:
+  #   curl -X POST 127.0.0.1:8090/fake/c2b -d '{"bill_ref":"HOST-1042","amount":100}'
+  fake-daraja:
+    build:
+      context: .
+      dockerfile_inline: |
+        # syntax=docker/dockerfile:1.7
+        FROM golang:1.26-bookworm AS build
+        WORKDIR /src
+        COPY go.mod go.sum ./
+        RUN --mount=type=cache,target=/go/pkg/mod go mod download
+        COPY . .
+        RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+            CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/fakedaraja ./cmd/fakedaraja
+        FROM gcr.io/distroless/static-debian12:nonroot
+        COPY --from=build /out/fakedaraja /fakedaraja
+        USER nonroot:nonroot
+        EXPOSE 8090
+        ENTRYPOINT ["/fakedaraja"]
+    image: talksasa-pay-fake-daraja:dev
+    user: "${UID:-1000}:${GID:-1000}"
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    environment:
+      TSP_ENV: development
+      TSP_FAKE_DARAJA_ADDR: ":8090"
+      TSP_FAKE_DARAJA_CALLBACK_DELAY: "2s"
+      # The fake checks the api/worker present these exact credentials.
+      TSP_MPESA_CONSUMER_KEY_FILE: /run/secrets/mpesa_consumer_key
+      TSP_MPESA_CONSUMER_SECRET_FILE: /run/secrets/mpesa_consumer_secret
+      TSP_MPESA_PASSKEY_FILE: /run/secrets/mpesa_passkey
+    secrets: [mpesa_consumer_key, mpesa_consumer_secret, mpesa_passkey]
+    ports:
+      - "127.0.0.1:8090:8090"
+    networks:
+      default:
+        ipv4_address: 172.30.10.12
+    healthcheck:
+      test: ["CMD", "/fakedaraja", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     <<: *app
     command: ["api"]
     depends_on:
       migrate:
         condition: service_completed_successfully
+      fake-daraja:
+        condition: service_healthy
     environment:
       TSP_ENV: development
       TSP_LOG_LEVEL: debug
@@ -77,6 +126,16 @@ services:
       TSP_TRUSTED_PROXIES: "172.30.10.20/32,172.30.10.21/32"
       # Safaricom's sandbox test paybill; production sets the real number.
       TSP_MPESA_PAYBILL: "174379"
+      # M-Pesa against the fake-daraja service, which calls back the api's
+      # public listener inside the compose network.
+      TSP_MPESA_ENV: sandbox
+      TSP_MPESA_BASE_URL: "http://fake-daraja:8090/"
+      TSP_MPESA_SHORTCODE: "174379"
+      TSP_MPESA_CALLBACK_BASE_URL: "http://api:8088/"
+      TSP_MPESA_CONSUMER_KEY_FILE: /run/secrets/mpesa_consumer_key
+      TSP_MPESA_CONSUMER_SECRET_FILE: /run/secrets/mpesa_consumer_secret
+      TSP_MPESA_PASSKEY_FILE: /run/secrets/mpesa_passkey
+      TSP_MPESA_CALLBACK_TOKEN_FILE: /run/secrets/mpesa_callback_token
       TSP_DATABASE_URL_FILE: /run/secrets/database_url
       TSP_MASTER_KEYS_FILE: /run/secrets/master_keys
       TSP_API_KEY_PEPPER_FILE: /run/secrets/api_key_pepper
@@ -85,6 +144,10 @@ services:
         target: database_url
       - master_keys
       - api_key_pepper
+      - mpesa_consumer_key
+      - mpesa_consumer_secret
+      - mpesa_passkey
+      - mpesa_callback_token
     ports:
       - "127.0.0.1:8088:8088"
       - "127.0.0.1:9464:9464"
@@ -97,8 +160,8 @@ services:
       timeout: 3s
       retries: 3
 
-  # Background jobs: webhook delivery, payment request expiry, retention.
-  # No published ports; /healthz and /metrics stay inside the container.
+  # Background jobs: webhook delivery, payment request expiry, retention,
+  # M-Pesa callback processing and STK status checks. No published ports; /healthz and /metrics stay inside the container.
   worker:
     <<: *app
     command: ["worker"]
@@ -111,6 +174,17 @@ services:
       TSP_ENV: development
       TSP_LOG_LEVEL: debug
       TSP_WORKER_HEALTH_ADDR: "127.0.0.1:9465"
+      TSP_MPESA_PAYBILL: "174379"
+      # M-Pesa against the fake-daraja service, which calls back the api's
+      # public listener inside the compose network.
+      TSP_MPESA_ENV: sandbox
+      TSP_MPESA_BASE_URL: "http://fake-daraja:8090/"
+      TSP_MPESA_SHORTCODE: "174379"
+      TSP_MPESA_CALLBACK_BASE_URL: "http://api:8088/"
+      TSP_MPESA_CONSUMER_KEY_FILE: /run/secrets/mpesa_consumer_key
+      TSP_MPESA_CONSUMER_SECRET_FILE: /run/secrets/mpesa_consumer_secret
+      TSP_MPESA_PASSKEY_FILE: /run/secrets/mpesa_passkey
+      TSP_MPESA_CALLBACK_TOKEN_FILE: /run/secrets/mpesa_callback_token
       TSP_DATABASE_URL_FILE: /run/secrets/database_url
       TSP_MASTER_KEYS_FILE: /run/secrets/master_keys
       TSP_API_KEY_PEPPER_FILE: /run/secrets/api_key_pepper
@@ -119,6 +193,10 @@ services:
         target: database_url
       - master_keys
       - api_key_pepper
+      - mpesa_consumer_key
+      - mpesa_consumer_secret
+      - mpesa_passkey
+      - mpesa_callback_token
     networks:
       default:
         ipv4_address: 172.30.10.11
@@ -191,3 +269,7 @@ secrets:
   migrate_database_url_compose: { file: ./deploy/dev-secrets/migrate_database_url_compose }
   master_keys: { file: ./deploy/dev-secrets/master_keys }
   api_key_pepper: { file: ./deploy/dev-secrets/api_key_pepper }
+  mpesa_consumer_key: { file: ./deploy/dev-secrets/mpesa_consumer_key }
+  mpesa_consumer_secret: { file: ./deploy/dev-secrets/mpesa_consumer_secret }
+  mpesa_passkey: { file: ./deploy/dev-secrets/mpesa_passkey }
+  mpesa_callback_token: { file: ./deploy/dev-secrets/mpesa_callback_token }
