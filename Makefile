@@ -9,7 +9,7 @@ LINT  := docker run --rm -u $(shell id -u):$(shell id -g) -v $(CURDIR):/src -w /
 SECRETS := deploy/dev-secrets
 VERSION ?= $(shell git describe --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: help dev-secrets up down db-reset migrate migrate-down migrate-version sqlc build test test-unit lint vuln fmt run admin image smoke verify web-install web-gen web-check web-build e2e deploy-local deploy-staging deploy-production
+.PHONY: help dev-secrets up down db-reset migrate migrate-down migrate-version sqlc build test test-unit lint vuln fmt run admin worker-logs image smoke verify web-install web-gen web-check web-build e2e deploy-local deploy-staging deploy-production
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -66,6 +66,9 @@ image: ## build the production image
 admin: ## run an admin command: make admin ARGS='product list'
 	TSP_ENV=development TSP_DATABASE_URL_FILE=$(SECRETS)/database_url TSP_MASTER_KEYS_FILE=$(SECRETS)/master_keys \
 	TSP_API_KEY_PEPPER_FILE=$(SECRETS)/api_key_pepper $(GO) run ./cmd/talksasa-pay admin $(ARGS)
+
+worker-logs: ## follow the Docker stack's worker logs
+	docker compose logs -f --tail 100 worker
 
 smoke: ## end-to-end smoke test against the Docker stack
 	./scripts/smoke.sh

@@ -97,6 +97,39 @@ services:
       timeout: 3s
       retries: 3
 
+  # Background jobs: webhook delivery, payment request expiry, retention.
+  # No published ports; /healthz and /metrics stay inside the container.
+  worker:
+    <<: *app
+    command: ["worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    environment:
+      TSP_ENV: development
+      TSP_LOG_LEVEL: debug
+      TSP_WORKER_HEALTH_ADDR: "127.0.0.1:9465"
+      TSP_DATABASE_URL_FILE: /run/secrets/database_url
+      TSP_MASTER_KEYS_FILE: /run/secrets/master_keys
+      TSP_API_KEY_PEPPER_FILE: /run/secrets/api_key_pepper
+    secrets:
+      - source: database_url_compose
+        target: database_url
+      - master_keys
+      - api_key_pepper
+    networks:
+      default:
+        ipv4_address: 172.30.10.11
+    # Running jobs get TSP_WORKER_SHUTDOWN_TIMEOUT (25s) to finish on stop.
+    stop_grace_period: 40s
+    healthcheck:
+      test: ["CMD", "/talksasa-pay", "healthcheck", "--url", "http://127.0.0.1:9465/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
   admin:
     <<: *web
     build:

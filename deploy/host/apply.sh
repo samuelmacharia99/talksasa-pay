@@ -73,6 +73,24 @@ load_env() {
 
 compose() { docker compose -f "$RELEASE_DIR/compose.prod.yml" --project-directory "$RELEASE_DIR" "$@"; }
 
+# SERVICES: the long-running services RELEASE_DIR's compose file defines, in
+# start order. Older releases have no worker; rolling back to one removes it
+# (--remove-orphans) instead of failing on an unknown service.
+release_services() {
+  local all s
+  all=" $(compose config --services 2>/dev/null | tr '\n' ' ') "
+  SERVICES=()
+  for s in api worker admin pay caddy; do
+    if [[ $all == *" $s "* ]]; then SERVICES+=("$s"); fi
+  done
+  [[ " ${SERVICES[*]} " == *" api "* ]] || die "$RELEASE_DIR/compose.prod.yml defines no api service"
+}
+
+wait_all_healthy() {
+  local svc
+  for svc in "${SERVICES[@]}"; do wait_healthy "$svc" || return 1; done
+}
+
 # ---------------------------------------------------------------- secrets
 sops_bin() {
   command -v sops >/dev/null || die "sops is not installed on this host (see docs/runbooks/deploy.md)"
@@ -270,13 +288,11 @@ cmd_deploy() {
 
   say "starting $version"
   local healthy=1
-  compose up -d --remove-orphans api admin pay caddy || healthy=0
+  release_services
+  compose up -d --remove-orphans "${SERVICES[@]}" || healthy=0
   ((healthy)) && reload_caddy
   if ((healthy)); then
-    for svc in api admin pay caddy; do wait_healthy "$svc" || {
-      healthy=0
-      break
-    }; done
+    wait_all_healthy || healthy=0
   fi
   if ((healthy)); then
     say "checking the public edge"
@@ -294,13 +310,14 @@ cmd_deploy() {
     log_deploy "$version" deploy failed
     warn "container status and recent logs of the failed release:"
     compose ps -a --format '  {{.Service}}: {{.Status}}' >&2 || true
-    compose logs --no-color --tail 20 api admin pay >&2 || true
+    compose logs --no-color --tail 20 "${SERVICES[@]:0:${#SERVICES[@]}-1}" >&2 || true # all but caddy
     if [[ -n $prev_version && -d $prev_dir ]]; then
       warn "deploy failed; restoring $prev_version (database migrations are NOT rolled back)"
       RELEASE_DIR="$prev_dir" TSP_VERSION="$prev_version"
       export TSP_VERSION
       sync_shared
-      compose up -d --remove-orphans api admin pay caddy && reload_caddy && wait_healthy api && log_deploy "$prev_version" auto-rollback ok
+      release_services
+      compose up -d --remove-orphans "${SERVICES[@]}" && reload_caddy && wait_all_healthy && log_deploy "$prev_version" auto-rollback ok
     fi
     die "deploy of $version failed"
   fi
@@ -327,12 +344,13 @@ cmd_rollback() {
   say "rolling $ENV_NAME back to $version (database migrations are NOT rolled back)"
   decrypt_secrets "$RELEASE_DIR/secrets.enc.yaml"
   sync_shared
-  compose up -d --remove-orphans api admin pay caddy
+  release_services
+  compose up -d --remove-orphans "${SERVICES[@]}"
   reload_caddy
-  for svc in api admin pay caddy; do wait_healthy "$svc" || {
+  wait_all_healthy || {
     log_deploy "$version" rollback failed
-    die "rollback: $svc unhealthy"
-  }; done
+    die "rollback: a service is unhealthy (see above)"
+  }
   verify_edge || warn "edge checks failed after rollback"
   ln -sfn "$prev" "$ENV_ROOT/current"
   ln -sfn "$cur" "$ENV_ROOT/previous"

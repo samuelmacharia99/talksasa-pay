@@ -90,6 +90,11 @@ type WorkerConfig struct {
 	WebhookTimeout     time.Duration // per HTTP attempt
 	MaintenanceEvery   time.Duration // expiry sweep interval
 	AttemptRetention   time.Duration // webhook_attempts kept this long
+	// HealthAddr serves the worker's /healthz and /metrics. Internal only.
+	HealthAddr string
+	// ShutdownTimeout: running jobs get this long to finish on SIGTERM
+	// before their contexts are cancelled (they are retried later).
+	ShutdownTimeout time.Duration
 }
 
 // HTTPConfig configures the public API listener.
@@ -187,6 +192,8 @@ func Load(src Source) (*Config, error) {
 		WebhookTimeout:     l.duration("TSP_WEBHOOK_TIMEOUT", 10*time.Second),
 		MaintenanceEvery:   l.duration("TSP_WORKER_MAINTENANCE_EVERY", time.Minute),
 		AttemptRetention:   l.duration("TSP_WEBHOOK_ATTEMPT_RETENTION", 90*24*time.Hour),
+		HealthAddr:         l.str("TSP_WORKER_HEALTH_ADDR", "127.0.0.1:9465"),
+		ShutdownTimeout:    l.duration("TSP_WORKER_SHUTDOWN_TIMEOUT", 25*time.Second),
 	}
 	cfg.TrustedProxies = l.prefixes("TSP_TRUSTED_PROXIES", "127.0.0.1/32,::1/128")
 
@@ -275,6 +282,9 @@ func (c *Config) validate() error {
 	}
 	if c.Worker.MaintenanceEvery < 10*time.Second || c.Worker.AttemptRetention < 24*time.Hour {
 		errs = append(errs, errors.New("TSP_WORKER_MAINTENANCE_EVERY >= 10s and TSP_WEBHOOK_ATTEMPT_RETENTION >= 24h required"))
+	}
+	if c.Worker.ShutdownTimeout < time.Second || c.Worker.ShutdownTimeout > 5*time.Minute {
+		errs = append(errs, errors.New("TSP_WORKER_SHUTDOWN_TIMEOUT: must be 1s-5m"))
 	}
 	if c.Public.Paybill != "" && !paybillRe.MatchString(c.Public.Paybill) {
 		errs = append(errs, errors.New("TSP_MPESA_PAYBILL: must be 5-7 digits"))
