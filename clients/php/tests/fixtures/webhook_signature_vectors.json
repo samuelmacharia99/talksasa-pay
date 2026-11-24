@@ -1,0 +1,292 @@
+{
+  "description": "Talksasa Pay webhook signature test vectors. Generated independently (Python hmac) and checked by the PHP SDK tests.",
+  "algorithm": [
+    "Header: Talksasa-Signature: t=<unix seconds>,v1=<hex>[,v1=<hex>...]",
+    "Parse: split on ',', trim spaces/tabs around each item, split at the first '='. Exactly one t (1-12 ASCII digits). v1 values that are not 64 hex digits are ignored; at least one well-formed v1 is required. Other keys are ignored. An item without '=' (or with an empty key) is malformed.",
+    "Timestamp: reject if |now - t| > tolerance (300 s), both directions; |now - t| == tolerance is accepted.",
+    "signed_payload = <t as sent> + '.' + <raw body bytes, unmodified>",
+    "expected = lowercase hex(HMAC-SHA256(key = UTF-8 bytes of the full secret string incl. 'whsec_', message = signed_payload))",
+    "Accept if any v1 (lowercased) equals expected for any configured secret, compared in constant time."
+  ],
+  "reasons": [
+    "missing_header",
+    "malformed_header",
+    "timestamp_out_of_tolerance",
+    "no_matching_signature"
+  ],
+  "signing_example": {
+    "secret": "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo",
+    "timestamp": 1795996800,
+    "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+    "signed_payload": "1795996800.{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+    "v1": "e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+    "header": "t=1795996800,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9"
+  },
+  "vectors": [
+    {
+      "name": "valid single signature",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "valid"
+    },
+    {
+      "name": "valid, header carries old and new (rotation), receiver has new only",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=48ba6fa019cf3050e5190518d8cb445ea725f038b137419d9a0e2775fc9e20d7,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "valid"
+    },
+    {
+      "name": "valid, receiver has old and new, header carries old only",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo",
+        "whsec_Old0000secret1111rotated2222before3333"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=48ba6fa019cf3050e5190518d8cb445ea725f038b137419d9a0e2775fc9e20d7",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "valid"
+    },
+    {
+      "name": "valid, spaces after commas",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800, v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "valid"
+    },
+    {
+      "name": "valid, uppercase hex",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=E76A1E4F221DD2AFF5437EBF633420DB9050938DB27B7400F603D9C95AD7B8B9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "valid"
+    },
+    {
+      "name": "valid, unknown scheme ignored",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v0=deadbeef,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "valid"
+    },
+    {
+      "name": "valid, malformed extra v1 ignored",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=xyz,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "valid"
+    },
+    {
+      "name": "valid, exactly at past tolerance edge",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795997100,
+      "tolerance": 300,
+      "expected": "valid"
+    },
+    {
+      "name": "valid, exactly at future tolerance edge",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996500,
+      "tolerance": 300,
+      "expected": "valid"
+    },
+    {
+      "name": "valid, unicode body with trailing newline (exact bytes)",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Huduma ya wingu — café, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}\n",
+      "header": "t=1795996800,v1=fa571616fd9bbe1f6270ef2c1dab6d35251e1b8b7dd78b45fd9bfd2b298fe96e",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "valid"
+    },
+    {
+      "name": "stale by 301 s",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795997101,
+      "tolerance": 300,
+      "expected": "timestamp_out_of_tolerance"
+    },
+    {
+      "name": "future by 301 s",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996499,
+      "tolerance": 300,
+      "expected": "timestamp_out_of_tolerance"
+    },
+    {
+      "name": "wrong secret",
+      "secrets": [
+        "whsec_Old0000secret1111rotated2222before3333"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "no_matching_signature"
+    },
+    {
+      "name": "tampered body (amount changed)",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":15000,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "no_matching_signature"
+    },
+    {
+      "name": "timestamp changed (signature bound to t)",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996801,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "no_matching_signature"
+    },
+    {
+      "name": "re-serialized body (whitespace) does not verify",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\": \"event\", \"id\": \"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\", \"type\": \"payment_request.paid\", \"api_version\": \"2026-11-24\", \"created_at\": \"2026-11-30T00:00:00.123456Z\", \"data\": {\"object\": \"payment_request\", \"id\": \"0193a1b2-0000-7000-8000-000000000001\", \"reference\": \"INV-1042\", \"description\": \"Cloud hosting, December 2026\", \"currency\": \"KES\", \"amount\": 1500, \"amount_paid\": 1500, \"outstanding\": 0, \"status\": \"paid\", \"payer\": {\"external_ref\": \"cust-77\", \"account_number\": \"HOST-1042\"}, \"pay_url\": \"https://pay.talksasa.co.ke/tok_abc\", \"paybill\": null, \"expires_at\": null, \"created_at\": \"2026-11-29T08:00:00Z\", \"updated_at\": \"2026-11-30T00:00:00.123456Z\", \"paid_at\": \"2026-11-30T00:00:00.123456Z\", \"closed_at\": \"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "no_matching_signature"
+    },
+    {
+      "name": "empty header",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "missing_header"
+    },
+    {
+      "name": "missing t",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "malformed_header"
+    },
+    {
+      "name": "missing v1",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "malformed_header"
+    },
+    {
+      "name": "only malformed v1",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "malformed_header"
+    },
+    {
+      "name": "non-numeric t",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=17959968OO,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "malformed_header"
+    },
+    {
+      "name": "duplicate t",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,t=1795996800,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "malformed_header"
+    },
+    {
+      "name": "item without =",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "malformed_header"
+    },
+    {
+      "name": "trailing comma",
+      "secrets": [
+        "whsec_8Jk3mQ2xV9pLr7TzN4bW6cYh1sDf5gAe0uXo"
+      ],
+      "payload": "{\"object\":\"event\",\"id\":\"0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\",\"type\":\"payment_request.paid\",\"api_version\":\"2026-11-24\",\"created_at\":\"2026-11-30T00:00:00.123456Z\",\"data\":{\"object\":\"payment_request\",\"id\":\"0193a1b2-0000-7000-8000-000000000001\",\"reference\":\"INV-1042\",\"description\":\"Cloud hosting, December 2026\",\"currency\":\"KES\",\"amount\":1500,\"amount_paid\":1500,\"outstanding\":0,\"status\":\"paid\",\"payer\":{\"external_ref\":\"cust-77\",\"account_number\":\"HOST-1042\"},\"pay_url\":\"https://pay.talksasa.co.ke/tok_abc\",\"paybill\":null,\"expires_at\":null,\"created_at\":\"2026-11-29T08:00:00Z\",\"updated_at\":\"2026-11-30T00:00:00.123456Z\",\"paid_at\":\"2026-11-30T00:00:00.123456Z\",\"closed_at\":\"2026-11-30T00:00:00.123456Z\"}}",
+      "header": "t=1795996800,v1=e76a1e4f221dd2aff5437ebf633420db9050938db27b7400f603d9c95ad7b8b9,",
+      "now": 1795996800,
+      "tolerance": 300,
+      "expected": "malformed_header"
+    }
+  ]
+}
