@@ -85,6 +85,12 @@ func (s *Service) Resolve(ctx context.Context, actor audit.Actor, p ResolveParam
 			if txn.FailureCode != nil && *txn.FailureCode == failMismatch {
 				return ErrAmountMismatchConfirm
 			}
+			if push != nil && push.ConfirmBlocked != nil {
+				if *push.ConfirmBlocked == failMismatch {
+					return ErrAmountMismatchConfirm
+				}
+				return ErrReceiptTaken // Safaricom's receipt for it is already on another transaction
+			}
 			if other, err := q.GetTransactionByReceipt(ctx, store.GetTransactionByReceiptParams{Provider: "mpesa", ProviderTransactionID: &receipt}); err == nil && other.ID != txn.ID {
 				return ErrReceiptTaken
 			} else if err != nil && !db.IsNotFound(err) {

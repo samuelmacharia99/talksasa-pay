@@ -376,6 +376,11 @@ func (s *Service) successAfterGiveUp(ctx context.Context, q *store.Queries, cb s
 			return outcome{}, fmt.Errorf("stk: attach checkout id: %w", err)
 		}
 	}
+	// The money is on the new transaction: stk_push.succeeded (and every
+	// later read of the push) must point products at it, not the failed row.
+	if push, err = q.SetSTKPushPaidTransaction(ctx, store.SetSTKPushPaidTransactionParams{PaidTransactionID: &txn.ID, ID: push.ID}); err != nil {
+		return outcome{}, fmt.Errorf("stk: link paid transaction: %w", err)
+	}
 	if err := s.succeedPushTx(ctx, q, push, r.ResultDesc); err != nil {
 		return outcome{}, err
 	}
@@ -417,11 +422,12 @@ func (s *Service) pushForSuccess(ctx context.Context, q *store.Queries, cb store
 		if err != nil {
 			return Push{}, false, "", err
 		}
-		switch len(cands) {
-		case 0:
+		chosen, pickWhy := pickOrphan(cands)
+		switch {
+		case len(cands) == 0:
 			why = "no push with this checkout id or an orphan push with this phone and amount"
-		case 1:
-			p, err := q.LockSTKPush(ctx, cands[0].ID)
+		case chosen != nil:
+			p, err := q.LockSTKPush(ctx, chosen.ID)
 			if err != nil {
 				return Push{}, false, "", err
 			}
@@ -443,7 +449,7 @@ func (s *Service) pushForSuccess(ctx context.Context, q *store.Queries, cb store
 			}
 			// It got a checkout id meanwhile: fall through to the re-lookup.
 		default:
-			why = "several orphan pushes with this phone and amount"
+			why = pickWhy
 		}
 	} else {
 		why = "no push with this checkout id; callback phone unusable for orphan matching"
@@ -458,6 +464,37 @@ func (s *Service) pushForSuccess(ctx context.Context, q *store.Queries, cb store
 		return Push{}, false, "", err
 	}
 	return Push{}, false, why, nil
+}
+
+// pickOrphan chooses the push an orphan success callback belongs to among
+// candidates with the same phone and amount (newest first). A customer who
+// retried after a lost Daraja answer leaves a failed push and a newer
+// initiating one for the SAME request: the single initiating push wins; if
+// all are failed but for one request, the newest is used. Anything else is
+// ambiguous (the payment then goes to suspense for staff).
+func pickOrphan(cands []store.StkPush) (*store.StkPush, string) {
+	if len(cands) == 0 {
+		return nil, ""
+	}
+	var live []store.StkPush
+	sameRequest := true
+	for _, c := range cands {
+		if c.Status == store.StkPushStatusInitiating {
+			live = append(live, c)
+		}
+		if c.PaymentRequestID != cands[0].PaymentRequestID {
+			sameRequest = false
+		}
+	}
+	switch {
+	case len(live) == 1:
+		return &live[0], ""
+	case len(live) > 1:
+		return nil, "several live orphan pushes with this phone and amount"
+	case sameRequest:
+		return &cands[0], ""
+	}
+	return nil, "several orphan pushes for different requests with this phone and amount"
 }
 
 // recordUnmatchedSTK records a successful STK payment we cannot tie to a

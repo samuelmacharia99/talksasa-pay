@@ -1141,6 +1141,9 @@ type StkPush struct {
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 	CompletedAt       *time.Time
+	// Set once when the payment was recorded on a different transaction than transaction_id (late success after the push was failed).
+	PaidTransactionID *uuid.UUID
+	ConfirmBlocked    *string
 }
 
 // Append-only ledger of money movements. Amounts are never changed and rows are never deleted; corrections are new reversal/adjustment rows.

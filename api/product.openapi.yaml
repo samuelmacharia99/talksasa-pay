@@ -525,7 +525,7 @@ components:
         object: { type: string, const: stk_push }
         id: { type: string, format: uuid }
         payment_request_id: { type: string, format: uuid }
-        transaction_id: { type: string, format: uuid, description: "The M-Pesa transaction this push will complete (pending until Safaricom answers)" }
+        transaction_id: { type: string, format: uuid, description: "The M-Pesa transaction that holds (or will hold) this payment: pending until Safaricom answers. If the payment arrived after the prompt had been given up, it is the new transaction it was recorded on." }
         status:
           type: string
           enum: [initiating, sent, succeeded, failed, needs_review]

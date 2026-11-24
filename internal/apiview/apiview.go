@@ -226,10 +226,16 @@ func STKPushStatus(s store.StkPushStatus) string {
 	return string(s)
 }
 
-// STKPushOf renders a push.
+// STKPushOf renders a push. transaction_id is the transaction holding the
+// money: normally the push's own, but a payment that arrived after we had
+// given up on the push is recorded on a new transaction (paid_transaction_id).
 func STKPushOf(p store.StkPush) STKPush {
+	txnID := p.TransactionID
+	if p.PaidTransactionID != nil {
+		txnID = *p.PaidTransactionID
+	}
 	return STKPush{
-		Object: "stk_push", ID: p.ID, PaymentRequestID: p.PaymentRequestID, TransactionID: p.TransactionID,
+		Object: "stk_push", ID: p.ID, PaymentRequestID: p.PaymentRequestID, TransactionID: txnID,
 		Status: STKPushStatus(p.Status), Amount: p.Amount, Phone: tlog.MaskPhone(p.Phone),
 		CheckoutRequestID: p.CheckoutRequestID, ResultCode: p.ResultCode, ResultDesc: p.ResultDesc,
 		CreatedAt: p.CreatedAt.UTC(), UpdatedAt: p.UpdatedAt.UTC(), CompletedAt: utcPtr(p.CompletedAt),

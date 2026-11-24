@@ -22,8 +22,8 @@ UPDATE stk_pushes SET next_query_at = @next_query_at
 -- transient error between asking Daraja and saving its answer). Candidates:
 -- pushes without a checkout id, by phone and amount, still initiating or
 -- failed because we never heard back ("not_sent"). Pushes Daraja definitely
--- rejected (no prompt was ever shown) are excluded. At most 2 rows: the
--- caller only acts on exactly one.
+-- rejected (no prompt was ever shown) are excluded. The caller picks a
+-- single candidate (see pushForSuccess) or gives up.
 SELECT p.* FROM stk_pushes p
   JOIN transactions t ON t.id = p.transaction_id
  WHERE p.checkout_request_id IS NULL AND p.phone = @phone AND p.amount = @amount
@@ -31,7 +31,7 @@ SELECT p.* FROM stk_pushes p
    AND (p.status = 'initiating' OR t.failure_code IS DISTINCT FROM 'rejected')
    AND p.created_at > now() - interval '1 hour'
  ORDER BY p.created_at DESC
- LIMIT 2;
+ LIMIT 10;
 
 -- name: SetSTKPushCheckout :one
 -- Attach Safaricom's ids to a push that never stored them (orphan match of a

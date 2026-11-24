@@ -347,6 +347,15 @@ func (s *Service) reviewPushTx(ctx context.Context, q *store.Queries, cur Push, 
 			return Push{}, fmt.Errorf("stk: push to unknown: %w", err)
 		}
 	}
+	// An anomaly reported by Safaricom must stop staff from confirming,
+	// even when the transaction was already in review (e.g. the status
+	// check got there first): needs_review's failure code is set once and
+	// may say "no_receipt".
+	if txnCode == failMismatch || txnCode == failReceiptUsed {
+		if err := q.BlockSTKPushConfirm(ctx, store.BlockSTKPushConfirmParams{Reason: &txnCode, ID: cur.ID}); err != nil {
+			return Push{}, fmt.Errorf("stk: block confirm: %w", err)
+		}
+	}
 	txn, err := q.LockTransactionInternal(ctx, cur.TransactionID)
 	if err != nil {
 		return Push{}, err

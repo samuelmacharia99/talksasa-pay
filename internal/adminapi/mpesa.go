@@ -36,24 +36,30 @@ type reads interface {
 const stkListLimit = 100
 
 type stkPushJSON struct {
-	ID                uuid.UUID  `json:"id"`
-	Source            string     `json:"source"`
-	Status            string     `json:"status"`
-	Amount            int64      `json:"amount"`
-	Phone             string     `json:"phone"` // masked
-	CheckoutRequestID *string    `json:"checkout_request_id"`
-	ResultCode        *string    `json:"result_code"`
-	ResultDesc        *string    `json:"result_desc"`
-	QueryAttempts     int32      `json:"query_attempts"`
-	TransactionID     uuid.UUID  `json:"transaction_id"`
-	CreatedAt         time.Time  `json:"created_at"`
-	CompletedAt       *time.Time `json:"completed_at"`
+	ID                uuid.UUID `json:"id"`
+	Source            string    `json:"source"`
+	Status            string    `json:"status"`
+	Amount            int64     `json:"amount"`
+	Phone             string    `json:"phone"` // masked
+	CheckoutRequestID *string   `json:"checkout_request_id"`
+	ResultCode        *string   `json:"result_code"`
+	ResultDesc        *string   `json:"result_desc"`
+	QueryAttempts     int32     `json:"query_attempts"`
+	TransactionID     uuid.UUID `json:"transaction_id"`
+	// PaidTransactionID: the payment arrived after the push was given up
+	// and was recorded on this new transaction (transaction_id is failed).
+	PaidTransactionID *uuid.UUID `json:"paid_transaction_id"`
+	// ConfirmBlocked: why staff cannot confirm it with a receipt.
+	ConfirmBlocked *string    `json:"confirm_blocked"`
+	CreatedAt      time.Time  `json:"created_at"`
+	CompletedAt    *time.Time `json:"completed_at"`
 }
 
 func toSTKPush(p stk.Push) stkPushJSON {
 	return stkPushJSON{ID: p.ID, Source: p.Source, Status: string(p.Status), Amount: p.Amount, Phone: tlog.MaskPhone(p.Phone),
 		CheckoutRequestID: p.CheckoutRequestID, ResultCode: p.ResultCode, ResultDesc: p.ResultDesc,
-		QueryAttempts: p.QueryAttempts, TransactionID: p.TransactionID, CreatedAt: p.CreatedAt, CompletedAt: p.CompletedAt}
+		QueryAttempts: p.QueryAttempts, TransactionID: p.TransactionID,
+		PaidTransactionID: p.PaidTransactionID, ConfirmBlocked: p.ConfirmBlocked, CreatedAt: p.CreatedAt, CompletedAt: p.CompletedAt}
 }
 
 type mpesaCallbackJSON struct {

@@ -1625,6 +1625,16 @@ export interface components {
             query_attempts: number;
             /** Format: uuid */
             transaction_id: string;
+            /**
+             * Format: uuid
+             * @description Set when the payment arrived after the prompt was given up and was recorded on a new transaction
+             */
+            paid_transaction_id: string | null;
+            /**
+             * @description Why staff cannot confirm this prompt with a receipt
+             * @enum {string|null}
+             */
+            confirm_blocked: "amount_mismatch" | "receipt_taken" | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */

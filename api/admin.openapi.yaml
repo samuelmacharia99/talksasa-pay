@@ -645,7 +645,7 @@ components:
         request_id: { type: string }
     STKPush:
       type: object
-      required: [id, source, status, amount, phone, checkout_request_id, result_code, result_desc, query_attempts, transaction_id, created_at, completed_at]
+      required: [id, source, status, amount, phone, checkout_request_id, result_code, result_desc, query_attempts, transaction_id, paid_transaction_id, confirm_blocked, created_at, completed_at]
       properties:
         id: { type: string, format: uuid }
         source: { type: string, enum: [product, pay_page] }
@@ -657,6 +657,8 @@ components:
         result_desc: { type: [string, "null"] }
         query_attempts: { type: integer }
         transaction_id: { type: string, format: uuid }
+        paid_transaction_id: { type: [string, "null"], format: uuid, description: "Set when the payment arrived after the prompt was given up and was recorded on a new transaction" }
+        confirm_blocked: { type: [string, "null"], enum: [amount_mismatch, receipt_taken, null], description: "Why staff cannot confirm this prompt with a receipt" }
         created_at: { type: string, format: date-time }
         completed_at: { type: [string, "null"], format: date-time }
     MpesaCallback:
