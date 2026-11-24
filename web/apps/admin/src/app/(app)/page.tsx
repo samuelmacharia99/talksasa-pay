@@ -7,7 +7,7 @@ import { Suspense } from "react";
 import { Panel } from "@/components/PageHeader";
 import { api, load } from "@/lib/api";
 import { log } from "@/lib/log";
-import { type MpesaCounts, mpesaAttention } from "@/lib/mpesa";
+import { mpesaAttention } from "@/lib/mpesa";
 
 export const metadata: Metadata = { title: "Overview" };
 
@@ -72,7 +72,7 @@ export default async function Overview() {
     });
   }
   // M-Pesa counts: shown once GET /dashboard reports them (optional until then).
-  attention.splice(2, 0, ...mpesaAttention(c as typeof c & MpesaCounts));
+  attention.splice(2, 0, ...mpesaAttention(c));
   if (failed && failed.count > 0) {
     const n = failed.more ? `${failed.count}+` : String(failed.count);
     attention.splice(2, 0, {
