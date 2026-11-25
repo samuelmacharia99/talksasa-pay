@@ -9,14 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
 
-	"github.com/talksasa/talksasa-pay/internal/audit"
 	"github.com/talksasa/talksasa-pay/internal/money"
 	"github.com/talksasa/talksasa-pay/internal/phone"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
@@ -111,78 +109,6 @@ func RecordIncoming(ctx context.Context, q *store.Queries, in IncomingPayment) (
 		return Transaction{}, false, fmt.Errorf("ledger: insert transaction: %w", err)
 	}
 	return row, true, nil
-}
-
-// ErrNotImplemented marks the gateway-core stubs below.
-// TODO(gateway-core): remove once SucceedCharge and Reverse are implemented.
-var ErrNotImplemented = errors.New("ledger: not implemented yet (gateway-core)")
-
-// SucceedResult says what SucceedCharge did with a payment.
-type SucceedResult struct {
-	// Charge is the charge after the call.
-	Charge store.Charge
-	// Succeeded: this payment made the charge succeeded (emit
-	// charge.succeeded). False when the charge had already succeeded with
-	// another transaction: the payment is a duplicate (emit
-	// payment.received with duplicate_of_charge = Charge.ID).
-	Succeeded bool
-}
-
-// SucceedCharge applies a succeeded, receipted payment (txnID, whose
-// charge_id is chargeID) to its charge under a row lock, in q's transaction.
-// Money rules 3 and 6: a pending, needs_review, expired or cancelled charge
-// becomes succeeded; an already succeeded (or reversed) charge is left alone
-// and the payment is reported as a duplicate. The charges_guard trigger
-// re-checks app, charge, receipt and exact amount.
-func SucceedCharge(ctx context.Context, q *store.Queries, chargeID, txnID uuid.UUID) (SucceedResult, error) {
-	// TODO(gateway-core): LockChargeInternal, check txn (succeeded, receipt,
-	// same app/charge, exact amount), MarkChargeSucceeded or report duplicate.
-	return SucceedResult{}, ErrNotImplemented
-}
-
-// Service performs ledger operations that need their own database transaction.
-type Service struct {
-	pool   *db.Pool
-	logger *slog.Logger
-}
-
-// NewService builds a ledger service.
-func NewService(pool *db.Pool, logger *slog.Logger) *Service {
-	return &Service{pool: pool, logger: logger}
-}
-
-// ReverseParams describes a staff reversal of a recorded payment (money
-// rule 9), e.g. after Safaricom reverses a transaction.
-type ReverseParams struct {
-	OriginalID      uuid.UUID
-	Reason          string
-	ProviderReceipt string // Safaricom's reversal receipt; required for M-Pesa payments
-}
-
-// ReverseResult is what Reverse recorded.
-type ReverseResult struct {
-	Reversal Transaction
-	// Charge is the charge the original payment paid (now reversed), if any.
-	Charge *store.Charge
-}
-
-// Reverse records a reversal transaction against a succeeded incoming
-// payment. If that payment paid a charge, the charge becomes reversed. The
-// app gets transaction.reversed; the action is audited. Admin (or CLI
-// operator) only, with a reason. There is no credit or reopening logic.
-func (s *Service) Reverse(ctx context.Context, actor audit.Actor, p ReverseParams) (ReverseResult, error) {
-	if actor.Type != store.AuditActorTypeAdmin && actor.Type != store.AuditActorTypeCli {
-		return ReverseResult{}, ErrActorRequired
-	}
-	reason := strings.TrimSpace(p.Reason)
-	if len(reason) < 3 || len(reason) > 500 {
-		return ReverseResult{}, ErrReasonRequired
-	}
-	// TODO(gateway-core): in one db.WithTx: LockTransactionInternal, check
-	// reversible (GetReversalOf), InsertTransaction kind=reversal (receipt
-	// rule: ErrReversalReceipt for M-Pesa), MarkChargeReversed when
-	// charges.transaction_id = original, emit transaction.reversed, audit.
-	return ReverseResult{}, ErrNotImplemented
 }
 
 func validReceipt(r string) bool {

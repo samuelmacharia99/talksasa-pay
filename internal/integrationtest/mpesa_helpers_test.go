@@ -1,28 +1,10 @@
-//go:build gatewaycore
-
-// TODO(gateway-core): M-Pesa chaos/invariant suite, still written against
-// payers and payment requests. Compiled only with -tags gatewaycore until
-// the money core ports it to charges.
-
 package integrationtest
 
 // Shared machinery for the M-Pesa chaos suite (mpesa_*_test.go): the STK
 // service on a concurrency env, a controllable in-process Daraja client,
 // callback bodies, River-like callback processing with retries, and
-// mpesaInvariants, which extends checkInvariants with the STK rules:
-//
-//   - every receipt is recorded at most once; no succeeded M-Pesa
-//     transaction lacks a receipt;
-//   - every push is in a state consistent with its transaction
-//     (initiating/sent <-> pending, unknown <-> needs_review, failed <->
-//     failed, succeeded <-> succeeded, or failed + a rescue transaction when
-//     a receipt arrived after we gave up);
-//   - every pending/needs_review STK transaction belongs to a push; every
-//     STK transaction aimed at a request is a push's own or a rescue;
-//   - every stored callback is processed (and has its job);
-//   - events exactly once per state change: per push at most one of each
-//     stk_push.* type, exactly one for its current final state, and one
-//     payment_request.paid per paid request (zero otherwise).
+// charge helpers. mpesaInvariants (mpesa_invariants_test.go) lists what
+// must hold after every scenario.
 
 import (
 	"context"
@@ -38,8 +20,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/talksasa/talksasa-pay/internal/audit"
+	"github.com/talksasa/talksasa-pay/internal/charge"
 	"github.com/talksasa/talksasa-pay/internal/mpesa"
-	"github.com/talksasa/talksasa-pay/internal/payer"
 	"github.com/talksasa/talksasa-pay/internal/queue"
 	"github.com/talksasa/talksasa-pay/internal/stk"
 	"github.com/talksasa/talksasa-pay/internal/store"
@@ -129,6 +111,7 @@ type mpesaEnv struct {
 	*env
 	client  *ctlClient
 	svc     *stk.Service
+	charges *charge.Service
 	offset  atomic.Int64 // service clock offset (ns)
 	retries atomic.Int64 // callback processing attempts that failed and were retried
 }
@@ -143,13 +126,14 @@ func newMpesaEnv(t *testing.T, client mpesa.Client, tune func(*stk.Options)) *mp
 		client = m.client
 	}
 	o := stk.Options{
-		Pool: m.db.App, Client: client, Ledger: m.ledger, Alloc: m.alloc, Payers: m.payers, Events: m.events,
+		Pool: m.db.App, Client: client, Ledger: m.ledger, Events: m.events,
 		Callbacks: queue.NewEnqueuer(m.river), Logger: m.logger, Now: m.now, ShortCode: mpesaShortCode,
 	}
 	if tune != nil {
 		tune(&o)
 	}
 	m.svc = stk.NewService(o)
+	m.charges = charge.NewService(charge.Options{Pool: m.db.App, Events: m.events, STK: m.svc, Logger: m.logger, Now: m.now})
 	return m
 }
 
@@ -168,17 +152,17 @@ func newPhone(last int) string {
 }
 
 // sendApp sends a /v1 push with a fresh idempotency key.
-func (m *mpesaEnv) sendApp(appID, requestID uuid.UUID, ph string) (stk.Push, error) {
+func (m *mpesaEnv) sendApp(appID, chargeID uuid.UUID, ph string) (stk.Push, error) {
 	p, _, err := m.svc.Send(m.ctx, audit.App(appID), stk.SendParams{
-		AppID: appID, RequestID: requestID, Phone: ph, Source: stk.SourceApp, IdempotencyKey: uuid.NewString(),
+		AppID: appID, ChargeID: chargeID, Phone: ph, Source: stk.SourceApp, IdempotencyKey: uuid.NewString(),
 	})
 	return p, err
 }
 
 // mustSend sends a push and fails the test on error.
-func (m *mpesaEnv) mustSend(appID, requestID uuid.UUID, ph string) stk.Push {
+func (m *mpesaEnv) mustSend(appID, chargeID uuid.UUID, ph string) stk.Push {
 	m.t.Helper()
-	p, err := m.sendApp(appID, requestID, ph)
+	p, err := m.sendApp(appID, chargeID, ph)
 	if err != nil {
 		m.t.Fatalf("send: %v", err)
 	}
@@ -248,16 +232,44 @@ func (m *mpesaEnv) eventsFor(subject uuid.UUID, typ string) int64 {
 	return m.count(`SELECT count(*) FROM events WHERE subject_id = $1 AND type = $2`, subject, typ)
 }
 
-// succeededFor sums the succeeded incoming payments aimed at a request
-// (count, amount).
-func (m *mpesaEnv) succeededFor(requestID uuid.UUID) (int64, int64) {
+// succeededFor sums the succeeded incoming payments naming a charge
+// (count, amount): the one that paid it plus any second payments.
+func (m *mpesaEnv) succeededFor(chargeID uuid.UUID) (int64, int64) {
 	m.t.Helper()
 	var n, sum int64
 	if err := m.db.Owner.QueryRow(m.ctx, `SELECT count(*), coalesce(sum(amount), 0)::bigint FROM transactions
-		WHERE payment_request_id = $1 AND status = 'succeeded' AND kind = 'payment'`, requestID).Scan(&n, &sum); err != nil {
+		WHERE charge_id = $1 AND status = 'succeeded' AND kind = 'payment'`, chargeID).Scan(&n, &sum); err != nil {
 		m.t.Fatal(err)
 	}
 	return n, sum
+}
+
+// chargeOf reloads a charge.
+func (m *mpesaEnv) chargeOf(id uuid.UUID) store.Charge {
+	m.t.Helper()
+	c, err := store.New(m.db.App).GetChargeInternal(m.ctx, id)
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	return c
+}
+
+// assertCharge fails unless the charge is in status want; a succeeded or
+// reversed charge must also be paid by exactly one succeeded payment of
+// its amount (the one it names).
+func (m *mpesaEnv) assertCharge(id uuid.UUID, want store.ChargeStatus) store.Charge {
+	m.t.Helper()
+	c := m.chargeOf(id)
+	if c.Status != want {
+		m.t.Fatalf("charge %s is %s, want %s", id, c.Status, want)
+	}
+	if want == store.ChargeStatusSucceeded || want == store.ChargeStatusReversed {
+		t := m.txn(*c.TransactionID)
+		if t.Status != store.TxnStatusSucceeded || t.Amount != c.Amount || *t.ChargeID != c.ID {
+			m.t.Fatalf("charge %s paid by %+v", id, t)
+		}
+	}
+	return c
 }
 
 // receiptRows counts transactions carrying a receipt.
@@ -300,81 +312,6 @@ func c2bBody(receipt string, amount int64, billRef string) string {
 
 // staff is a finance/admin user resolving needs_review payments.
 func mpesaStaff() audit.Actor { return audit.Admin(uuid.New()) }
-
-// mpesaPayer creates a payer.
-func (m *mpesaEnv) mpesaPayer(appID uuid.UUID) payer.Payer {
-	return m.payer(appID, fmt.Sprintf("mp-%d", seq.Add(1)))
-}
-
-// mpesaInvariants runs checkInvariants plus the STK rules (package doc).
-func (m *mpesaEnv) mpesaInvariants(opts invariantOpts) {
-	m.t.Helper()
-	m.baseInvariants(opts)
-
-	m.zero("receipt recorded twice", `
-		SELECT count(*) FROM (SELECT 1 FROM transactions WHERE provider_transaction_id IS NOT NULL
-		                       GROUP BY provider, provider_transaction_id HAVING count(*) > 1) x`)
-	m.zero("succeeded M-Pesa transaction without a receipt", `
-		SELECT count(*) FROM transactions WHERE status = 'succeeded' AND provider = 'mpesa' AND provider_transaction_id IS NULL`)
-
-	// rescue(p): the succeeded transaction a late receipt created for a push
-	// we had failed (successAfterGiveUp).
-	const rescue = `EXISTS (SELECT 1 FROM transactions r WHERE r.id <> p.transaction_id AND r.status = 'succeeded'
-	                         AND r.channel = 'mpesa_stk' AND r.payment_request_id = p.payment_request_id AND r.amount = p.amount)`
-	m.zero("push state inconsistent with its transaction", `
-		SELECT count(*) FROM stk_pushes p JOIN transactions t ON t.id = p.transaction_id
-		 WHERE NOT ((p.status IN ('initiating', 'sent') AND t.status = 'pending')
-		         OR (p.status = 'unknown' AND t.status = 'needs_review')
-		         OR (p.status = 'failed' AND t.status = 'failed')
-		         OR (p.status = 'succeeded' AND t.status = 'succeeded')
-		         OR (p.status = 'succeeded' AND t.status = 'failed' AND `+rescue+`))`)
-	m.zero("succeeded push with a receipt on its own row AND a rescue row (money twice)", `
-		SELECT count(*) FROM stk_pushes p JOIN transactions t ON t.id = p.transaction_id
-		 WHERE p.status = 'succeeded' AND t.status = 'succeeded' AND EXISTS (
-		       SELECT 1 FROM transactions r WHERE r.id <> p.transaction_id AND r.status = 'succeeded'
-		          AND r.channel = 'mpesa_stk' AND r.provider_request_id = p.checkout_request_id)`)
-	m.zero("pending/needs_review STK transaction without a push", `
-		SELECT count(*) FROM transactions t WHERE t.channel = 'mpesa_stk' AND t.status IN ('pending', 'needs_review')
-		   AND NOT EXISTS (SELECT 1 FROM stk_pushes p WHERE p.transaction_id = t.id)`)
-	m.zero("STK money aimed at a request that is neither a push's own transaction nor a rescue", `
-		SELECT count(*) FROM transactions t WHERE t.channel = 'mpesa_stk' AND t.status = 'succeeded' AND t.payment_request_id IS NOT NULL
-		   AND NOT EXISTS (SELECT 1 FROM stk_pushes p WHERE p.transaction_id = t.id)
-		   AND NOT EXISTS (SELECT 1 FROM stk_pushes p JOIN transactions f ON f.id = p.transaction_id
-		                    WHERE p.status = 'succeeded' AND f.status = 'failed'
-		                      AND p.payment_request_id = t.payment_request_id AND p.amount = t.amount)
-		   AND NOT EXISTS (SELECT 1 FROM stk_pushes p JOIN transactions f ON f.id = p.transaction_id
-		                    WHERE p.status = 'succeeded' AND f.status = 'succeeded' AND f.raw_payload ? 'TransID'
-		                      AND p.payment_request_id = t.payment_request_id AND p.amount = t.amount)`) // second payment after a paybill payment completed the prompt
-	m.zero("rescued push with more than one rescue transaction", `
-		SELECT count(*) FROM stk_pushes p JOIN transactions f ON f.id = p.transaction_id
-		 WHERE p.status = 'succeeded' AND f.status = 'failed'
-		   AND (SELECT count(*) FROM transactions r WHERE r.id <> p.transaction_id AND r.status = 'succeeded' AND r.channel = 'mpesa_stk'
-		         AND (r.provider_request_id = p.checkout_request_id
-		              OR EXISTS (SELECT 1 FROM mpesa_callbacks c WHERE c.transaction_id = r.id
-		                          AND c.raw->'Body'->'stkCallback'->>'CheckoutRequestID' = p.checkout_request_id))) > 1`)
-	m.zero("unprocessed callbacks", `SELECT count(*) FROM mpesa_callbacks WHERE processed_at IS NULL`)
-	m.zero("stored callbacks without a processing job", `
-		SELECT count(*) FROM mpesa_callbacks c WHERE NOT EXISTS (
-		  SELECT 1 FROM river_job j WHERE j.kind = 'mpesa_process_callback' AND j.args->>'callback_id' = c.id::text)`)
-
-	// Events: once per state change.
-	m.zero("push with a stk_push.* event type emitted more than once", `
-		SELECT count(*) FROM (SELECT 1 FROM events WHERE subject_type = 'stk_push' GROUP BY subject_id, type HAVING count(*) > 1) x`)
-	m.zero("push whose current state has no event", `
-		SELECT count(*) FROM stk_pushes p WHERE p.status <> 'initiating' AND NOT EXISTS (
-		  SELECT 1 FROM events ev WHERE ev.subject_id = p.id AND ev.type = 'stk_push.' ||
-		         CASE p.status WHEN 'unknown' THEN 'needs_review' ELSE p.status::text END)`)
-	m.zero("succeeded event for a push that is not succeeded", `
-		SELECT count(*) FROM stk_pushes p WHERE p.status <> 'succeeded'
-		   AND EXISTS (SELECT 1 FROM events ev WHERE ev.subject_id = p.id AND ev.type = 'stk_push.succeeded')`)
-	m.zero("sent event for a push Daraja never confirmed", `
-		SELECT count(*) FROM stk_pushes p WHERE p.checkout_request_id IS NULL
-		   AND EXISTS (SELECT 1 FROM events ev WHERE ev.subject_id = p.id AND ev.type = 'stk_push.sent')`)
-	m.zero("paid request without exactly one payment_request.paid event (or an unpaid one with one)", `
-		SELECT count(*) FROM payment_requests r
-		 WHERE (SELECT count(*) FROM events ev WHERE ev.subject_id = r.id AND ev.type = 'payment_request.paid')
-		       <> CASE WHEN r.status = 'paid' THEN 1 ELSE 0 END`)
-}
 
 // mustInProgress asserts err is an *stk.InProgressError.
 func isInProgress(err error) bool {

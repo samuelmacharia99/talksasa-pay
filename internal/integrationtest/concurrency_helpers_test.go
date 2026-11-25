@@ -11,9 +11,9 @@ package integrationtest
 //     webhook delivery row and one River job per event, and every event's
 //     subject belongs to its app.
 //
-// TODO(gateway-core): add the charge money invariants of the plan (one
-// charge.succeeded per succeeded charge, payment.received for every other
-// app-routed payment) once the money core emits them.
+// The charge event invariants (one charge.succeeded per succeeded charge,
+// payment.received for every other app-routed payment, push/charge states)
+// are in mpesaInvariants: tests here may seed money without events.
 
 import (
 	"bytes"
@@ -73,7 +73,7 @@ func (e *env) rebuildServices(pool *pgxpool.Pool) {
 	}
 	ev := events.NewEmitter(apiview.View{PayBaseURL: "https://pay.test/", Paybill: "174379"}, queue.NewEnqueuer(rc))
 	e.river, e.events = rc, ev
-	e.ledger = ledger.NewService(pool, e.logger)
+	e.ledger = ledger.NewService(pool, e.logger).WithEvents(ev)
 }
 
 // storm runs fn(i) for i in [0,n) on n goroutines released at the same
@@ -339,7 +339,6 @@ func (e *env) skipIfAuditWedged(errs ...error) {
 	}
 }
 
-// TODO(gateway-core): used by the mpesa_*_test.go suite, which compiles only
-// with -tags gatewaycore until it is ported to charges. Referenced here so
-// the linter keeps them; delete this block once the port lands.
-var _ = []any{opsPerSec, &auditForks, retryAuditFork, (*env).skipIfAuditWedged}
+// Kept for storms that write audit rows concurrently (see
+// TestConcurrencyAuditChainAppends); referenced so the linter keeps them.
+var _ = []any{&auditForks, retryAuditFork, (*env).skipIfAuditWedged}

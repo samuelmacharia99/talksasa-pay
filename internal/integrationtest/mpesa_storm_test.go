@@ -1,15 +1,9 @@
-//go:build gatewaycore
-
-// TODO(gateway-core): M-Pesa chaos/invariant suite, still written against
-// payers and payment requests. Compiled only with -tags gatewaycore until
-// the money core ports it to charges.
-
 package integrationtest
 
 // M-Pesa chaos: a full storm through the real Daraja client and the HTTP
 // fake (mpesatest), with callbacks delivered over HTTP, stored, duplicated
 // and processed by a River-like worker pool, sweepers running throughout,
-// and paybill (C2B) payments to the same payers.
+// and paybill (C2B) payments to the same charges' account numbers.
 
 import (
 	"context"
@@ -28,26 +22,27 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/talksasa/talksasa-pay/internal/audit"
+	"github.com/talksasa/talksasa-pay/internal/charge"
 	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/mpesa"
 	"github.com/talksasa/talksasa-pay/internal/mpesa/mpesatest"
-	"github.com/talksasa/talksasa-pay/internal/payer"
 	"github.com/talksasa/talksasa-pay/internal/stk"
 	"github.com/talksasa/talksasa-pay/internal/store"
 )
 
-// Scenario 8: 200 pushes across 20 concurrent request lanes (10 payers),
-// random fake outcomes, random duplicate callback deliveries, three
-// sweepers, C2B payments to the same payers (and to an unknown account),
-// then staff resolve every needs_review payment concurrently. Every
-// receipt Safaricom issued is recorded exactly once, and nothing else is.
+// Scenario 8: 200 pushes across 20 concurrent charge lanes, random fake
+// outcomes, random duplicate callback deliveries, three sweepers, paybill
+// payments to the same charges' account numbers (exact amount: pays the
+// charge or is a second payment; other amounts: forwarded), to a shared
+// app-supplied account number and to an unknown prefix, then staff resolve
+// every needs_review payment concurrently. Every receipt Safaricom issued
+// is recorded exactly once, and nothing else is.
 func TestMpesaStorm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("storm")
 	}
 	const (
 		lanes       = 20
-		payersN     = 10
 		pushTarget  = 200
 		workers     = 8
 		cbDelay     = 30 * time.Millisecond
@@ -113,10 +108,12 @@ func TestMpesaStorm(t *testing.T) {
 	}
 
 	prod := m.app("STRM").App.ID
-	payers := make([]payer.Payer, payersN)
-	for i := range payers {
-		payers[i] = m.mpesaPayer(prod)
-	}
+	// Charges the lanes created (paybill payments target their account
+	// numbers).
+	var (
+		chMu    sync.Mutex
+		charges []store.Charge
+	)
 
 	// Callback workers (River stand-in: retries on error).
 	var (
@@ -169,7 +166,7 @@ func TestMpesaStorm(t *testing.T) {
 		}()
 	}
 
-	// Paybill payments to the same payers (and some to nobody).
+	// Paybill payments to the lanes' charges (and some to nobody).
 	var c2bMu sync.Mutex
 	c2bReceipts := map[string]int64{}
 	bg.Add(1)
@@ -181,11 +178,21 @@ func TestMpesaStorm(t *testing.T) {
 				return
 			case <-time.After(time.Duration(20+rand.IntN(40)) * time.Millisecond):
 			}
-			ref := payers[rand.IntN(payersN)].AccountNumber
-			if rand.IntN(10) == 0 {
-				ref = "NOBODY-1"
+			chMu.Lock()
+			var c *store.Charge
+			if len(charges) > 0 {
+				c = &charges[rand.IntN(len(charges))]
 			}
-			amount := int64(10 + rand.IntN(400))
+			chMu.Unlock()
+			ref, amount := "STRM-1", int64(10+rand.IntN(400)) // shared app account: forwarded
+			switch r := rand.IntN(10); {
+			case r == 0:
+				ref = "NOBODY-1" // unknown prefix: unmatched
+			case c != nil && r < 6:
+				ref, amount = c.AccountNumber, c.Amount // pays it (or is a second payment)
+			case c != nil:
+				ref = c.AccountNumber // wrong amount: forwarded
+			}
 			rc, err := fake.SimulateC2B(m.ctx, ref, amount, newPhone(0))
 			if err != nil {
 				t.Errorf("c2b: %v", err)
@@ -210,19 +217,23 @@ func TestMpesaStorm(t *testing.T) {
 		lwg.Add(1)
 		go func() {
 			defer lwg.Done()
-			pa := payers[l%payersN]
 			var reqID uuid.UUID
 			for pushes.Load() < pushTarget {
 				if reqID == uuid.Nil {
 					n := reqSeq.Add(1)
-					c, err := m.createReq(prod, pa.ID, fmt.Sprintf("S-%d", n), fmt.Sprintf("storm-%d", n), int64(100+rand.IntN(5000)), nil)
+					c, err := m.charges.Create(m.ctx, audit.App(prod), prod, charge.CreateParams{
+						Reference: fmt.Sprintf("S-%d", n), Amount: int64(100 + rand.IntN(5000)), IdempotencyKey: fmt.Sprintf("storm-%d", n),
+					})
 					if err != nil {
-						laneErr <- fmt.Errorf("create request: %w", err)
+						laneErr <- fmt.Errorf("create charge: %w", err)
 						return
 					}
-					reqID = c.Request.ID
+					reqID = c.Charge.ID
+					chMu.Lock()
+					charges = append(charges, c.Charge)
+					chMu.Unlock()
 				}
-				sp := stk.SendParams{AppID: prod, RequestID: reqID, Phone: newPhone(digits[rand.IntN(len(digits))]), Source: stk.SourcePayPage}
+				sp := stk.SendParams{AppID: prod, ChargeID: reqID, Phone: newPhone(digits[rand.IntN(len(digits))]), Source: stk.SourcePayPage}
 				if rand.IntN(2) == 0 {
 					sp.Source, sp.IdempotencyKey = stk.SourceApp, uuid.NewString()
 				}
@@ -378,7 +389,7 @@ func TestMpesaStorm(t *testing.T) {
 		}
 	}
 
-	m.mpesaInvariants(invariantOpts{})
+	m.mpesaInvariants()
 
 	byStatus := map[string]int64{}
 	srows, err := m.db.Owner.Query(m.ctx, `SELECT status::text, count(*) FROM stk_pushes GROUP BY 1`)
@@ -394,14 +405,14 @@ func TestMpesaStorm(t *testing.T) {
 		byStatus[s] = n
 	}
 	srows.Close()
-	paidReqs := m.count(`SELECT count(*) FROM payment_requests WHERE status = 'paid'`)
+	paidReqs := m.count(`SELECT count(*) FROM charges WHERE status = 'succeeded'`)
 	t.Logf("storm: %d pushes (%d rejected) in %s = %.1f pushes/s; in-progress refusals %d, not-payable %d",
 		pushes.Load(), rejected.Load(), elapsed.Round(time.Millisecond), float64(pushes.Load())/elapsed.Seconds(), inProgress.Load(), notPayable.Load())
 	t.Logf("callbacks: stored %d (%d duplicated deliveries, %d store errors), processed %d (%.0f/s), retried attempts %d, failures %d",
 		cbStored.Load(), cbDupes.Load(), cbStoreErr.Load(), processed.Load(), float64(processed.Load())/elapsed.Seconds(), m.retries.Load(), procErrs.Load())
-	t.Logf("push states %v; requests paid %d; c2b payments %d; sweeps %+v; staff resolved confirm=%d fail=%d; receipts recorded %d",
+	t.Logf("push states %v; charges succeeded %d; c2b payments %d; sweeps %+v; staff resolved confirm=%d fail=%d; receipts recorded %d",
 		byStatus, paidReqs, len(c2bReceipts), sweepRes.SweepResult, resolved[true], resolved[false], len(got))
-	if n := m.count(`SELECT count(*) FROM payment_requests WHERE status = 'paid'`); n == 0 {
+	if n := m.count(`SELECT count(*) FROM charges WHERE status = 'succeeded'`); n == 0 {
 		t.Fatal("storm paid nothing")
 	}
 }

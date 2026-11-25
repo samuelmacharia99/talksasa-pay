@@ -72,7 +72,7 @@ func newEnv(t *testing.T) *env {
 		apps: app.NewService(app.Options{
 			Pool: d.App, Keyring: kr, APIKeyPepper: []byte(strings.Repeat("p", 40)), AllowHTTPHooks: true, Logger: logger,
 		}),
-		ledger:   ledger.NewService(d.App, logger),
+		ledger:   ledger.NewService(d.App, logger).WithEvents(ev),
 		river:    rc,
 		events:   ev,
 		prefixes: map[uuid.UUID]string{},

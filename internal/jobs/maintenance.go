@@ -1,18 +1,16 @@
 package jobs
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
-	"slices"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
 	"github.com/talksasa/talksasa-pay/internal/audit"
+	"github.com/talksasa/talksasa-pay/internal/charge"
 	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/queue"
@@ -31,30 +29,16 @@ const maintenanceTimeout = 10 * time.Minute
 
 // Actor recorded on every row the maintenance jobs change.
 var (
-	expiryActor    = audit.System("expiry-job")
 	retentionActor = audit.System("retention-job")
 )
 
-// ExpiryWorker expires pending charges whose expires_at has passed.
-//
-// Money rules:
-//   - Only pending charges expire (never needs_review: staff are checking).
-//     Late money still succeeds an expired charge (rule 6).
-//   - Each charge's charge.expired event is written in the same
-//     transaction as its status change.
-//   - Race-safe with payments: the batch is selected FOR NO KEY UPDATE SKIP
-//     LOCKED. A charge being paid is skipped (and picked up by a later sweep
-//     if it is still pending).
+// ExpiryWorker expires pending charges whose expires_at has passed, in
+// committed batches. The expiry itself (money rules, events, audit, SKIP
+// LOCKED race safety with payments) is charge.ExpireDue, the single
+// implementation shared with charge.Service.Expire.
 //
 // Idempotent: re-running finds nothing more to do; concurrent sweeps skip
 // each other's rows.
-//
-// Audit: one audit_log row per app per batch ("charges.expired", with the
-// count and ids), not one per charge. Expiry is a routine scheduled
-// effect, each charge already gets its own immutable event row, and the
-// audit chain is serialised by a global lock.
-//
-// TODO(gateway-core): this sweep and charge.Service.Expire overlap; keep one.
 type ExpiryWorker struct {
 	river.WorkerDefaults[queue.ExpireChargesArgs]
 	pool      db.Beginner
@@ -101,48 +85,12 @@ func (w *ExpiryWorker) Sweep(ctx context.Context) (int, error) {
 }
 
 func (w *ExpiryWorker) expireBatch(ctx context.Context) (int, error) {
-	var n int
-	err := db.WithTx(ctx, w.pool, expiryActor.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
-		rows, err := q.ExpireDueCharges(ctx, int32(w.batchSize))
-		if err != nil {
-			return fmt.Errorf("jobs: expire charges: %w", err)
-		}
-		// RETURNING order is unspecified; emit in expiry order so the event
-		// feed reads naturally.
-		slices.SortFunc(rows, func(a, b store.Charge) int {
-			if c := a.ExpiresAt.Compare(b.ExpiresAt); c != 0 {
-				return c
-			}
-			return cmp.Compare(a.ID.String(), b.ID.String())
-		})
-		byApp := map[uuid.UUID][]string{}
-		var apps []uuid.UUID
-		for _, r := range rows {
-			if err := w.events.EmitCharge(ctx, q, r.AppID, r.ID, events.ChargeExpired); err != nil {
-				return err
-			}
-			if _, ok := byApp[r.AppID]; !ok {
-				apps = append(apps, r.AppID)
-			}
-			byApp[r.AppID] = append(byApp[r.AppID], r.ID.String())
-		}
-		for _, pid := range apps {
-			ids := byApp[pid]
-			if err := audit.Record(ctx, q, audit.Entry{
-				Actor: expiryActor, Action: "charges.expired", EntityType: "charge", AppID: &pid,
-				Details: map[string]any{"count": len(ids), "charge_ids": ids},
-			}); err != nil {
-				return err
-			}
-		}
-		n = len(rows)
-		return nil
-	})
+	rows, err := charge.ExpireDue(ctx, w.pool, w.events, w.batchSize)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("jobs: expire charges: %w", err)
 	}
-	w.metrics.expired(n)
-	return n, nil
+	w.metrics.expired(len(rows))
+	return len(rows), nil
 }
 
 // RetentionWorker deletes webhook attempt logs older than the retention

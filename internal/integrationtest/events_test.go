@@ -63,7 +63,7 @@ func types(evs []store.Event) []string {
 
 // Events go through the outbox in the writing transaction, in order, with a
 // webhook delivery row and exactly one River job per event. (Which events a
-// money change emits is tested with the money core: TODO(gateway-core).)
+// money change emits is tested with the money core: mpesa_rules_test.go.)
 func TestEventsOutbox(t *testing.T) {
 	e := newEnv(t)
 	p := e.app("EVT")
