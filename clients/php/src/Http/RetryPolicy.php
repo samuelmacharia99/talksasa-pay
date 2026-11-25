@@ -5,10 +5,11 @@ declare(strict_types=1);
 namespace Talksasa\Pay\Http;
 
 /**
- * When and how long to wait before retrying. Only idempotent requests are
- * retried (every /v1 operation is: GET, the PUT upsert, POST create with an
- * Idempotency-Key, and cancel), and only on network errors, 429, 502, 503
- * and 504.
+ * When and how long to wait before retrying. Only safe requests are retried
+ * (GETs; createCharge and stkPush, which always carry an Idempotency-Key that
+ * every retry reuses; and cancelCharge, idempotent by contract), and only on
+ * network errors, 429, 502, 503 and 504. 502 mpesa_error and 503
+ * mpesa_unavailable are final answers and are never retried.
  *
  * Delay for retry n (1-based): exponential backoff base * 2^(n-1), capped at
  * $maxDelay, with "equal jitter" (half fixed, half random) so many clients

@@ -6,7 +6,7 @@ namespace Talksasa\Pay\Model;
 
 /**
  * One page of a list. Pass $nextCursor as `cursor` for the next page; it is
- * null on the last page. Client::paymentRequests()/transactions() iterate
+ * null on the last page. Client::charges()/transactions() iterate
  * every page for you.
  *
  * @template T

@@ -9,8 +9,8 @@ use Talksasa\Pay\Model\StkPush;
 
 /**
  * Base of the stk_push.* events. $stkPush is the prompt's state at the time
- * of the event. These report the prompt, not the bill: mark an invoice paid
- * only on PaymentRequestPaid.
+ * of the event. These report the prompt, not the charge: mark an invoice
+ * paid only on ChargeSucceeded.
  */
 abstract class StkPushEvent extends TalksasaPayEvent
 {

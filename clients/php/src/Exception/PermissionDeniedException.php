@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace Talksasa\Pay\Exception;
 
-/** 403: ip_not_allowed (the key's IP allow-list) or product_suspended. */
-final class PermissionDeniedException extends ApiException
+/**
+ * 403: the key may not do this. Subclasses: IpNotAllowedException
+ * (ip_not_allowed) and AppSuspendedException (app_suspended).
+ */
+class PermissionDeniedException extends ApiException
 {
 }

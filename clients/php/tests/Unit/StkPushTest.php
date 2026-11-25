@@ -30,20 +30,20 @@ final class StkPushTest extends ClientTestCase
     public function testStkPushSendsPhoneWithGeneratedKey(): void
     {
         $this->http->pushJson(202, Fixtures::stkPush());
-        $push = $this->client()->stkPush(Fixtures::REQUEST_ID, ' 0712345678 ');
+        $push = $this->client()->stkPush(Fixtures::CHARGE_ID, ' 0712345678 ');
 
         $r = $this->http->last();
         self::assertSame('POST', $r->getMethod());
-        self::assertSame('/v1/payment-requests/' . Fixtures::REQUEST_ID . '/stk-push', $r->getUri()->getPath());
+        self::assertSame('/v1/charges/' . Fixtures::CHARGE_ID . '/stk-push', $r->getUri()->getPath());
         self::assertMatchesRegularExpression(self::UUID4, $r->getHeaderLine('Idempotency-Key'));
         self::assertSame('application/json', $r->getHeaderLine('Content-Type'));
         self::assertSame(['phone' => '0712345678'], $this->http->lastJson());
 
         self::assertSame(Fixtures::STK_ID, $push->id);
-        self::assertSame(Fixtures::REQUEST_ID, $push->paymentRequestId);
+        self::assertSame(Fixtures::CHARGE_ID, $push->chargeId);
         self::assertSame(Fixtures::TXN_ID, $push->transactionId);
         self::assertSame(StkPush::STATUS_SENT, $push->status);
-        self::assertSame(1300, $push->amount);
+        self::assertSame(1500, $push->amount);
         self::assertSame('2547****5678', $push->phone);
         self::assertSame('ws_CO_241120261015001234', $push->checkoutRequestId);
         self::assertNull($push->resultCode);
@@ -60,14 +60,14 @@ final class StkPushTest extends ClientTestCase
 
         $r = $this->http->last();
         self::assertSame('invoice-42-stk-1', $r->getHeaderLine('Idempotency-Key'));
-        self::assertSame('/v1/payment-requests/a%2Fb/stk-push', $r->getUri()->getPath());
+        self::assertSame('/v1/charges/a%2Fb/stk-push', $r->getUri()->getPath());
     }
 
     public function testStkPushRejectsBadInputLocally(): void
     {
         foreach ([['', null], [str_repeat('7', 21), null], ['0712345678', "bad\nkey"], ['0712345678', '']] as [$phone, $key]) {
             try {
-                $this->client()->stkPush(Fixtures::REQUEST_ID, $phone, $key);
+                $this->client()->stkPush(Fixtures::CHARGE_ID, $phone, $key);
                 self::fail('expected InvalidArgumentException');
             } catch (\InvalidArgumentException) {
             }
@@ -81,7 +81,7 @@ final class StkPushTest extends ClientTestCase
         $this->http->pushJson(503, self::problem(503, 'timeout'));
         $this->http->pushJson(202, Fixtures::stkPush());
 
-        $this->client()->stkPush(Fixtures::REQUEST_ID, '0712345678');
+        $this->client()->stkPush(Fixtures::CHARGE_ID, '0712345678');
 
         self::assertCount(3, $this->http->requests);
         $keys = array_unique(array_map(static fn ($r) => $r->getHeaderLine('Idempotency-Key'), $this->http->requests));
@@ -96,7 +96,7 @@ final class StkPushTest extends ClientTestCase
         $this->http->pushJson(429, self::problem(429, 'rate_limited'), ['Retry-After' => '1']);
         $this->http->pushJson(202, Fixtures::stkPush());
 
-        $this->client()->stkPush(Fixtures::REQUEST_ID, '0712345678', 'k-1');
+        $this->client()->stkPush(Fixtures::CHARGE_ID, '0712345678', 'k-1');
 
         self::assertCount(2, $this->http->requests);
         self::assertSame('k-1', $this->http->requests[1]->getHeaderLine('Idempotency-Key'));
@@ -107,7 +107,7 @@ final class StkPushTest extends ClientTestCase
     {
         $this->http->pushJson(503, self::problem(503, 'mpesa_unavailable'));
         try {
-            $this->client()->stkPush(Fixtures::REQUEST_ID, '0712345678');
+            $this->client()->stkPush(Fixtures::CHARGE_ID, '0712345678');
             self::fail('expected exception');
         } catch (MpesaUnavailableException $e) {
             self::assertInstanceOf(ServerException::class, $e);
@@ -119,15 +119,34 @@ final class StkPushTest extends ClientTestCase
 
     public function testMpesaErrorIsNotRetried(): void
     {
-        $this->http->pushJson(502, self::problem(502, 'mpesa_error', ['detail' => 'The prompt could not be sent']));
+        $this->http->pushJson(502, self::problem(502, 'mpesa_error', ['detail' => 'The prompt could not be sent (stk push ' . Fixtures::STK_ID . ')']));
         try {
-            $this->client()->stkPush(Fixtures::REQUEST_ID, '0712345678');
+            $this->client()->stkPush(Fixtures::CHARGE_ID, '0712345678');
             self::fail('expected exception');
         } catch (MpesaErrorException $e) {
             self::assertSame('mpesa_error', $e->errorCode);
             self::assertSame('req-1', $e->requestId);
+            self::assertSame(Fixtures::STK_ID, $e->stkPushId());
         }
         self::assertCount(1, $this->http->requests);
+        self::assertSame([], $this->sleeper->sleeps);
+    }
+
+    public function testMpesaErrorsAreNeverRetriedEvenWithRetryAfter(): void
+    {
+        $this->http->pushJson(503, self::problem(503, 'mpesa_unavailable'), ['Retry-After' => '1']);
+        $this->http->pushJson(502, self::problem(502, 'mpesa_error'), ['Retry-After' => '1']);
+        $c = $this->client();
+        foreach ([MpesaUnavailableException::class, MpesaErrorException::class] as $class) {
+            try {
+                $c->stkPush(Fixtures::CHARGE_ID, '0712345678');
+                self::fail('expected ' . $class);
+            } catch (ServerException $e) {
+                self::assertSame($class, $e::class);
+            }
+        }
+        self::assertCount(2, $this->http->requests);
+        self::assertSame([], $this->sleeper->sleeps);
     }
 
     public function testConflictsMapToTypedExceptionsWithoutRetry(): void
@@ -141,7 +160,7 @@ final class StkPushTest extends ClientTestCase
         foreach ($cases as [$body, $class]) {
             $this->http->pushJson(409, $body);
             try {
-                $this->client()->stkPush(Fixtures::REQUEST_ID, '0712345678');
+                $this->client()->stkPush(Fixtures::CHARGE_ID, '0712345678');
                 self::fail('expected ' . $class);
             } catch (ConflictException $e) {
                 self::assertSame($class, $e::class);
@@ -158,7 +177,7 @@ final class StkPushTest extends ClientTestCase
     {
         $this->http->pushJson(409, self::problem(409, 'stk_in_progress'));
         try {
-            $this->client()->stkPush(Fixtures::REQUEST_ID, '0712345678');
+            $this->client()->stkPush(Fixtures::CHARGE_ID, '0712345678');
             self::fail('expected exception');
         } catch (StkInProgressException $e) {
             self::assertNull($e->liveStkPushId());
@@ -169,7 +188,7 @@ final class StkPushTest extends ClientTestCase
     {
         $this->http->pushJson(422, self::problem(422, 'validation_failed', ['errors' => [['field' => 'phone', 'message' => 'not a Safaricom number']]]));
         try {
-            $this->client()->stkPush(Fixtures::REQUEST_ID, '0812345678');
+            $this->client()->stkPush(Fixtures::CHARGE_ID, '0812345678');
             self::fail('expected exception');
         } catch (ValidationException $e) {
             self::assertSame('phone', $e->fieldErrors[0]->field);
@@ -205,7 +224,8 @@ final class StkPushTest extends ClientTestCase
             self::assertSame(Fixtures::STK_ID, $e->stkPush()->id);
         }
 
-        $paid = Event::fromArray(Fixtures::event('payment_request.paid'));
+        $paid = Event::fromArray(Fixtures::event('charge.succeeded'));
+        self::assertSame(Fixtures::TXN_ID, $paid->charge()->transactionId);
         $this->expectException(\LogicException::class);
         $paid->stkPush();
     }

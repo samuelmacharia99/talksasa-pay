@@ -16,28 +16,31 @@ final class ErrorMappingTest extends ClientTestCase
     public static function cases(): iterable
     {
         yield 'unauthorized' => [401, 'unauthorized', Exception\AuthenticationException::class];
-        yield 'ip_not_allowed' => [403, 'ip_not_allowed', Exception\PermissionDeniedException::class];
-        yield 'product_suspended' => [403, 'product_suspended', Exception\PermissionDeniedException::class];
+        yield 'ip_not_allowed' => [403, 'ip_not_allowed', Exception\IpNotAllowedException::class];
+        yield 'app_suspended' => [403, 'app_suspended', Exception\AppSuspendedException::class];
+        yield 'rate_limited' => [429, 'rate_limited', Exception\RateLimitedException::class];
+        yield 'overloaded' => [503, 'overloaded', Exception\ServerException::class];
+        yield 'busy' => [503, 'busy', Exception\ServerException::class];
+        yield 'timeout' => [503, 'timeout', Exception\ServerException::class];
         yield 'not_found' => [404, 'not_found', Exception\NotFoundException::class];
+        yield 'method_not_allowed' => [405, 'method_not_allowed', Exception\ValidationException::class];
         yield 'validation_failed' => [422, 'validation_failed', Exception\ValidationException::class];
         yield 'invalid_json' => [400, 'invalid_json', Exception\ValidationException::class];
-        yield 'idempotency_key_required' => [400, 'idempotency_key_required', Exception\ValidationException::class];
-        yield 'payload_too_large' => [413, 'payload_too_large', Exception\ValidationException::class];
         yield 'unsupported_media_type' => [415, 'unsupported_media_type', Exception\ValidationException::class];
+        yield 'payload_too_large' => [413, 'payload_too_large', Exception\ValidationException::class];
+        yield 'idempotency_key_required' => [400, 'idempotency_key_required', Exception\ValidationException::class];
         yield 'idempotency_conflict' => [409, 'idempotency_conflict', Exception\IdempotencyConflictException::class];
         yield 'duplicate_reference' => [409, 'duplicate_reference', Exception\DuplicateReferenceException::class];
         yield 'not_cancellable' => [409, 'not_cancellable', Exception\NotCancellableException::class];
-        yield 'payer_closed' => [409, 'payer_closed', Exception\PayerClosedException::class];
-        yield 'payer_closed as 422' => [422, 'payer_closed', Exception\PayerClosedException::class];
         yield 'not_payable' => [409, 'not_payable', Exception\NotPayableException::class];
         yield 'amount_too_large' => [409, 'amount_too_large', Exception\AmountTooLargeException::class];
         yield 'stk_in_progress' => [409, 'stk_in_progress', Exception\StkInProgressException::class];
         yield 'mpesa_unavailable' => [503, 'mpesa_unavailable', Exception\MpesaUnavailableException::class];
         yield 'mpesa_error' => [502, 'mpesa_error', Exception\MpesaErrorException::class];
-        yield 'rate_limited' => [429, 'rate_limited', Exception\RateLimitedException::class];
-        yield 'overloaded' => [503, 'overloaded', Exception\ServerException::class];
+        yield 'not_implemented' => [501, 'not_implemented', Exception\ServerException::class];
         yield 'internal_error' => [500, 'internal_error', Exception\ServerException::class];
         yield 'unknown code, 409' => [409, 'brand_new_conflict', Exception\ConflictException::class];
+        yield 'unknown code, 403' => [403, 'brand_new_denial', Exception\PermissionDeniedException::class];
         yield 'no code, 404' => [404, null, Exception\NotFoundException::class];
         yield 'no code, 418' => [418, null, ApiException::class];
     }
@@ -52,7 +55,7 @@ final class ErrorMappingTest extends ClientTestCase
         $this->http->pushJson($status, $body);
 
         try {
-            $this->client(RetryPolicy::none())->getPaymentRequest('x');
+            $this->client(RetryPolicy::none())->getCharge('x');
             self::fail('expected exception');
         } catch (ApiException $e) {
             self::assertSame($class, $e::class);
@@ -65,21 +68,43 @@ final class ErrorMappingTest extends ClientTestCase
         }
     }
 
+    public function testHierarchy(): void
+    {
+        self::assertTrue(is_subclass_of(Exception\IpNotAllowedException::class, Exception\PermissionDeniedException::class));
+        self::assertTrue(is_subclass_of(Exception\AppSuspendedException::class, Exception\PermissionDeniedException::class));
+        self::assertTrue(is_subclass_of(Exception\DuplicateReferenceException::class, Exception\ConflictException::class));
+        self::assertTrue(is_subclass_of(Exception\MpesaErrorException::class, Exception\ServerException::class));
+        self::assertTrue(is_subclass_of(Exception\MpesaUnavailableException::class, Exception\ServerException::class));
+    }
+
     public function testValidationFieldErrorsAndMessage(): void
     {
         $this->http->pushJson(422, [
             'type' => 'about:blank', 'title' => 'Validation failed', 'status' => 422, 'code' => 'validation_failed',
             'detail' => 'Some fields are invalid.', 'request_id' => 'req-2',
-            'errors' => [['field' => 'amount', 'message' => 'must be at least 1'], ['field' => 'payer', 'message' => 'unknown payer'], ['bogus' => 1]],
+            'errors' => [['field' => 'amount', 'message' => 'must be at least 1'], ['field' => 'account_number', 'message' => 'must start with HOST-'], ['bogus' => 1]],
         ]);
         try {
-            $this->client()->createPaymentRequest('c', 'r', 'd', 0);
+            $this->client()->createCharge(0, 'r', accountNumber: 'X-1');
             self::fail('expected exception');
         } catch (Exception\ValidationException $e) {
             self::assertCount(2, $e->fieldErrors);
             self::assertSame('amount', $e->fieldErrors[0]->field);
             self::assertSame('must be at least 1', $e->fieldErrors[0]->message);
+            self::assertSame('account_number', $e->fieldErrors[1]->field);
             self::assertSame('Talksasa Pay API error 422 (validation_failed): Some fields are invalid. [request_id req-2]', $e->getMessage());
+        }
+        self::assertCount(1, $this->http->requests);
+    }
+
+    public function testDuplicateReferenceOnCreateIsNotRetried(): void
+    {
+        $this->http->pushJson(409, ['type' => 'about:blank', 'title' => 'Duplicate', 'status' => 409, 'code' => 'duplicate_reference']);
+        $this->expectException(Exception\DuplicateReferenceException::class);
+        try {
+            $this->client()->createCharge(1500, 'INV-1042');
+        } finally {
+            self::assertCount(1, $this->http->requests);
         }
     }
 
@@ -87,7 +112,7 @@ final class ErrorMappingTest extends ClientTestCase
     {
         $this->http->push(new Response(404, ['X-Request-Id' => 'hdr-id', 'Content-Type' => 'application/problem+json'], '{"status":404,"code":"not_found","title":"Not found"}'));
         try {
-            $this->client()->getPayer('nope');
+            $this->client()->getCharge('nope');
             self::fail('expected exception');
         } catch (Exception\NotFoundException $e) {
             self::assertSame('hdr-id', $e->requestId);

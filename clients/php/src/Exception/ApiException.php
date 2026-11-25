@@ -14,28 +14,34 @@ use Psr\Http\Message\ResponseInterface;
  */
 class ApiException extends \RuntimeException implements TalksasaPayException
 {
-    /** Code => class. Codes are stable; statuses are the fallback. */
-    private const BY_CODE = [
+    /**
+     * Every problem code of api/app.openapi.yaml => its exception class.
+     * Codes are stable; the HTTP status is the fallback for unknown codes.
+     */
+    public const CLASSES_BY_CODE = [
         'unauthorized' => AuthenticationException::class,
-        'ip_not_allowed' => PermissionDeniedException::class,
-        'product_suspended' => PermissionDeniedException::class,
+        'ip_not_allowed' => IpNotAllowedException::class,
+        'app_suspended' => AppSuspendedException::class,
+        'rate_limited' => RateLimitedException::class,
+        'overloaded' => ServerException::class,
+        'busy' => ServerException::class,
+        'timeout' => ServerException::class,
         'not_found' => NotFoundException::class,
+        'method_not_allowed' => ValidationException::class,
         'validation_failed' => ValidationException::class,
         'invalid_json' => ValidationException::class,
         'unsupported_media_type' => ValidationException::class,
-        'idempotency_key_required' => ValidationException::class,
         'payload_too_large' => ValidationException::class,
+        'idempotency_key_required' => ValidationException::class,
         'idempotency_conflict' => IdempotencyConflictException::class,
         'duplicate_reference' => DuplicateReferenceException::class,
         'not_cancellable' => NotCancellableException::class,
-        'payer_closed' => PayerClosedException::class,
         'not_payable' => NotPayableException::class,
         'amount_too_large' => AmountTooLargeException::class,
         'stk_in_progress' => StkInProgressException::class,
         'mpesa_unavailable' => MpesaUnavailableException::class,
         'mpesa_error' => MpesaErrorException::class,
-        'rate_limited' => RateLimitedException::class,
-        'overloaded' => ServerException::class,
+        'not_implemented' => ServerException::class,
         'internal_error' => ServerException::class,
     ];
 
@@ -93,7 +99,7 @@ class ApiException extends \RuntimeException implements TalksasaPayException
         }
         $retryAfter = self::parseRetryAfter($response->getHeaderLine('Retry-After'));
 
-        $class = ($code !== null ? (self::BY_CODE[$code] ?? null) : null) ?? self::classForStatus($status);
+        $class = ($code !== null ? (self::CLASSES_BY_CODE[$code] ?? null) : null) ?? self::classForStatus($status);
 
         return new $class(
             $status,
@@ -105,6 +111,15 @@ class ApiException extends \RuntimeException implements TalksasaPayException
             $fieldErrors,
             $retryAfter,
         );
+    }
+
+    /** A resource id (UUID) quoted in $detail, e.g. the live or failed STK push. */
+    protected function uuidInDetail(): ?string
+    {
+        if ($this->detail !== null && preg_match('/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i', $this->detail, $m) === 1) {
+            return strtolower($m[0]);
+        }
+        return null;
     }
 
     /** Retry-After as whole seconds (delta-seconds or HTTP-date), or null. */

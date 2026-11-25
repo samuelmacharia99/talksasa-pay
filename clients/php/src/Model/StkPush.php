@@ -9,11 +9,12 @@ use Talksasa\Pay\Internal\Data;
 
 /**
  * An M-Pesa payment prompt (STK push) sent to a customer's phone for a
- * payment request's full outstanding balance.
+ * charge's exact amount.
  *
- * A prompt's status is NOT the bill's status. Mark your invoice paid only on
- * payment_request.paid (or a re-read PaymentRequest with status paid), never
- * because a prompt was sent or is in needs_review.
+ * A prompt's status is NOT the charge's status. Mark your invoice paid only
+ * on charge.succeeded (or a re-read Charge with status succeeded), never
+ * because a prompt was sent or is in needs_review. A failed prompt does not
+ * fail the charge: it stays pending and can be prompted again.
  */
 final readonly class StkPush
 {
@@ -23,19 +24,19 @@ final readonly class StkPush
     public const STATUS_SENT = 'sent';
     /** Paid: Safaricom confirmed it with an M-Pesa receipt. */
     public const STATUS_SUCCEEDED = 'succeeded';
-    /** Not paid: see $resultCode / $resultDesc. */
+    /** Not paid: see $resultCode / $resultDesc. The charge stays pending. */
     public const STATUS_FAILED = 'failed';
     /** Safaricom reported success without a receipt; Talksasa staff are confirming it. Not paid yet. */
     public const STATUS_NEEDS_REVIEW = 'needs_review';
 
     public function __construct(
         public string $id,
-        public string $paymentRequestId,
-        /** The M-Pesa transaction this prompt completes (pending until Safaricom answers). */
+        public string $chargeId,
+        /** The M-Pesa transaction that holds (or will hold) this payment. */
         public string $transactionId,
         /** initiating | sent | succeeded | failed | needs_review */
         public string $status,
-        /** Whole KES: the request's outstanding balance when the prompt was sent. */
+        /** Whole KES: always the charge's amount. */
         public int $amount,
         /** Masked, e.g. 2547****5678. */
         public string $phone,
@@ -56,7 +57,7 @@ final readonly class StkPush
     {
         return new self(
             Data::str($a, 'id'),
-            Data::str($a, 'payment_request_id'),
+            Data::str($a, 'charge_id'),
             Data::str($a, 'transaction_id'),
             Data::str($a, 'status'),
             Data::int($a, 'amount'),
@@ -79,6 +80,11 @@ final readonly class StkPush
     public function isFailed(): bool
     {
         return $this->status === self::STATUS_FAILED;
+    }
+
+    public function isSucceeded(): bool
+    {
+        return $this->status === self::STATUS_SUCCEEDED;
     }
 
     /** The customer cancelled the prompt (Safaricom result code 1032). */

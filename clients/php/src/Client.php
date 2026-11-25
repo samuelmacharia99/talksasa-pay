@@ -24,17 +24,17 @@ use Talksasa\Pay\Http\RetryPolicy;
 use Talksasa\Pay\Http\Secret;
 use Talksasa\Pay\Http\Sleeper;
 use Talksasa\Pay\Http\SystemSleeper;
+use Talksasa\Pay\Model\Charge;
 use Talksasa\Pay\Model\Event;
 use Talksasa\Pay\Model\EventPage;
 use Talksasa\Pay\Model\Page;
-use Talksasa\Pay\Model\Payer;
-use Talksasa\Pay\Model\PaymentRequest;
 use Talksasa\Pay\Model\StkPush;
 use Talksasa\Pay\Model\Transaction;
 use Talksasa\Pay\Model\WhoAmI;
 
 /**
- * Talksasa Pay product API (/v1) client.
+ * Talksasa Pay app API (/v1) client: charges, M-Pesa prompts, transactions
+ * and the event feed.
  *
  * HTTP goes through any PSR-18 client. When none is given, Guzzle 7 is used
  * if installed (so the timeouts apply), else php-http/discovery finds one.
@@ -43,7 +43,7 @@ use Talksasa\Pay\Model\WhoAmI;
  */
 class Client
 {
-    public const VERSION = '0.1.0';
+    public const VERSION = '0.2.0';
 
     private readonly Secret $apiKey;
     private readonly string $baseUrl;
@@ -92,121 +92,159 @@ class Client
 
     // ---------------------------------------------------------------- API
 
-    /** The product this key belongs to. Handy as a health/credentials check. */
+    /** The app this key belongs to. Handy as a health/credentials check. */
     public function whoami(): WhoAmI
     {
         return WhoAmI::fromArray($this->request('GET', '/whoami'));
     }
 
     /**
-     * Creates or updates a payer (your customer), keyed by your own id.
-     * This is a full replacement (PUT): send the current email and the full
-     * phone list every time; omitted values are cleared. Creating a payer
-     * assigns its permanent M-Pesa account number.
+     * Creates a pending charge for exactly $amount KES (1 to 250,000). The
+     * result carries $checkoutUrl (a hosted pay page to send the customer
+     * to) and $paybill (manual M-Pesa instructions).
      *
-     * @param list<string> $phones Kenyan mobiles in any common format, first = primary, max 5
-     */
-    public function upsertPayer(string $externalRef, string $displayName, ?string $email = null, array $phones = []): Payer
-    {
-        return Payer::fromArray($this->request('PUT', '/payers/' . self::seg($externalRef), body: [
-            'display_name' => $displayName,
-            'email' => $email,
-            'phones' => array_values($phones),
-        ]));
-    }
-
-    public function getPayer(string $externalRef): Payer
-    {
-        return Payer::fromArray($this->request('GET', '/payers/' . self::seg($externalRef)));
-    }
-
-    /**
-     * Asks a payer to pay $amount KES. Any credit the payer holds is applied
-     * at once, so the result may already be partially_paid or paid.
+     * With $phone, the first M-Pesa prompt is sent right away and returned
+     * as $latestStkPush. The charge is created even if that prompt cannot be
+     * sent ($latestStkPush is then the failed push, or null when M-Pesa is
+     * unavailable): prompt again with stkPush() or let the customer pay at
+     * the paybill.
      *
-     * Pass a stable $idempotencyKey derived from your invoice (e.g.
-     * "invoice-123-v1") so a retry after a crash or timeout returns the same
-     * request. Without one a random key is generated, which only protects
-     * the automatic retries inside this call.
+     * Every call sends an Idempotency-Key and the client's automatic retries
+     * reuse it, so one call creates at most one charge. Without
+     * $idempotencyKey a random key is generated per call; pass a stable one
+     * (e.g. "invoice-42-charge-1") to make a retry after a crash or timeout
+     * return the same charge too.
      *
-     * @throws Exception\DuplicateReferenceException an open request with this reference exists
+     * @param string $reference your own reference (invoice number, order id); unique among your charges
+     * @param string|null $phone Safaricom number to prompt now: 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX or +2547XXXXXXXX
+     * @param string|null $accountNumber your own account number (your prefix, "-", a digit, then A-Z/0-9; max 12); omit to get one generated
+     * @param array<string,mixed>|null $metadata any JSON object up to 4 KB, echoed back on the charge and its events
+     * @param int|null $expiresIn seconds until a pending charge expires (900 to 604800; server default 86400)
+     * @throws Exception\DuplicateReferenceException you already have a charge with this reference
+     * @throws Exception\ValidationException invalid fields ($fieldErrors)
      * @throws Exception\IdempotencyConflictException key reused with a different body
      */
-    public function createPaymentRequest(
-        string $payer,
-        string $reference,
-        string $description,
+    public function createCharge(
         int $amount,
-        ?DateTimeInterface $expiresAt = null,
+        string $reference,
+        ?string $description = null,
+        ?string $phone = null,
+        ?string $accountNumber = null,
+        ?array $metadata = null,
+        ?int $expiresIn = null,
         ?string $idempotencyKey = null,
-    ): PaymentRequest {
-        $body = [
-            'payer' => $payer,
-            'reference' => $reference,
-            'description' => $description,
-            'amount' => $amount,
-        ];
-        if ($expiresAt !== null) {
-            $body['expires_at'] = self::formatDate($expiresAt);
+    ): Charge {
+        $body = ['reference' => $reference, 'amount' => $amount];
+        if ($description !== null) {
+            $body['description'] = $description;
+        }
+        if ($phone !== null) {
+            $body['phone'] = self::phone($phone);
+        }
+        if ($accountNumber !== null) {
+            $body['account_number'] = $accountNumber;
+        }
+        if ($metadata !== null) {
+            if ($metadata !== [] && array_is_list($metadata)) {
+                throw new \InvalidArgumentException('Charge metadata must be a JSON object (string keys), not a list.');
+            }
+            $body['metadata'] = $metadata === [] ? new \stdClass() : $metadata;
+        }
+        if ($expiresIn !== null) {
+            $body['expires_in'] = $expiresIn;
         }
         $key = $this->idempotencyKey($idempotencyKey);
 
-        return PaymentRequest::fromArray($this->request('POST', '/payment-requests', body: $body, headers: [
-            'Idempotency-Key' => $key,
-        ]));
+        return Charge::fromArray($this->request('POST', '/charges', body: $body, headers: ['Idempotency-Key' => $key]));
     }
 
-    public function getPaymentRequest(string $id): PaymentRequest
+    /** One charge, with its latest prompt. */
+    public function getCharge(string $id): Charge
     {
-        return PaymentRequest::fromArray($this->request('GET', '/payment-requests/' . self::seg($id)));
+        return Charge::fromArray($this->request('GET', '/charges/' . self::seg($id)));
     }
 
     /**
-     * Cancels an open request on which nothing has been paid. Idempotent.
+     * One page of charges, newest first.
      *
-     * @throws Exception\NotCancellableException money has been paid on it
+     * @param string|null $status pending|needs_review|succeeded|expired|cancelled|reversed
+     * @param string|null $reference exact reference
+     * @return Page<Charge>
      */
-    public function cancelPaymentRequest(string $id): PaymentRequest
-    {
-        return PaymentRequest::fromArray($this->request('POST', '/payment-requests/' . self::seg($id) . '/cancel'));
+    public function listCharges(
+        ?string $status = null,
+        ?string $reference = null,
+        ?string $cursor = null,
+        ?int $limit = null,
+    ): Page {
+        $res = $this->request('GET', '/charges', query: [
+            'status' => $status, 'reference' => $reference, 'cursor' => $cursor, 'limit' => $limit,
+        ]);
+        return self::page($res, Charge::fromArray(...));
     }
 
     /**
-     * Sends an M-Pesa payment prompt (STK push) to $phone for the request's
-     * full outstanding balance. Returns as soon as Safaricom has the prompt
-     * (status sent) or Talksasa is still sending it (initiating).
+     * Every matching charge, newest first, fetching pages lazily.
      *
-     * The prompt's outcome arrives as events: stk_push.succeeded together
-     * with payment_request.paid, or stk_push.failed ($resultDesc says why,
-     * e.g. cancelled by the customer). Mark the invoice paid ONLY on
-     * payment_request.paid, never on stk_push.sent or stk_push.needs_review.
+     * @return Generator<int,Charge>
+     */
+    public function charges(?string $status = null, ?string $reference = null, ?int $pageSize = null): Generator
+    {
+        $cursor = null;
+        $seen = [];
+        do {
+            $page = $this->listCharges($status, $reference, $cursor, $pageSize);
+            yield from $page->data;
+            $cursor = self::nextCursor($page, $seen);
+        } while ($cursor !== null);
+    }
+
+    /**
+     * Cancels a pending charge (emits charge.cancelled). Idempotent:
+     * cancelling a cancelled charge returns it. A prompt already on the
+     * customer's phone is not withdrawn: if they still pay, the charge
+     * becomes succeeded (late money is never dropped).
+     *
+     * @throws Exception\NotCancellableException the charge is not pending
+     */
+    public function cancelCharge(string $id): Charge
+    {
+        return Charge::fromArray($this->request('POST', '/charges/' . self::seg($id) . '/cancel'));
+    }
+
+    /**
+     * Sends an M-Pesa payment prompt (STK push) to $phone for the charge's
+     * exact amount. Returns as soon as Safaricom has the prompt (status
+     * sent) or Talksasa is still sending it (initiating).
+     *
+     * The outcome arrives as events: stk_push.succeeded together with
+     * charge.succeeded, or stk_push.failed ($resultDesc says why, e.g.
+     * cancelled by the customer; the charge stays pending and can be
+     * prompted again). Mark the invoice paid ONLY on charge.succeeded.
      *
      * Always sends an Idempotency-Key, and every automatic retry (network
-     * error, timeout, 429, 503 overloaded/timeout) re-sends the SAME key, so
-     * the customer never gets two prompts from one call. Pass your own key
+     * error, 429, 503 overloaded/busy/timeout) re-sends the SAME key, so the
+     * customer never gets two prompts from one call. Pass your own key
      * (e.g. "invoice-{$id}-stk-{$attempt}") to make a retry after a crash
      * safe too; reuse a key only for the same phone.
      *
      * @param string $phone Safaricom number: 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX or +2547XXXXXXXX
-     * @throws Exception\StkInProgressException a prompt for this request is already on a phone
-     * @throws Exception\NotPayableException the request is paid, cancelled or expired
-     * @throws Exception\AmountTooLargeException balance above KES 250,000: use the paybill
+     * @throws Exception\StkInProgressException a prompt for this charge is already on a phone
+     * @throws Exception\NotPayableException the charge is not pending
+     * @throws Exception\AmountTooLargeException above the M-Pesa prompt limit: use the paybill
      * @throws Exception\ValidationException not a valid Safaricom number ($fieldErrors)
      * @throws Exception\MpesaUnavailableException M-Pesa is off in this environment
      * @throws Exception\MpesaErrorException Safaricom could not send the prompt (nothing charged)
      * @throws Exception\IdempotencyConflictException key reused with a different phone
      */
-    public function stkPush(string $paymentRequestId, string $phone, ?string $idempotencyKey = null): StkPush
+    public function stkPush(string $chargeId, string $phone, ?string $idempotencyKey = null): StkPush
     {
-        $phone = trim($phone);
-        if ($phone === '' || strlen($phone) > 20) {
-            throw new \InvalidArgumentException('Phone must be 1-20 characters, e.g. 0712345678.');
-        }
+        $phone = self::phone($phone);
         $key = $this->idempotencyKey($idempotencyKey);
 
         return StkPush::fromArray($this->request(
             'POST',
-            '/payment-requests/' . self::seg($paymentRequestId) . '/stk-push',
+            '/charges/' . self::seg($chargeId) . '/stk-push',
             body: ['phone' => $phone],
             headers: ['Idempotency-Key' => $key],
         ));
@@ -219,54 +257,19 @@ class Client
     }
 
     /**
-     * One page of payment requests, newest first.
+     * One page of transactions (money received and reversed), newest first.
      *
-     * @param string|null $status open|partially_paid|paid|cancelled|expired
-     * @param string|null $payer payer external_ref
-     * @return Page<PaymentRequest>
-     */
-    public function listPaymentRequests(
-        ?string $status = null,
-        ?string $reference = null,
-        ?string $payer = null,
-        ?string $cursor = null,
-        ?int $limit = null,
-    ): Page {
-        $res = $this->request('GET', '/payment-requests', query: [
-            'status' => $status, 'reference' => $reference, 'payer' => $payer, 'cursor' => $cursor, 'limit' => $limit,
-        ]);
-        return self::page($res, PaymentRequest::fromArray(...));
-    }
-
-    /**
-     * Every matching payment request, fetching pages lazily.
-     *
-     * @return Generator<int,PaymentRequest>
-     */
-    public function paymentRequests(?string $status = null, ?string $reference = null, ?string $payer = null, ?int $pageSize = null): Generator
-    {
-        $cursor = null;
-        do {
-            $page = $this->listPaymentRequests($status, $reference, $payer, $cursor, $pageSize);
-            yield from $page->data;
-            $cursor = $page->nextCursor;
-        } while ($cursor !== null);
-    }
-
-    /**
-     * One page of transactions, newest first.
-     *
-     * @param string|null $payer payer external_ref
+     * @param string|null $chargeId only the money for this charge
      * @return Page<Transaction>
      */
     public function listTransactions(
-        ?string $payer = null,
+        ?string $chargeId = null,
         ?DateTimeInterface $since = null,
         ?string $cursor = null,
         ?int $limit = null,
     ): Page {
         $res = $this->request('GET', '/transactions', query: [
-            'payer' => $payer,
+            'charge_id' => $chargeId,
             'since' => $since !== null ? self::formatDate($since) : null,
             'cursor' => $cursor,
             'limit' => $limit,
@@ -274,14 +277,19 @@ class Client
         return self::page($res, Transaction::fromArray(...));
     }
 
-    /** @return Generator<int,Transaction> */
-    public function transactions(?string $payer = null, ?DateTimeInterface $since = null, ?int $pageSize = null): Generator
+    /**
+     * Every matching transaction, newest first, fetching pages lazily.
+     *
+     * @return Generator<int,Transaction>
+     */
+    public function transactions(?string $chargeId = null, ?DateTimeInterface $since = null, ?int $pageSize = null): Generator
     {
         $cursor = null;
+        $seen = [];
         do {
-            $page = $this->listTransactions($payer, $since, $cursor, $pageSize);
+            $page = $this->listTransactions($chargeId, $since, $cursor, $pageSize);
             yield from $page->data;
-            $cursor = $page->nextCursor;
+            $cursor = self::nextCursor($page, $seen);
         } while ($cursor !== null);
     }
 
@@ -360,8 +368,9 @@ class Client
         }
         $json = $body !== null ? json_encode($body, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : null;
 
-        // Every /v1 operation is idempotent (see RetryPolicy), POST only
-        // with an Idempotency-Key or on the idempotent cancel endpoint.
+        // Only safe requests are retried (see RetryPolicy): GETs, POSTs that
+        // carry an Idempotency-Key (every retry re-sends the same key), and
+        // cancel, which is idempotent by contract.
         $idempotent = $method !== 'POST' || isset($headers['Idempotency-Key']) || str_ends_with($path, '/cancel');
 
         $retry = 0;
@@ -412,6 +421,35 @@ class Client
             }
             throw ApiException::fromResponse($response);
         }
+    }
+
+    /**
+     * The next page's cursor, or null at the end. A server that repeats a
+     * cursor must not make a generator loop forever.
+     *
+     * @param Page<mixed> $page
+     * @param array<string,true> $seen
+     */
+    private static function nextCursor(Page $page, array &$seen): ?string
+    {
+        $cursor = $page->nextCursor;
+        if ($cursor === null || $cursor === '' || $page->data === []) {
+            return null;
+        }
+        if (isset($seen[$cursor])) {
+            throw new UnexpectedResponseException('The server repeated a page cursor.');
+        }
+        $seen[$cursor] = true;
+        return $cursor;
+    }
+
+    private static function phone(string $phone): string
+    {
+        $phone = trim($phone);
+        if ($phone === '' || strlen($phone) > 20) {
+            throw new \InvalidArgumentException('Phone must be 1-20 characters, e.g. 0712345678.');
+        }
+        return $phone;
     }
 
     private function idempotencyKey(?string $given): string

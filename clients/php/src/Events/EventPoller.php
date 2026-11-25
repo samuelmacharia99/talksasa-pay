@@ -18,7 +18,7 @@ use Talksasa\Pay\Model\Event;
  * read again next run. Handlers must therefore be idempotent (de-duplicate
  * by $event->id, or apply state changes that are safe to repeat).
  *
- * Do not run two pollers for the same product at once (use a lock, e.g.
+ * Do not run two pollers for the same app at once (use a lock, e.g.
  * Laravel's withoutOverlapping()).
  */
 final class EventPoller
