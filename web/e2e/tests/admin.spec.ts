@@ -112,7 +112,7 @@ test("signs in, browses every section, manages a key, signs out", async ({ page,
     await page.screenshot({ path: `${SHOTS}/08-transaction.png`, fullPage: true });
   }
 
-  await page.getByRole("link", { name: "Unmatched payments" }).click();
+  await page.getByRole("group", { name: "Money" }).getByRole("link", { name: "Unmatched payments" }).click();
   await expect(page.getByRole("heading", { name: "Unmatched payments" })).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/09-unmatched.png`, fullPage: true });
 

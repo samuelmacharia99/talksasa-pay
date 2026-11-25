@@ -75,6 +75,18 @@ done
 [[ "$status" == succeeded ]] || { echo "the prompt-paid charge did not succeed (status $status)"; exit 1; }
 stk_token=$(charge stk 120 | json 'd["checkout_url"]' | token_of)
 stk_cancel_token=$(charge stk-cancel 120 | json 'd["checkout_url"]' | token_of)
+# A fresh unmatched paybill payment (no app has prefix XQZ) for the admin
+# "assign to app" test, so every run has one to assign.
+FAKE=http://127.0.0.1:8090
+unmatched_receipt=$(curl -fsS -X POST "$FAKE/fake/c2b" -d '{"bill_ref":"XQZ-90001","amount":75,"phone":"254712345678"}' |
+  python3 -c "import sys,json; print(json.load(sys.stdin)['receipt'])")
+n=0
+for _ in $(seq 1 60); do
+  n=$(sql "SELECT count(*) FROM transactions WHERE provider_transaction_id = '$unmatched_receipt' AND app_id IS NULL")
+  [[ "$n" == 1 ]] && break
+  sleep 0.5
+done
+[[ "$n" == 1 ]] || { echo "the unmatched paybill payment was not recorded"; exit 1; }
 expired_token=$(sql "SELECT hosted_token FROM charges WHERE status = 'expired' ORDER BY created_at LIMIT 1")
 unset api_key
 for t in pending_token paid_token stk_token stk_cancel_token; do
@@ -88,7 +100,7 @@ docker run --rm --network host --ipc host -u "$(id -u):$(id -g)" -e HOME=/tmp \
   -e E2E_PENDING_TOKEN="$pending_token" -e E2E_SUCCEEDED_TOKEN="$paid_token" -e E2E_EXPIRED_TOKEN="$expired_token" \
   -e E2E_OPEN_TOKEN="$pending_token" -e E2E_PAID_TOKEN="$paid_token" \
   -e E2E_STK_TOKEN="$stk_token" -e E2E_STK_CANCEL_TOKEN="$stk_cancel_token" \
-  -e E2E_SETTINGS_SETUP_URL="$settings_setup_url" -e E2E_SETTINGS_EMAIL="$settings_email" \
+  -e E2E_MONEY_ACTIONS=1 -e E2E_SETTINGS_SETUP_URL="$settings_setup_url" -e E2E_SETTINGS_EMAIL="$settings_email" \
   -e E2E_MPESA_CONSUMER_KEY="$(cat deploy/dev-secrets/mpesa_consumer_key)" \
   -e E2E_MPESA_CONSUMER_SECRET="$(cat deploy/dev-secrets/mpesa_consumer_secret)" \
   -e E2E_MPESA_PASSKEY="$(cat deploy/dev-secrets/mpesa_passkey)" \

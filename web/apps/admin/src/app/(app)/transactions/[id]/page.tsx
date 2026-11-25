@@ -18,8 +18,15 @@ export const metadata: Metadata = { title: "Transaction" };
 
 const link = "text-violet hover:underline";
 
-export default async function TransactionPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function TransactionPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ assigned?: string }>;
+}) {
   const { id } = await params;
+  const { assigned } = await searchParams;
   const [t, me] = await Promise.all([load((c) => c.GET("/transactions/{id}", { params: { path: { id } } })), getMe()]);
   const out = t.direction === "out";
   const can = (p: (typeof me.permissions)[number]) => me.permissions.includes(p);
@@ -98,6 +105,14 @@ export default async function TransactionPage({ params }: { params: Promise<{ id
         }
         actions={<Status value={t.status} className="text-sm" />}
       />
+      {assigned && t.app_id ? (
+        <p role="status" className="mb-4 text-sm text-ok">
+          Assigned to {t.app_name ?? t.account_prefix}. The app has been told.
+          {t.app_status && t.app_status !== "active" ? (
+            <span className="block text-warn">That app is suspended: tell its team the money arrived.</span>
+          ) : null}
+        </p>
+      ) : null}
       <div className="grid gap-6">
         {canResolve ? (
           <Panel title="Resolve this payment">

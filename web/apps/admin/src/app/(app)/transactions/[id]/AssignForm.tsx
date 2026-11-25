@@ -67,6 +67,7 @@ export function AssignForm({
 
   return (
     <form action={submit} className={cx("grid gap-3 text-left", compact ? "w-72" : "max-w-xl")}>
+      {compact ? <input type="hidden" name="from" value="list" /> : null}
       {server && !server.fieldErrors?.length ? <FormError message={server.error} /> : null}
       <div className="grid gap-1.5">
         <label htmlFor={`${uid}-app`} className="text-[0.8125rem] font-medium text-ink-2">

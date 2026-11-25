@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 
 import { act, type ActionResult } from "@/lib/api";
 import { normalizeReceipt, type ResolveAction, validateAssign, validateResolve, validateReverse } from "@/lib/mpesa";
@@ -92,5 +93,8 @@ export async function assignTransaction(id: string, _: AssignResult, fd: FormDat
   revalidateMoney(id, r.data.charge_id);
   // The spec says the response names a suspended app in `app_status`; read it if present.
   const appStatus = (r.data as { app_status?: string }).app_status ?? null;
+  // From the unmatched list the row disappears once the list refreshes, taking
+  // its confirmation with it: show the confirmation on the payment's page.
+  if (str(fd, "from") === "list") redirect(`/transactions/${id}?assigned=1`);
   return { ok: true, data: { appName: r.data.app_name, appStatus } };
 }
