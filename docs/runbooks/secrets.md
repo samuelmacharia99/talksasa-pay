@@ -15,8 +15,8 @@
 |---|---|---|---|
 | App DB URL (role `talksasa_app`, no DELETE) | `TSP_DATABASE_URL_FILE` | api, worker, admin | change role password, redeploy |
 | Migration DB URL (role `talksasa_owner`) | `TSP_MIGRATE_DATABASE_URL_FILE` | migrate only | as above |
-| Master keyring (AES-256-GCM, versioned) | `TSP_MASTER_KEYS_FILE` | encrypting product webhook secrets (later: other DB-stored secrets) | add a new version line, deploy, re-encrypt, remove old line |
-| API key pepper | `TSP_API_KEY_PEPPER_FILE` | hashing product API keys | rotating invalidates all keys: plan a key re-issue |
+| Master keyring (AES-256-GCM, versioned) | `TSP_MASTER_KEYS_FILE` | encrypting app webhook secrets (later: other DB-stored secrets) | add a new version line, deploy, re-encrypt, remove old line |
+| API key pepper | `TSP_API_KEY_PEPPER_FILE` | hashing app API keys | rotating invalidates all keys: plan a key re-issue |
 | Daraja consumer key (bundle key `mpesa_consumer_key`) | `TSP_MPESA_CONSUMER_KEY_FILE` | api, worker (OAuth for STK push/query, C2B URL registration) | regenerate on the Daraja portal app, update the bundle, redeploy |
 | Daraja consumer secret (`mpesa_consumer_secret`) | `TSP_MPESA_CONSUMER_SECRET_FILE` | api, worker | as above (rotate together with the key) |
 | Lipa na M-Pesa Online passkey (`mpesa_passkey`) | `TSP_MPESA_PASSKEY_FILE` | api, worker (STK password) | issued by Safaricom for the shortcode; request a new one, update the bundle, redeploy |
@@ -51,8 +51,8 @@ head -c 48 /dev/urandom | base64                 # API key pepper (>= 32 chars)
 1. `talksasa-pay keygen --version N+1` and append the line to the keyring.
    Keep the old line.
 2. Deploy. New encryptions use version N+1; old rows still decrypt.
-3. Re-encrypt old rows (rotate each product's webhook secret with
-   `admin product rotate-webhook-secret`, or the bulk re-encrypt command due
+3. Re-encrypt old rows (rotate each app's webhook secret with
+   `admin app rotate-webhook-secret`, or the bulk re-encrypt command due
    in Phase 7).
 4. When no row uses version N, remove its line and deploy.
 

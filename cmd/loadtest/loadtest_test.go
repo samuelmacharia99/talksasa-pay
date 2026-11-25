@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/talksasa/talksasa-pay/internal/testutil/testdb"
 	"github.com/talksasa/talksasa-pay/pkg/talksasapay"
 )
 
@@ -85,7 +86,7 @@ func TestParseMix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(m.Ops(), ",") != "upsert,create,get,list,events" || m.Weight("create") != 30 || m.Weight("upsert") != 20 || m.Weight("cancel") != 0 {
+	if strings.Join(m.Ops(), ",") != "create,get,list,events" || m.Weight("create") != 40 || m.Weight("get") != 30 || m.Weight("cancel") != 0 {
 		t.Fatalf("%+v", m)
 	}
 	m, err = ParseMix(" get = 3 , cancel=0,whoami=1,")
@@ -130,17 +131,23 @@ func TestTokenBucket(t *testing.T) {
 	}
 }
 
-// fakeAPI is an in-memory /v1 good enough for the generator.
+// fakeAPI is an in-memory /v1 (charges) plus the fake Daraja's /fake/c2b,
+// good enough for the generator and the invariant checks. Prompts resolve
+// at once by the phone's last digit: 1 fails, 3 stays waiting, others pay.
 type fakeAPI struct {
 	t        *testing.T
 	key      string
 	secret   []byte
 	fail     map[string]bool // "METHOD /pattern" -> respond 500
 	slow     time.Duration
+	corrupt  bool // record payments for the wrong amount (invariants must catch it)
 	mu       sync.Mutex
-	payers   map[string]bool
-	prs      map[string]map[string]any
+	charges  map[string]map[string]any
+	order    []string
+	txns     map[string]map[string]any
+	txnOrder []string
 	events   []map[string]any
+	c2b      struct{ matched, received, unmatched int }
 	hookURL  string
 	dupEvery int // deliver every n-th event twice (0 = never)
 	wg       sync.WaitGroup
@@ -149,7 +156,7 @@ type fakeAPI struct {
 
 func newFakeAPI(t *testing.T) *fakeAPI {
 	f := &fakeAPI{t: t, key: "tsp_test_k1_supersecretvalue", secret: []byte("whsec_fake"), fail: map[string]bool{},
-		payers: map[string]bool{}, prs: map[string]map[string]any{}}
+		charges: map[string]map[string]any{}, txns: map[string]map[string]any{}}
 	mux := http.NewServeMux()
 	route := func(pattern string, h http.HandlerFunc) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
@@ -168,94 +175,100 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		})
 	}
 	route("GET /v1/whoami", func(w http.ResponseWriter, _ *http.Request) {
-		f.json(w, 200, map[string]any{"product_id": "p", "product_name": "Fake", "account_prefix": "FAKE", "key_id": "k1"})
+		f.json(w, 200, map[string]any{"app_id": "a", "app_name": "Fake", "account_prefix": "FAKE", "key_id": "k1"})
 	})
-	route("PUT /v1/payers/{ref}", func(w http.ResponseWriter, r *http.Request) {
-		var in map[string]any
-		if json.NewDecoder(r.Body).Decode(&in) != nil || in["display_name"] == "" {
-			f.problem(w, 422, "validation_failed")
-			return
-		}
-		f.mu.Lock()
-		existed := f.payers[r.PathValue("ref")]
-		f.payers[r.PathValue("ref")] = true
-		f.mu.Unlock()
-		status := 200
-		if !existed {
-			status = 201
-		}
-		f.json(w, status, f.payer(r.PathValue("ref")))
-	})
-	route("GET /v1/payers/{ref}", func(w http.ResponseWriter, r *http.Request) {
-		f.mu.Lock()
-		ok := f.payers[r.PathValue("ref")]
-		f.mu.Unlock()
-		if !ok {
-			f.problem(w, 404, "not_found")
-			return
-		}
-		f.json(w, 200, f.payer(r.PathValue("ref")))
-	})
-	route("POST /v1/payment-requests", func(w http.ResponseWriter, r *http.Request) {
+	route("POST /v1/charges", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Idempotency-Key") == "" {
 			f.problem(w, 400, "idempotency_key_required")
 			return
 		}
 		var in struct {
-			Payer, Reference, Description string
+			Reference, Description, Phone string
 			Amount                        int64
 		}
-		if json.NewDecoder(r.Body).Decode(&in) != nil || in.Amount < 1 {
+		if json.NewDecoder(r.Body).Decode(&in) != nil || in.Amount < 1 || in.Amount > 250000 || in.Reference == "" {
 			f.problem(w, 422, "validation_failed")
 			return
 		}
-		f.mu.Lock()
-		if !f.payers[in.Payer] {
-			f.mu.Unlock()
-			f.problem(w, 422, "validation_failed")
-			return
-		}
-		id := fmt.Sprintf("pr-%d", len(f.prs))
-		pr := map[string]any{"object": "payment_request", "id": id, "reference": in.Reference, "amount": in.Amount,
-			"amount_paid": 0, "outstanding": in.Amount, "status": "open", "currency": "KES",
-			"payer":      map[string]any{"external_ref": in.Payer, "account_number": "FAKE-1"},
-			"created_at": time.Now().UTC(), "updated_at": time.Now().UTC()}
-		f.prs[id] = pr
-		f.emitLocked("payment_request.created", pr)
-		f.mu.Unlock()
-		f.json(w, 201, pr)
-	})
-	route("GET /v1/payment-requests", func(w http.ResponseWriter, _ *http.Request) {
-		f.json(w, 200, map[string]any{"data": []any{}, "next_cursor": nil})
-	})
-	route("GET /v1/payment-requests/{id}", func(w http.ResponseWriter, r *http.Request) {
-		f.mu.Lock()
-		pr, ok := f.prs[r.PathValue("id")]
-		f.mu.Unlock()
-		if !ok {
-			f.problem(w, 404, "not_found")
-			return
-		}
-		f.json(w, 200, pr)
-	})
-	route("POST /v1/payment-requests/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		pr, ok := f.prs[r.PathValue("id")]
+		id := fmt.Sprintf("ch-%d", len(f.charges))
+		ch := map[string]any{"object": "charge", "id": id, "reference": in.Reference, "amount": in.Amount, "currency": "KES",
+			"account_number": fmt.Sprintf("FAKE-1%06d", len(f.charges)), "status": "pending", "transaction_id": nil,
+			"latest_stk_push": nil, "metadata": nil}
+		f.charges[id] = ch
+		f.order = append(f.order, id)
+		if in.Phone != "" {
+			push := map[string]any{"object": "stk_push", "id": "p-" + id, "charge_id": id, "status": "sent", "result_code": nil}
+			f.emitLocked("stk_push.sent", push)
+			switch in.Phone[len(in.Phone)-1] {
+			case '1':
+				push = maps.Clone(push)
+				push["status"], push["result_code"] = "failed", "1032"
+				f.emitLocked("stk_push.failed", push)
+			case '3':
+			default:
+				push = maps.Clone(push)
+				push["status"] = "succeeded"
+				f.payLocked(id, in.Amount, "mpesa_stk")
+				f.emitLocked("stk_push.succeeded", push)
+			}
+			ch = maps.Clone(f.charges[id])
+			ch["latest_stk_push"] = push
+			f.charges[id] = ch
+		}
+		f.json(w, 201, ch)
+	})
+	route("GET /v1/charges", func(w http.ResponseWriter, _ *http.Request) {
+		f.json(w, 200, map[string]any{"data": []any{}, "next_cursor": nil})
+	})
+	route("GET /v1/charges/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		ch, ok := f.charges[r.PathValue("id")]
+		f.mu.Unlock()
 		if !ok {
 			f.problem(w, 404, "not_found")
 			return
 		}
-		if pr["status"] != "cancelled" {
-			pr = maps.Clone(pr) // copy on write: other handlers encode the old map unlocked
-			pr["status"] = "cancelled"
-			f.prs[r.PathValue("id")] = pr
-			f.emitLocked("payment_request.cancelled", pr)
+		f.json(w, 200, ch)
+	})
+	route("POST /v1/charges/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		ch, ok := f.charges[r.PathValue("id")]
+		switch {
+		case !ok:
+			f.problem(w, 404, "not_found")
+			return
+		case ch["status"] == "pending":
+			ch = maps.Clone(ch) // copy on write: other handlers encode the old map unlocked
+			ch["status"] = "cancelled"
+			f.charges[r.PathValue("id")] = ch
+			f.emitLocked("charge.cancelled", ch)
+		case ch["status"] != "cancelled":
+			f.problem(w, 409, "not_cancellable")
+			return
 		}
-		f.json(w, 200, pr)
+		f.json(w, 200, ch)
 	})
 	route("GET /v1/transactions", func(w http.ResponseWriter, _ *http.Request) {
-		f.json(w, 200, map[string]any{"data": []any{}, "next_cursor": nil})
+		f.mu.Lock()
+		data := make([]any, 0, len(f.txnOrder))
+		for _, id := range f.txnOrder {
+			data = append(data, f.txns[id])
+		}
+		f.mu.Unlock()
+		f.json(w, 200, map[string]any{"data": data, "next_cursor": nil})
+	})
+	route("GET /v1/transactions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		t, ok := f.txns[r.PathValue("id")]
+		f.mu.Unlock()
+		if !ok {
+			f.problem(w, 404, "not_found")
+			return
+		}
+		f.json(w, 200, t)
 	})
 	route("GET /v1/events", func(w http.ResponseWriter, r *http.Request) {
 		start := 0
@@ -277,20 +290,71 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		}
 		f.json(w, 200, map[string]any{"data": data, "next_cursor": next, "has_more": more})
 	})
+	// The fake Daraja's paybill helper (no API key).
+	mux.HandleFunc("POST /fake/c2b", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			BillRef string `json:"bill_ref"`
+			Amount  int64  `json:"amount"`
+		}
+		if json.NewDecoder(r.Body).Decode(&in) != nil {
+			w.WriteHeader(400)
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !strings.HasPrefix(in.BillRef, "FAKE-") {
+			f.c2b.unmatched++ // unknown prefix: held for staff, no event
+			f.json(w, 200, map[string]any{"receipt": "R"})
+			return
+		}
+		for _, id := range f.order {
+			ch := f.charges[id]
+			if ch["status"] == "pending" && ch["account_number"] == in.BillRef && ch["amount"] == in.Amount {
+				f.c2b.matched++
+				f.payLocked(id, in.Amount, "mpesa_c2b")
+				f.json(w, 200, map[string]any{"receipt": "R"})
+				return
+			}
+		}
+		f.c2b.received++
+		t := f.txnLocked(in.Amount, "mpesa_c2b", nil)
+		t["account_number"] = in.BillRef
+		ev := maps.Clone(t)
+		ev["duplicate_of_charge"] = nil
+		f.emitLocked("payment.received", ev)
+		f.json(w, 200, map[string]any{"receipt": "R"})
+	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(func() { f.wg.Wait(); f.srv.Close() })
 	return f
 }
 
-func (f *fakeAPI) payer(ref string) map[string]any {
-	return map[string]any{"object": "payer", "id": "id-" + ref, "external_ref": ref, "account_number": "FAKE-1",
-		"display_name": "x", "email": nil, "phones": []string{}, "status": "active", "credit_balance": 0,
-		"created_at": time.Now().UTC(), "updated_at": time.Now().UTC()}
+// txnLocked records a succeeded payment with a fresh receipt.
+func (f *fakeAPI) txnLocked(amount int64, channel string, chargeID any) map[string]any {
+	id := fmt.Sprintf("tx-%d", len(f.txns))
+	t := map[string]any{"object": "transaction", "id": id, "kind": "payment", "direction": "in", "channel": channel,
+		"status": "succeeded", "amount": amount, "currency": "KES", "receipt": fmt.Sprintf("SK%08d", len(f.txns)),
+		"charge_id": chargeID, "account_number": nil}
+	f.txns[id] = t
+	f.txnOrder = append(f.txnOrder, id)
+	return t
+}
+
+// payLocked succeeds a charge with a new payment.
+func (f *fakeAPI) payLocked(chargeID string, amount int64, channel string) {
+	if f.corrupt {
+		amount++
+	}
+	t := f.txnLocked(amount, channel, chargeID)
+	ch := maps.Clone(f.charges[chargeID])
+	ch["status"], ch["transaction_id"] = "succeeded", t["id"]
+	f.charges[chargeID] = ch
+	f.emitLocked("charge.succeeded", ch)
 }
 
 func (f *fakeAPI) emitLocked(typ string, data map[string]any) {
 	ev := map[string]any{"object": "event", "id": fmt.Sprintf("ev-%d", len(f.events)), "type": typ,
-		"api_version": "2026-11-24", "created_at": time.Now().UTC(), "data": data}
+		"api_version": "2026-11-25", "created_at": time.Now().UTC(), "data": data}
 	body, _ := json.Marshal(ev)
 	f.events = append(f.events, ev)
 	if f.hookURL == "" {
@@ -340,7 +404,7 @@ func runLoad(t *testing.T, f *fakeAPI, extra ...string) (int, string, string) {
 	t.Helper()
 	var out, errOut syncBuffer
 	args := append([]string{"-base-url", f.srv.URL, "-key-file", writeFile(t, f.key+"\n"),
-		"-duration", "400ms", "-concurrency", "4", "-payers", "5", "-max-p99", "5s"}, extra...)
+		"-duration", "400ms", "-concurrency", "4", "-max-p99", "5s", "-settle", "2s"}, extra...)
 	code := run(context.Background(), args, &out, &errOut)
 	if strings.Contains(out.String()+errOut.String(), "supersecretvalue") {
 		t.Fatal("API key printed")
@@ -374,20 +438,20 @@ func (b *syncBuffer) String() string {
 
 func TestRunSmoke(t *testing.T) {
 	f := newFakeAPI(t)
-	code, out, errOut := runLoad(t, f, "-mix", "upsert=2,create=3,get=3,list=1,events=1,cancel=1,txns=1,whoami=1", "-rps", "400")
+	code, out, errOut := runLoad(t, f, "-mix", "create=3,get=3,list=1,events=1,cancel=1,txns=1,whoami=1", "-rps", "400")
 	if code != 0 {
 		t.Fatalf("code %d\n%s\n%s", code, out, errOut)
 	}
-	for _, op := range []string{"upsert", "create", "get", "list", "events", "cancel", "txns", "whoami", "all", "OK"} {
+	for _, op := range []string{"create", "get", "list", "events", "cancel", "txns", "whoami", "all", "ok   charge_payment", "ok   money_event", "OK"} {
 		if !strings.Contains(out, op) {
 			t.Errorf("report lacks %q:\n%s", op, out)
 		}
 	}
 	f.mu.Lock()
-	nPR := len(f.prs)
+	n := len(f.charges)
 	f.mu.Unlock()
-	if nPR == 0 {
-		t.Fatal("no payment requests created")
+	if n == 0 {
+		t.Fatal("no charges created")
 	}
 	// -rps 400 for 0.4 s allows roughly 160 requests (+burst); be generous.
 	var total int
@@ -402,16 +466,44 @@ func TestRunSmoke(t *testing.T) {
 	}
 }
 
+func TestRunMpesaMix(t *testing.T) {
+	f := newFakeAPI(t)
+	code, out, errOut := runLoad(t, f, "-mix", "create=2,stk=3,c2b=3,get=1", "-fake-daraja", f.srv.URL, "-concurrency", "2")
+	if code != 0 {
+		t.Fatalf("code %d\n%s\n%s", code, out, errOut)
+	}
+	f.mu.Lock()
+	c2b := f.c2b
+	f.mu.Unlock()
+	if c2b.matched == 0 || c2b.received == 0 || c2b.unmatched == 0 {
+		t.Fatalf("paybill mix not exercised: %+v\n%s", c2b, out)
+	}
+	for _, s := range []string{"prompts sent", "aimed at a live charge", "ok   charge_outcome", "ok   receipt_once", "ok   money_event"} {
+		if !strings.Contains(out, s) {
+			t.Errorf("report lacks %q:\n%s", s, out)
+		}
+	}
+}
+
+func TestRunCatchesInvariantViolation(t *testing.T) {
+	f := newFakeAPI(t)
+	f.corrupt = true // payments recorded for amount+1
+	code, out, _ := runLoad(t, f, "-mix", "stk=1", "-concurrency", "1", "-duration", "100ms")
+	if code != 1 || !strings.Contains(out, "FAIL charge_payment") || !strings.Contains(out, "invariant violations") {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+}
+
 func TestRunFailsOn5xx(t *testing.T) {
 	f := newFakeAPI(t)
-	f.fail["GET /v1/payment-requests"] = true
+	f.fail["GET /v1/charges"] = true
 	code, out, _ := runLoad(t, f, "-mix", "list=1,get=1")
 	if code != 1 || !strings.Contains(out, "returned 5xx") || !strings.Contains(out, "500 internal_error") {
 		t.Fatalf("code %d\n%s", code, out)
 	}
 	// Retried 5xx still count.
 	f2 := newFakeAPI(t)
-	f2.fail["GET /v1/payment-requests"] = true
+	f2.fail["GET /v1/charges"] = true
 	code, out, _ = runLoad(t, f2, "-mix", "list=1", "-retries", "1", "-concurrency", "1", "-duration", "50ms")
 	if code != 1 || !strings.Contains(out, "returned 5xx") {
 		t.Fatalf("code %d\n%s", code, out)
@@ -434,6 +526,7 @@ func TestRunFlagErrors(t *testing.T) {
 		{"-key-file", key},
 		{"-base-url", f.srv.URL},
 		{"-base-url", f.srv.URL, "-key-file", key, "-mix", "bogus=1"},
+		{"-base-url", f.srv.URL, "-key-file", key, "-mix", "upsert=1"}, // an op from the old billing model
 		{"-base-url", f.srv.URL, "-key-file", key, "-duration", "0s"},
 		{"-base-url", f.srv.URL, "-key-file", key, "-webhook-listen", "127.0.0.1:0"},
 		{"-base-url", f.srv.URL, "-key-file", key, "-concurrency", "0"},
@@ -442,6 +535,9 @@ func TestRunFlagErrors(t *testing.T) {
 		{"-base-url", f.srv.URL, "-key-file", filepath.Join(t.TempDir(), "missing")},
 		{"-base-url", f.srv.URL, "-key-file", key, "extra"},
 		{"-base-url", f.srv.URL, "-key-file", key, "-mix", "stk=1,c2b=1"}, // c2b without -fake-daraja
+		{"-base-url", f.srv.URL, "-key-file", key, "-unknown-prefix", "bad1"},
+		{"-base-url", f.srv.URL, "-key-file", key, "-unknown-prefix", "FAKE"}, // the app's own prefix
+		{"-base-url", f.srv.URL, "-key-file", key, "-db-url-file", filepath.Join(t.TempDir(), "missing")},
 	} {
 		var out, errOut syncBuffer
 		if code := run(context.Background(), args, &out, &errOut); code != 2 {
@@ -462,7 +558,7 @@ func TestWebhookReceiverReconcile(t *testing.T) {
 	srv := httptest.NewServer(rc.handler(secret))
 	defer srv.Close()
 	send := func(id string, key []byte) int {
-		body := fmt.Appendf(nil, `{"object":"event","id":%q,"type":"payment_request.paid","api_version":"x","created_at":"2026-11-24T10:00:00Z","data":{}}`, id)
+		body := fmt.Appendf(nil, `{"object":"event","id":%q,"type":"charge.succeeded","api_version":"x","created_at":"2026-11-25T10:00:00Z","data":{}}`, id)
 		req, _ := http.NewRequest("POST", srv.URL, bytes.NewReader(body))
 		req.Header.Set(talksasapay.HeaderSignature, talksasapay.SignWebhook(time.Now(), body, key))
 		resp, err := http.DefaultClient.Do(req)
@@ -492,7 +588,7 @@ func TestWebhookReceiverReconcile(t *testing.T) {
 	if res != want {
 		t.Fatalf("got %+v want %+v\n%s", res, want, out.String())
 	}
-	for _, s := range []string{"missing ev-3", "ev-1 payment_request.paid x2", "rejected signature_mismatch: 1"} {
+	for _, s := range []string{"missing ev-3", "ev-1 charge.succeeded x2", "rejected signature_mismatch: 1"} {
 		if !strings.Contains(out.String(), s) {
 			t.Errorf("report lacks %q:\n%s", s, out.String())
 		}
@@ -500,33 +596,39 @@ func TestWebhookReceiverReconcile(t *testing.T) {
 }
 
 func TestRunWithWebhookListener(t *testing.T) {
-	f := newFakeAPI(t)
-	f.dupEvery = 5
-	var out, errOut syncBuffer
-	out.onLine = func(l string) {
-		if addr, ok := strings.CutPrefix(l, "webhook receiver on "); ok {
-			f.mu.Lock()
-			f.hookURL = "http://" + strings.TrimSpace(addr) + "/"
-			f.mu.Unlock()
+	for _, dup := range []int{0, 5} {
+		f := newFakeAPI(t)
+		f.dupEvery = dup
+		var out, errOut syncBuffer
+		out.onLine = func(l string) {
+			if addr, ok := strings.CutPrefix(l, "webhook receiver on "); ok {
+				f.mu.Lock()
+				f.hookURL = "http://" + strings.TrimSpace(addr) + "/"
+				f.mu.Unlock()
+			}
 		}
-	}
-	args := []string{"-base-url", f.srv.URL, "-key-file", writeFile(t, f.key), "-duration", "300ms", "-concurrency", "3",
-		"-payers", "3", "-mix", "create=3,cancel=1", "-webhook-listen", "127.0.0.1:0",
-		"-webhook-secret-file", writeFile(t, string(f.secret)), "-webhook-grace", "5s"}
-	code := run(context.Background(), args, &out, &errOut)
-	s := out.String()
-	if code != 0 || !strings.Contains(s, "webhooks: feed events") || !strings.Contains(s, "missing 0") {
-		t.Fatalf("code %d\n%s\n%s", code, s, errOut.String())
-	}
-	if !strings.Contains(s, "x2") {
-		t.Fatalf("duplicates not reported:\n%s", s)
-	}
-	if strings.Contains(s, "whsec_fake") {
-		t.Fatal("webhook secret printed")
+		args := []string{"-base-url", f.srv.URL, "-key-file", writeFile(t, f.key), "-duration", "300ms", "-concurrency", "3",
+			"-mix", "stk=3,cancel=1", "-webhook-listen", "127.0.0.1:0", "-settle", "2s",
+			"-webhook-secret-file", writeFile(t, string(f.secret)), "-webhook-grace", "5s"}
+		code := run(context.Background(), args, &out, &errOut)
+		s := out.String()
+		if strings.Contains(s, "whsec_fake") {
+			t.Fatal("webhook secret printed")
+		}
+		if !strings.Contains(s, "webhooks: feed events") || !strings.Contains(s, "missing 0") {
+			t.Fatalf("dup %d: code %d\n%s\n%s", dup, code, s, errOut.String())
+		}
+		if dup == 0 && code != 0 {
+			t.Fatalf("code %d\n%s\n%s", code, s, errOut.String())
+		}
+		// An event delivered twice fails the run (plan: no event delivered twice).
+		if dup > 0 && (code != 1 || !strings.Contains(s, "x2") || !strings.Contains(s, "duplicate webhook deliveries")) {
+			t.Fatalf("duplicates not failed:\n%s", s)
+		}
 	}
 }
 
-func TestSTKPhoneEndings(t *testing.T) {
+func TestSTKPhoneEndingsAndLivePool(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
 	for _, d := range stkEndings {
 		p := stkPhone(r, d)
@@ -534,12 +636,34 @@ func TestSTKPhoneEndings(t *testing.T) {
 			t.Fatalf("stkPhone(%d) = %q", d, p)
 		}
 	}
-	var pp promptPool
-	pp.add(waitingPrompt{payer: 1, amount: 5})
-	if w, ok := pp.take(r); !ok || w.amount != 5 {
-		t.Fatal("prompt pool")
+	var lp livePool
+	lp.add(liveCharge{id: "a", amount: 5})
+	lp.add(liveCharge{id: "b", amount: 6})
+	lp.remove("b")
+	if c, ok := lp.take(r); !ok || c.amount != 5 {
+		t.Fatal("live pool")
 	}
-	if _, ok := pp.take(r); ok {
-		t.Fatal("prompt taken twice")
+	if _, ok := lp.take(r); ok {
+		t.Fatal("charge taken twice")
+	}
+}
+
+func TestInvariantsSQLRunsCleanOnEmptyDatabase(t *testing.T) {
+	db := testdb.New(t)
+	v, err := queryInvariants(context.Background(), db.App)
+	if err != nil {
+		t.Fatalf("invariants.sql: %v", err)
+	}
+	if v.total() != 0 {
+		var b bytes.Buffer
+		v.report(&b)
+		t.Fatalf("violations on an empty database:\n%s", b.String())
+	}
+}
+
+func TestStripPassword(t *testing.T) {
+	err := stripPassword(fmt.Errorf("dial postgres://u:s3cret@h/db failed"), "postgres://u:s3cret@h/db")
+	if strings.Contains(err.Error(), "s3cret") {
+		t.Fatal(err)
 	}
 }

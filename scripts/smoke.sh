@@ -2,9 +2,11 @@
 # End-to-end smoke test against the local Docker stack (make smoke).
 #
 # Builds and starts postgres + migrate + api + worker, then checks health, API-key
-# auth, revocation, metrics isolation, container hardening, audit chain and
-# ledger balances, and that the issued API key never appears in any log.
-# It creates a throwaway product with a random prefix; it never deletes data.
+# auth, revocation, metrics isolation, container hardening, the audit chain
+# and the money invariants (cmd/loadtest/invariants.sql: each receipt once,
+# every succeeded charge paid by a matching receipted transaction, ...), and
+# that the issued API key never appears in any log.
+# It creates a throwaway app with a random prefix; it never deletes data.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -63,23 +65,23 @@ check "pay page: unknown link is 404" "$(status "http://127.0.0.1:3000/$(printf 
 check "pay API: malformed token is 404" "$(status $API/public/v1/pay/not-a-token)" 404
 check "pay API: never indexed" "$(curl -s -D - -o /dev/null $API/public/v1/pay/not-a-token | grep -ci '^x-robots-tag: noindex' || true)" 1
 
-echo "== product and API key"
+echo "== app and API key"
 letters=ABCDEFGHIJKLMNOPQRSTUVWXYZ prefix=""
 for _ in 1 2 3 4 5; do prefix+=${letters:RANDOM%26:1}; done
-admin product create --name "Smoke $prefix" --prefix "$prefix" --actor smoke-test >"$WORK/product.out"
-check "product $prefix created" "$(grep -c "account prefix: $prefix" "$WORK/product.out")" 1
-if admin product create --name "Dup" --prefix "${prefix,,}" --actor smoke-test >/dev/null 2>&1; then
+admin app create --name "Smoke $prefix" --prefix "$prefix" --actor smoke-test >"$WORK/app.out"
+check "app $prefix created" "$(grep -c "account prefix: $prefix" "$WORK/app.out")" 1
+if admin app create --name "Dup" --prefix "${prefix,,}" --actor smoke-test >/dev/null 2>&1; then
   bad "duplicate prefix rejected"
 else
   ok "duplicate prefix rejected (case-insensitive)"
 fi
-if admin product create --name "No actor" --prefix ZZQ >/dev/null 2>&1; then
+if admin app create --name "No actor" --prefix ZZQ >/dev/null 2>&1; then
   bad "--actor required"
 else
   ok "--actor required for writes"
 fi
 
-admin key issue --product "$prefix" --label smoke --actor smoke-test >"$WORK/key.out"
+admin key issue --app "$prefix" --label smoke --actor smoke-test >"$WORK/key.out"
 key=$(grep -oE 'tsp_(test|live)_[a-z2-7]+_[a-z2-7]+' "$WORK/key.out" | head -1)
 keyid=$(awk '/key id:/ {print $3}' "$WORK/key.out")
 if [[ -n "$key" && -n "$keyid" ]]; then ok "API key issued"; else bad "API key issued"; exit 1; fi
@@ -90,24 +92,30 @@ check "whoami with malformed key -> 401" "$(status -H 'Authorization: Bearer nop
 check "whoami with wrong secret -> 401" "$(status -H "Authorization: Bearer ${key%_*}_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" $API/v1/whoami)" 401
 check "whoami with key -> 200" "$(status -H "Authorization: Bearer $key" $API/v1/whoami)" 200
 body=$(curl -s -H "Authorization: Bearer $key" $API/v1/whoami)
-check "whoami reports the right product" "$(grep -c "\"$prefix\"" <<<"$body")" 1
+check "whoami reports the right app" "$(grep -c "\"$prefix\"" <<<"$body")" 1
 check "whoami response does not echo the key" "$(grep -c "${key##*_}" <<<"$body" || true)" 0
 ctype=$(curl -s -o /dev/null -w '%{content_type}' $API/v1/whoami)
 check "errors are application/problem+json" "$ctype" "application/problem+json"
 
-admin key revoke --product "$prefix" --key-id "$keyid" --actor smoke-test >/dev/null
+admin key revoke --app "$prefix" --key-id "$keyid" --actor smoke-test >/dev/null
 check "revoked key -> 401" "$(status -H "Authorization: Bearer $key" $API/v1/whoami)" 401
 
 echo "== integrity"
 check "audit chain verifies" "$(admin audit verify)" "Audit log chain verified: OK"
-check "ledger balances verify" "$(admin ledger check)" "Ledger balances verified: OK"
+# Money invariants straight from the database (read-only). Each output line
+# is "<check>|<id>"; none means every succeeded charge's transaction matches
+# it (same app and charge, exact amount, receipt), no receipt twice, etc.
+violations=$(docker compose exec -T postgres psql -U postgres -d talksasa_pay -v ON_ERROR_STOP=1 -At \
+  <cmd/loadtest/invariants.sql 2>&1) || violations="psql failed: $violations"
+check "money invariants hold (charges, receipts, events, deliveries)" "${violations:-none}" none
+[[ -z "$violations" ]] || printf '    %s\n' "$violations" | head -20
 
 echo "== secret leakage"
 secret=${key##*_}
 docker compose logs --no-color api worker migrate >"$WORK/stack.log" 2>&1
 check "API key secret absent from api/worker/migrate logs" "$(grep -c "$secret" "$WORK/stack.log" || true)" 0
 check "API key secret absent from CLI logs" "$(grep -c "$secret" "$WORK/cli.log" || true)" 0
-whsec=$(grep -oE 'whsec_[a-z2-7]+' "$WORK/product.out" | head -1)
+whsec=$(grep -oE 'whsec_[a-z2-7]+' "$WORK/app.out" | head -1)
 check "webhook secret printed once at creation" "$([[ -n $whsec ]] && echo yes || echo no)" yes
 check "webhook secret absent from all logs" "$(cat "$WORK/stack.log" "$WORK/cli.log" | grep -c "${whsec:-none}" || true)" 0
 check "Authorization header never logged" "$(grep -ci 'bearer tsp_' "$WORK/stack.log" || true)" 0

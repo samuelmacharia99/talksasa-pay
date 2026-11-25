@@ -1,7 +1,12 @@
 # ADR 0001: Talksasa Pay collects only Talksasa's own revenue
 
-- Status: accepted
+- Status: superseded by [ADR 0002](0002-generic-gateway.md) (2026-11-25)
 - Date: 2026-11-22
+
+> Superseded. Talksasa Pay is now a generic payment gateway with apps and
+> charges, not products, payers and bills. The structural protections below
+> (no settlement to apps, outgoing money only by named staff, apps created
+> only by Talksasa operators) carry over; see ADR 0002.
 
 ## Context
 Talksasa Home of Creatives Ltd runs several products (ISP Billing SaaS, Cloud

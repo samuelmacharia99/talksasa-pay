@@ -2,9 +2,9 @@
 
 Talksasa Pay talks to Safaricom's Daraja API for three things:
 
-- **STK push** (the "M-Pesa prompt"): from the product API
-  (`POST /v1/payment-requests/{id}/stk-push`) and from the pay page's
-  **Send payment prompt** button.
+- **STK push** (the "M-Pesa prompt"): from the app API
+  (`POST /v1/charges` with a phone, or `POST /v1/charges/{id}/stk-push`)
+  and from the checkout page's **Send payment prompt** button.
 - **STK query**: if a prompt's result doesn't arrive within about a minute,
   the worker asks Safaricom.
 - **C2B confirmations**: every payment made to the paybill from the M-Pesa
@@ -15,9 +15,10 @@ Safaricom calls us back at `/cb/mpesa/<callback token>/stk` and
 already routes `/cb/*`). Every callback is stored first and then applied by
 the worker, so nothing Safaricom sends is lost even if applying it fails.
 
-**Money rule:** a bill is paid only when Safaricom confirms with an M-Pesa
-receipt. A prompt Safaricom calls "successful" without a receipt goes to
-**needs review** and waits for a person (see below).
+**Money rule:** a charge is paid only when Safaricom confirms with an M-Pesa
+receipt for exactly its amount. A prompt Safaricom calls "successful"
+without a receipt goes to **needs review** and waits for a person (see
+below). The full rules are in [docs/api/charges.md](../api/charges.md).
 
 **Secrets rule:** consumer key, consumer secret, passkey and the callback
 token are secrets. They live only in the SOPS bundle. Never paste them into
@@ -25,6 +26,8 @@ chat, tickets, email, shell history or logs. If one leaks, rotate it
 (bottom of this page).
 
 ## Settings
+
+<!-- settings: see settings.md -->
 
 | Variable | Secret? | Meaning |
 |---|---|---|
@@ -62,7 +65,11 @@ by the phone's last digit:
 | `6` | Paid, and Safaricom sends the same callback twice |
 
 Simulate a paybill (C2B) payment with
-`curl -X POST 127.0.0.1:8090/fake/c2b -d '{"bill_ref":"HOST-1042","amount":100}'`.
+`curl -X POST 127.0.0.1:8090/fake/c2b -d '{"bill_ref":"HOST-4K7QZ9M","amount":100}'`
+(`bill_ref` is the account number the customer typed). A charge's account
+number and exact amount pay it; your app's prefix with anything else is
+forwarded as `payment.received`; a prefix no app has lands in **Unmatched
+payments**.
 
 `TSP_MPESA_BASE_URL` (pointing at the fake) is accepted only in
 development.
@@ -93,6 +100,8 @@ Do this once per environment that should talk to the Daraja sandbox
   test phone number. Note them for the smoke test.
 
 ### 3. Put the secrets into the SOPS bundle
+
+<!-- settings: see settings.md -->
 
 The mechanism is in [secrets.md](secrets.md): each environment has
 `secrets/<env>.enc.yaml`, encrypted with the environment's age key, and the
@@ -133,6 +142,8 @@ compose mounts as a Docker secret.
    missing from the bundle or the token is malformed.
 
 ### 4. Set the non-secret settings
+
+<!-- settings: see settings.md -->
 
 In the environment's env file on the host (`/etc/talksasa-pay/<env>.env`;
 `deploy/env.example` documents every variable):
@@ -180,20 +191,22 @@ can re-register freely; in production see the go-live checklist.
 
 ### 7. Sandbox smoke test
 
-On staging, with a `tsp_test_` key:
+On staging, with a `tsp_test_` key of a test app:
 
-1. Create a payer and a KES 1 payment request. Open its pay page.
+1. Create a KES 1 charge (`POST /v1/charges`). Open its `checkout_url`.
 2. Enter the sandbox test phone number (or your own Safaricom line, if the
    sandbox prompts it) and press **Send payment prompt**. Approve it.
-   The page should turn to **Paid** within seconds; the admin transaction
-   shows the receipt.
-3. On a new request, cancel the prompt. The page shows "The payment didn't
-   go through" with **Try again**.
-4. On a new request, ignore the prompt. After about a minute the status
+   The page should turn to **Paid** within seconds; the charge is
+   `succeeded` and its transaction shows the receipt in the admin panel.
+3. On a new charge, cancel the prompt. The page shows "The payment didn't
+   go through" with **Try again**; the charge is still `pending`.
+4. On a new charge, ignore the prompt. After about a minute the status
    check runs; the prompt ends failed (or needs review, see below).
-5. Use the Daraja C2B simulator to pay the sandbox C2B short code with the
-   payer's account number (e.g. `HOST-1042`). It appears in Transactions
-   and pays the bill; an unknown account number lands in Unmatched payments.
+5. Use the Daraja C2B simulator to pay the sandbox C2B short code with a
+   pending charge's account number (e.g. `HOST-4K7QZ9M`) and exact amount.
+   The charge succeeds. Pay again with a different amount: the app gets
+   `payment.received`. Pay with a prefix no app has: it lands in
+   **Unmatched payments**.
 6. In the admin panel, **M-Pesa callbacks** lists every callback, all
    processed.
 
@@ -233,11 +246,11 @@ The production paybill already exists. Before switching it on:
       `talksasa-pay admin mpesa register-urls --actor "..."` once. If the
       paybill was registered to another system before, ask Safaricom to
       clear it first. Remember: one confirmation URL per paybill is exactly
-      why Talksasa Pay exists, so no product may register its own.
-- [ ] A real KES 10 prompt to a staff phone pays a test bill; a real KES 10
-      paybill payment to a test payer's account number is applied; both
-      show in the admin panel with receipts. Reverse them through the usual
-      finance process.
+      why Talksasa Pay exists, so no app may register its own.
+- [ ] A real KES 10 prompt to a staff phone pays a test charge; a real KES
+      10 paybill payment to another test charge's account number pays it;
+      both show in the admin panel with receipts. Refund them through the
+      usual finance process and record the reversals (below).
 - [ ] Cancel and timeout tried once each on production: both end failed.
 - [ ] Daily checks below assigned to a named person.
 
@@ -247,10 +260,10 @@ Open the admin **Overview**. Under **Needs attention**:
 
 | Item | What to do |
 |---|---|
-| Transactions need review / payment prompts have no answer | Follow "Safaricom said paid without a receipt" below. Aim for same day: the customer is waiting and the product shows "confirming". |
+| Charges need review / payment prompts have no answer | Follow "Safaricom said paid without a receipt" below. Aim for same day: the customer is waiting and the app shows "confirming". |
+| Unmatched payments | Paybill payments whose account-number prefix belongs to no app. Follow "Unmatched payments" below. |
 | M-Pesa callbacks not processed | Open **M-Pesa callbacks** → "Not processed yet". A callback that is **Waiting** for minutes means the worker is down (`make worker-logs` / check the worker container). **Failing** shows the error; fix the cause and the worker retries it. Never edit or delete a callback. |
-| Payments for inactive products or payers | The money was applied as usual. Tell the product team: a suspended product's customer, or a closed payer, is still paying. |
-| Unmatched payments | Paybill payments with an unknown account number. Assign them (Phase 5) or contact the payer. |
+| Payments for inactive apps | The money was recorded and forwarded as usual (money rule 8). Tell the app's team: a suspended app's customers are still paying. |
 
 Also glance at **Transactions → status Pending, channel M-Pesa prompt**:
 anything pending for more than 30 minutes means the status checker is not
@@ -259,27 +272,28 @@ running.
 ## Safaricom said paid without a receipt (needs review)
 
 When a prompt's callback never arrives and the status check says the payment
-**succeeded**, Safaricom gives no receipt number. We never mark a bill paid
-without a receipt, so the transaction goes to **needs review** and the
-product gets `stk_push.needs_review` (it shows the customer "We're
-confirming your payment").
+**succeeded**, Safaricom gives no receipt number. We never mark a charge
+paid without a receipt, so the transaction and its charge go to **needs
+review**, and the app gets `stk_push.needs_review` and
+`charge.needs_review` (it shows the customer "We're confirming your
+payment"). A charge in needs review never expires.
 
 Staff with the Finance or Admin role resolve it:
 
 1. Open the transaction (Overview → needs review, or the link in the
-   product's support request). Note the amount, the masked phone and the
+   app's support request). Note the amount, the masked phone and the
    time.
 2. Find the payment on the **M-Pesa portal** (org portal → transaction
    search by time and amount; the M-Pesa request id on the transaction page
    helps).
 3. **Found it:** in **Resolve this payment**, choose **Confirm with
    receipt**, type the receipt exactly as on the portal, give a reason
-   ("Found on the M-Pesa portal, 24 Nov 10:42"), confirm. The transaction
-   succeeds, the money is applied to the bill and the product gets
-   `payment_request.paid`.
+   ("Found on the M-Pesa portal, 25 Nov 10:42"), confirm. The transaction
+   succeeds, the charge becomes `succeeded` and the app gets
+   `charge.succeeded`.
 4. **Not there** (check again after 30 minutes; M-Pesa can be slow):
-   **Mark as not paid** with a reason. The prompt fails and the customer can
-   pay again.
+   **Mark as not paid** with a reason. The prompt fails, the charge goes
+   back to `pending`, and the customer can pay again.
 5. If the receipt is **already recorded** elsewhere (`receipt taken`), don't
    force it: the money is already counted (often the customer also paid by
    paybill). Mark this one not paid and note the other receipt in the
@@ -289,30 +303,82 @@ Every resolution is in the audit log with your name and reason. If a late
 callback arrives after you resolved it, the system matches it by receipt
 and does not count the money twice.
 
+## Unmatched payments
+
+A paybill payment whose account number starts with a prefix that belongs to
+no app (a customer's typo, or an old number) is recorded with no app and
+listed under **Unmatched payments**. It is not lost: the receipt is
+recorded and the money is in the paybill.
+
+Staff with the Finance or Admin role assign it:
+
+1. Open **Unmatched payments** and the payment. Note the account number as
+   typed, the amount, the masked phone and the time.
+2. Work out whose it is: a near-miss of an app's prefix (`HOTS-1042` for
+   `HOST-1042`), a customer who called that app's support with the
+   receipt, or the app team recognising the amount and phone.
+3. **Assign to app**, pick the app, give a reason ("Customer called HOST
+   support with receipt SKP4ABCD12; typed HOTS"). The app gets
+   `payment.received` and decides what the money pays.
+
+From the CLI (same rules, same audit entry):
+
+```sh
+talksasa-pay admin txn assign --id <transaction id> --app HOST --reason "..." --actor "Your Name"
+```
+
+Assignment is set once: an assigned payment can't be moved to another app.
+Assigning to a suspended app is allowed (money rule 8). If nobody claims a
+payment, refund the customer through the usual finance process.
+
+## Reversing a payment
+
+When Safaricom reverses a payment (or finance refunds it outside the
+system), record it so the books and the app agree. **Admin role only.**
+
+1. Open the transaction and choose **Reverse**. Give a reason and, for an
+   M-Pesa payment, Safaricom's reversal receipt.
+2. Talksasa Pay records a reversal transaction (`out`, the payment's full
+   amount) pointing at the payment. If the payment paid a charge, the
+   charge becomes `reversed`. The app gets `transaction.reversed`.
+
+From the CLI:
+
+```sh
+talksasa-pay admin txn reverse --id <transaction id> --receipt <reversal receipt> --reason "..." --actor "Your Name"
+```
+
+A payment can be reversed once. Nothing is edited or deleted, and a
+reversed charge never reopens: the app decides what to do (for example
+create a new charge).
+
 ## How unusual payments are handled
 
-These rules were decided with the business owner (2026-11-24). Nothing is
-ever counted twice; each M-Pesa receipt is recorded once.
+These rules were decided with the business owner (2026-11-24, revised
+2026-11-25 for the gateway model). Nothing is ever counted twice; each
+M-Pesa receipt is recorded once.
 
 | Situation | What Talksasa Pay does |
 |---|---|
 | Safaricom confirms a prompt for a **different amount** than we asked | Records nothing, raises an alarm; staff cannot confirm it with a receipt (only mark it not paid). |
 | Paybill notice for **another business number** | Not recorded; alarm. Check the paybill configuration. |
-| Payment arrives **after we gave up** on a prompt | Recorded as a new transaction and applied to the prompt's bill; the prompt shows as succeeded and points at the new transaction. |
-| Paybill notice **matches a waiting prompt** (same customer, exact amount) | Treated as that prompt's payment: it pays the prompt's bill and the prompt is marked succeeded. Safaricom's own prompt confirmation with the same receipt is then a duplicate. |
-| The customer **really paid twice** (paybill + approved prompt, different receipts) | Both payments are recorded; the second moves on to the next unpaid bill or credit as usual. |
-| Paybill payment to an **unknown account number** | Recorded unmatched (suspense) for staff to assign. |
-| Payment for an **inactive product or closed customer** | Applied to their bills as normal; shown on the overview for staff. |
+| Payment arrives **after we gave up** on a prompt | Recorded as a new transaction; it pays the prompt's charge (even if the charge expired or was cancelled meanwhile). The prompt shows as succeeded and points at the new transaction. |
+| Paybill notice with an app's prefix that **matches one waiting charge** (account number and exact amount) | Pays that charge. If a prompt for it was waiting, the prompt is marked succeeded too; Safaricom's own prompt confirmation with the same receipt is then a duplicate. |
+| Paybill notice with an app's prefix that **matches no waiting charge** (or more than one) | Recorded and forwarded to the app as `payment.received`. |
+| The customer **really paid twice** (paybill + approved prompt, different receipts) | Both payments are recorded. The first pays the charge; the second is forwarded as `payment.received` with `duplicate_of_charge`. The app or finance refunds it. |
+| Paybill payment with an **unknown prefix** | Recorded unmatched, for staff to assign (above). |
+| Payment for an **inactive app** | Recorded and forwarded as normal; shown on the overview for staff. |
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| `/v1` stk-push answers `503 mpesa_unavailable`; pay page shows no prompt form | `TSP_MPESA_ENV` empty, or the bill is above KES 250,000 (pay page only). |
+| `/v1` stk-push answers `503 mpesa_unavailable`; the checkout page shows no prompt form | `TSP_MPESA_ENV` empty (M-Pesa off). |
 | `502 mpesa_error` on every prompt | Wrong consumer key/secret or passkey, wrong short code for the environment, or Daraja down. The api log has Daraja's error (never the credentials). |
 | Prompts reach phones but results never arrive; everything ends "needs review" or failed after a minute | Callbacks can't reach us: wrong `TSP_MPESA_CALLBACK_BASE_URL`, tunnel closed, IP allow-list blocking Safaricom (look for the callback alarm log line), or the sandbox simply not calling back. |
 | Callback log alarm "unknown token" | Someone is probing, or the token was rotated without re-registering C2B. |
 | Paybill payments don't appear | C2B URL not registered (or registered to an old URL/token). Re-run `register-urls` (sandbox) or contact Safaricom (production). |
+| Many paybill payments arrive as `payment.received` instead of paying charges | Customers pay a different amount than the charge, or the app reuses its own account numbers across several waiting charges with the same amount. Tell the app team. |
 
 ## Rotating credentials
 

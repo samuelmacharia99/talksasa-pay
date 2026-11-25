@@ -50,9 +50,26 @@ restore from the pre-deploy dump (below).
 
 **Downtime:** the api, admin and pay containers are replaced in place, so
 expect roughly 10–20 s of errors per deploy. Postgres and Caddy are not
-restarted. Deploy outside peak payment hours. Once Daraja callbacks are live
-(Phase 2), Safaricom does not guarantee callback retries, so reconciliation
-(Phase 5) covers anything missed during the swap.
+restarted. Deploy outside peak payment hours. Safaricom does not guarantee
+callback retries: a prompt whose callback is lost during the swap is
+resolved by the status check (or ends in needs review), but a paybill
+notice lost during the swap must be found on the M-Pesa statement
+(reconciliation, a later phase).
+
+## After every deploy
+From your workstation (in the checkout you deployed), confirm the books are
+intact:
+```sh
+ssh deploy@prod-host sudo docker compose -p talksasa-pay-production exec -T api /talksasa-pay admin audit verify
+ssh deploy@prod-host sudo docker compose -p talksasa-pay-production exec -T -u postgres postgres \
+  psql -d talksasa_pay -v ON_ERROR_STOP=1 -At < cmd/loadtest/invariants.sql
+```
+`audit verify` must say `OK`, and the invariants query must print nothing.
+Each line it prints is `<check>|<id>`: a receipt recorded twice, a
+succeeded charge whose payment doesn't match it, a succeeded M-Pesa payment
+without a receipt, app money without its `charge.succeeded` or
+`payment.received` event, a webhook delivered twice, or a broken audit
+chain. Stop and investigate before taking more payments.
 
 ## One-time host setup
 1. Ubuntu 24.04 LTS with Docker Engine and the compose plugin, `sops` (from
@@ -99,9 +116,9 @@ against the M-Pesa statement before reopening.
 ## What is exposed
 | Domain | Serves |
 |---|---|
-| `TSP_PAY_DOMAIN` | customer pay pages |
+| `TSP_PAY_DOMAIN` | customer checkout pages (one per charge) |
 | `TSP_ADMIN_DOMAIN` | staff panel, **only** from `TSP_ADMIN_ALLOW_CIDRS`, 404 for everyone else |
-| `TSP_API_DOMAIN` | `/v1/*` product API, `/cb/*` Safaricom callbacks, `/healthz`; everything else is 404 |
+| `TSP_API_DOMAIN` | `/v1/*` app API, `/public/v1/*` checkout-page API, `/cb/*` Safaricom callbacks, `/healthz`; everything else is 404 |
 
 - The admin API (:8089), Postgres and the Next.js servers are not published.
 - Metrics are on the host's `127.0.0.1:9464` only.

@@ -61,10 +61,10 @@ func rejectReason(err error) string {
 
 // feedTail returns the cursor at the end of the events feed (start of
 // this run's events).
-func feedTail(ctx context.Context, c *talksasapay.Client) (string, error) {
+func feedTail(ctx context.Context, c *apiClient) (string, error) {
 	cursor := ""
 	for {
-		page, err := c.ListEvents(ctx, talksasapay.ListEventsParams{After: cursor, Limit: 200})
+		page, err := c.listEvents(ctx, cursor, 200)
 		if err != nil {
 			return "", err
 		}
@@ -77,24 +77,35 @@ func feedTail(ctx context.Context, c *talksasapay.Client) (string, error) {
 	}
 }
 
-// feedSince returns the ids of all events after cursor.
-func feedSince(ctx context.Context, c *talksasapay.Client, cursor string) ([]string, error) {
-	var ids []string
+// feedEvents returns all events after cursor.
+func feedEvents(ctx context.Context, c *apiClient, cursor string) ([]Event, error) {
+	var evs []Event
 	for {
-		page, err := c.ListEvents(ctx, talksasapay.ListEventsParams{After: cursor, Limit: 200})
+		page, err := c.listEvents(ctx, cursor, 200)
 		if err != nil {
 			return nil, err
 		}
-		for _, ev := range page.Data {
-			ids = append(ids, ev.ID)
-		}
+		evs = append(evs, page.Data...)
 		if page.NextCursor != nil {
 			cursor = *page.NextCursor
 		}
 		if !page.HasMore || len(page.Data) == 0 {
-			return ids, nil
+			return evs, nil
 		}
 	}
+}
+
+// feedSince returns the ids of all events after cursor.
+func feedSince(ctx context.Context, c *apiClient, cursor string) ([]string, error) {
+	evs, err := feedEvents(ctx, c, cursor)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(evs))
+	for i, e := range evs {
+		ids[i] = e.ID
+	}
+	return ids, nil
 }
 
 // webhookResult compares deliveries with the feed.

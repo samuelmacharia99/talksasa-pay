@@ -2,13 +2,20 @@
 # M-Pesa end-to-end test against the local Docker stack and the fake Daraja
 # (make e2e-mpesa). Everything goes through real interfaces:
 #
-#   product API (payer, bill, stk-push) -> fake Daraja -> Safaricom-style
-#   callback to /cb/mpesa/... -> worker records + allocates the money ->
-#   signed webhook -> a PHP receiver that verifies it with the PHP SDK
-#   (clients/php: Verifier + typed Event models).
+#   app API (POST /v1/charges, stk-push) -> fake Daraja -> Safaricom-style
+#   callback to /cb/mpesa/... -> worker records the money and succeeds the
+#   charge -> signed webhook -> a PHP receiver that verifies it with the PHP
+#   SDK (clients/php: Verifier; data parsed generically).
 #
-# Cases: prompt paid; prompt cancelled by the customer; a paybill (C2B)
-# payment that matches a waiting prompt (completes that prompt).
+# Cases (money rules in docs/api/charges.md):
+#   1. charge with a phone -> prompt -> charge.succeeded
+#   2. prompt cancelled by the customer -> stk_push.failed, charge still pending
+#   3. paybill payment with the charge's account number + amount -> charge.succeeded
+#   4. paybill payment while a prompt waits -> the prompt and the charge succeed
+#   5. paybill payment with the app's prefix that matches nothing -> payment.received
+#   6. unknown prefix -> unmatched (no event) -> `admin txn assign` -> payment.received
+#   7. `admin txn reverse` -> transaction.reversed, charge reversed
+#   8. a forged webhook is refused by the SDK
 #
 # The receiver runs in the worker container's network namespace so the
 # worker reaches it on 127.0.0.1 (TSP_WEBHOOK_ALLOW_LOOPBACK, development
@@ -29,6 +36,7 @@ admin() {
     TSP_MASTER_KEYS_FILE=deploy/dev-secrets/master_keys TSP_API_KEY_PEPPER_FILE=deploy/dev-secrets/api_key_pepper \
     ./scripts/go.sh run ./cmd/talksasa-pay admin "$@" 2>/dev/null
 }
+sql() { docker compose exec -T postgres psql -U postgres -d talksasa_pay -Atc "$1"; }
 secret_of() { grep -oE "$1[A-Za-z0-9_]+" | head -1; }
 
 pass=0 fail=0
@@ -41,8 +49,8 @@ chmod 700 "$work"
 mkdir -p "$work/out"
 cleanup() {
   docker rm -f "$RECEIVER" >/dev/null 2>&1 || true
-  if [[ -n "${key_id:-}" ]]; then admin key revoke --product "$PREFIX" --key-id "$key_id" --actor e2e-mpesa >/dev/null || true; fi
-  admin product set-webhook --product "$PREFIX" --url "" --actor e2e-mpesa >/dev/null 2>&1 || true
+  if [[ -n "${key_id:-}" ]]; then admin key revoke --app "$PREFIX" --key-id "$key_id" --actor e2e-mpesa >/dev/null || true; fi
+  admin app set-webhook --app "$PREFIX" --url "" --actor e2e-mpesa >/dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -51,21 +59,30 @@ echo "== stack"
 ./scripts/dev-secrets.sh >/dev/null
 docker compose up -d --build --wait >/dev/null 2>&1 || { docker compose ps; exit 1; }
 
-echo "== product, webhook secret, API key"
+echo "== app, webhook secret, API key"
 hook="http://127.0.0.1:$PORT/hook"
-if admin product list | awk '{print $2}' | grep -qx "$PREFIX"; then
-  admin product set-webhook --product "$PREFIX" --url "$hook" --actor e2e-mpesa >/dev/null
-  admin product rotate-webhook-secret --product "$PREFIX" --actor e2e-mpesa | secret_of whsec_ >"$work/webhook_secret"
+admin app list >"$work/apps.txt"
+if awk '{print $2}' "$work/apps.txt" | grep -qx "$PREFIX"; then
+  admin app set-webhook --app "$PREFIX" --url "$hook" --actor e2e-mpesa >/dev/null
+  admin app rotate-webhook-secret --app "$PREFIX" --actor e2e-mpesa | secret_of whsec_ >"$work/webhook_secret"
 else
-  admin product create --name "M-Pesa E2E" --prefix "$PREFIX" --webhook-url "$hook" --actor e2e-mpesa | secret_of whsec_ >"$work/webhook_secret"
+  admin app create --name "M-Pesa E2E" --prefix "$PREFIX" --webhook-url "$hook" --actor e2e-mpesa | secret_of whsec_ >"$work/webhook_secret"
 fi
 [[ -s "$work/webhook_secret" ]] || { echo "no webhook secret"; exit 1; }
 chmod 600 "$work/webhook_secret" # the receiver runs as this user
-keyout=$(admin key issue --product "$PREFIX" --label "e2e-mpesa $(date +%s)" --actor e2e-mpesa)
+keyout=$(admin key issue --app "$PREFIX" --label "e2e-mpesa $(date +%s)" --actor e2e-mpesa)
 key_id=$(grep -oE 'key id: +[a-z2-7]+' <<<"$keyout" | awk '{print $3}')
 api_key=$(secret_of 'tsp_(test|live)_' <<<"$keyout")
 unset keyout
 [[ -n "$api_key" && -n "$key_id" ]] || { echo "could not issue an API key"; exit 1; }
+
+# A prefix no app has, for the unmatched case.
+letters=ABCDEFGHJKMNPRSTUVWXYZ
+unknown=""
+while [[ -z "$unknown" ]] || awk '{print $2}' "$work/apps.txt" | grep -qx "$unknown"; do
+  unknown="Q"
+  for _ in 1 2 3; do unknown+=${letters:RANDOM%${#letters}:1}; done
+done
 
 echo "== C2B URLs (fake Daraja)"
 docker compose exec -T api /talksasa-pay admin mpesa register-urls --actor e2e-mpesa >/dev/null 2>&1
@@ -84,17 +101,15 @@ done
 v1() { curl -fsS -H "Authorization: Bearer $api_key" -H "Content-Type: application/json" "$@"; }
 json() { python3 -c "import sys,json; d=json.load(sys.stdin); print($1)"; }
 run="e2e$(date +%s)$RANDOM"
-v1 -X PUT "$API/v1/payers/$run" -d '{"display_name":"M-Pesa E2E customer"}' >"$work/payer.json"
-account=$(json 'd["account_number"]' <"$work/payer.json")
-
-bill() { # reference amount -> id
-  v1 -X POST "$API/v1/payment-requests" -H "Idempotency-Key: $run-$1" \
-    -d "{\"payer\":\"$run\",\"reference\":\"$run-$1\",\"description\":\"M-Pesa E2E $1\",\"amount\":$2}" | json 'd["id"]'
+charge() { # name amount [extra json fields] -> charge json
+  v1 -X POST "$API/v1/charges" -H "Idempotency-Key: $run-$1" \
+    -d "{\"reference\":\"$run-$1\",\"amount\":$2,\"description\":\"M-Pesa E2E $1\"${3:+,$3}}"
 }
-push() { # request-id phone key -> push json
-  v1 -X POST "$API/v1/payment-requests/$1/stk-push" -H "Idempotency-Key: $3" -d "{\"phone\":\"$2\"}"
+paybill() { # account amount -> receipt
+  curl -fsS -X POST "$FAKE/fake/c2b" -d "{\"bill_ref\":\"$1\",\"amount\":$2,\"phone\":\"254712345678\"}" | json 'd["receipt"]'
 }
-# wait_event TYPE FIELD VALUE: until a verified event with data FIELD=VALUE arrives (45 s)
+charge_status() { v1 "$API/v1/charges/$1" | json 'd["status"]'; }
+# wait_event TYPE FIELD VALUE: until a verified event with FIELD=VALUE arrives (45 s)
 wait_event() {
   for _ in $(seq 1 90); do
     if [[ -f "$work/out/events.jsonl" ]] && python3 - "$work/out/events.jsonl" "$1" "$2" "$3" <<'PY'
@@ -126,43 +141,101 @@ for line in open(path):
         print(e.get(field)); break
 PY
 }
+count_events() { # TYPE FIELD VALUE
+  python3 - "$work/out/events.jsonl" "$@" <<'PY'
+import json, sys
+path, typ, f, v = sys.argv[1:]
+try:
+    print(sum(1 for l in open(path) if json.loads(l)["type"] == typ and str(json.loads(l).get(f)) == v))
+except FileNotFoundError:
+    print(0)
+PY
+}
 
-echo "== prompt paid"
-req=$(bill paid 150)
-p=$(push "$req" 0712345670 "$run-push-paid")
-pid=$(json 'd["id"]' <<<"$p")
-check "push accepted" "$(json 'd["status"]' <<<"$p")" "sent"
-expect_event "payment_request.paid delivered and verified by the PHP SDK" payment_request.paid request_id "$req"
-expect_event "stk_push.succeeded delivered and verified" stk_push.succeeded push_id "$pid"
-check "paid event amount_paid" "$(event_field payment_request.paid request_id "$req" amount_paid)" "150"
-expect_event "transaction.allocated delivered" transaction.allocated status succeeded
-check "request paid (API)" "$(v1 "$API/v1/payment-requests/$req" | json 'd["status"]')" "paid"
+echo "== 1. charge with a phone: prompt paid"
+c1=$(charge paid 150 '"phone":"0712345670"')
+c1_id=$(json 'd["id"]' <<<"$c1")
+check "charge created pending" "$(json 'd["status"]' <<<"$c1")" "pending"
+check "first prompt sent with the charge" "$(json '(d["latest_stk_push"] or {}).get("status")' <<<"$c1")" "sent"
+expect_event "charge.succeeded delivered and verified by the PHP SDK" charge.succeeded charge_id "$c1_id"
+expect_event "stk_push.succeeded delivered and verified" stk_push.succeeded charge_id "$c1_id"
+check "charge.succeeded carries the amount" "$(event_field charge.succeeded charge_id "$c1_id" amount)" "150"
+c1_txn=$(event_field charge.succeeded charge_id "$c1_id" transaction_id)
+check "charge succeeded (API)" "$(charge_status "$c1_id")" "succeeded"
+txn1=$(v1 "$API/v1/transactions/$c1_txn")
+check "paying transaction has an M-Pesa receipt" "$(json 'bool(d["receipt"])' <<<"$txn1")" "True"
+check "paying transaction is for exactly the charge amount" "$(json 'd["amount"]' <<<"$txn1")" "150"
 
-echo "== prompt cancelled by the customer"
-req2=$(bill cancel 90)
-p2=$(push "$req2" 0712345671 "$run-push-cancel")
-pid2=$(json 'd["id"]' <<<"$p2")
-expect_event "stk_push.failed delivered and verified" stk_push.failed push_id "$pid2"
-check "failure is the customer's cancel (SDK)" "$(event_field stk_push.failed push_id "$pid2" cancelled)" "True"
-check "result code" "$(event_field stk_push.failed push_id "$pid2" result_code)" "1032"
-check "request still open (API)" "$(v1 "$API/v1/payment-requests/$req2" | json 'd["status"]')" "open"
+echo "== 2. prompt cancelled by the customer"
+c2=$(charge cancel 90 '"phone":"0712345671"')
+c2_id=$(json 'd["id"]' <<<"$c2")
+expect_event "stk_push.failed delivered and verified" stk_push.failed charge_id "$c2_id"
+check "result code is the customer's cancel" "$(event_field stk_push.failed charge_id "$c2_id" result_code)" "1032"
+check "charge still pending (API)" "$(charge_status "$c2_id")" "pending"
+check "no charge.succeeded for the cancelled prompt" "$(count_events charge.succeeded charge_id "$c2_id")" "0"
 
-echo "== paybill payment matching a waiting prompt"
-req3=$(bill c2b 240)
-p3=$(push "$req3" 0712345673 "$run-push-c2b") # fake: no callback, status stays processing
-pid3=$(json 'd["id"]' <<<"$p3")
-txn3=$(json 'd["transaction_id"]' <<<"$p3")
-curl -fsS -X POST "$FAKE/fake/c2b" -d "{\"bill_ref\":\"$account\",\"amount\":240}" >/dev/null
-expect_event "paybill notice completed the waiting prompt (stk_push.succeeded)" stk_push.succeeded push_id "$pid3"
-expect_event "payment_request.paid for the prompt's bill" payment_request.paid request_id "$req3"
-check "money on the prompt's own transaction" "$(event_field stk_push.succeeded push_id "$pid3" transaction_id)" "$txn3"
+echo "== 3. paybill payment matching the charge"
+c3=$(charge c2b 240)
+c3_id=$(json 'd["id"]' <<<"$c3")
+c3_acct=$(json 'd["account_number"]' <<<"$c3")
+check "generated account number is 12 characters with the prefix" \
+  "$([[ ${#c3_acct} -eq 12 && $c3_acct == "$PREFIX-"* ]] && echo yes || echo "no ($c3_acct)")" yes
+r3=$(paybill "$c3_acct" 240)
+expect_event "paybill payment succeeded the charge (charge.succeeded)" charge.succeeded charge_id "$c3_id"
+check "the charge's payment carries the paybill receipt" \
+  "$(v1 "$API/v1/transactions/$(event_field charge.succeeded charge_id "$c3_id" transaction_id)" | json 'd["receipt"]')" "$r3"
 
-echo "== deliveries"
+echo "== 4. paybill payment while a prompt waits"
+c4=$(charge waiting 310 '"phone":"0712345673"') # fake: no callback, the prompt stays waiting
+c4_id=$(json 'd["id"]' <<<"$c4")
+c4_push=$(json 'd["latest_stk_push"]["id"]' <<<"$c4")
+paybill "$(json 'd["account_number"]' <<<"$c4")" 310 >/dev/null
+expect_event "paybill notice completed the waiting prompt (stk_push.succeeded)" stk_push.succeeded push_id "$c4_push"
+expect_event "charge.succeeded for the prompt's charge" charge.succeeded charge_id "$c4_id"
+
+echo "== 5. paybill payment with our prefix that matches no charge"
+nomatch="$PREFIX-9$(printf '%06d' $((RANDOM * RANDOM % 1000000)))"
+r5=$(paybill "$nomatch" 77)
+expect_event "payment.received forwarded to the app" payment.received receipt "$r5"
+check "payment.received has the account number as typed" "$(event_field payment.received receipt "$r5" account_number)" "$nomatch"
+check "payment.received paid no charge" "$(event_field payment.received receipt "$r5" charge_id)" "None"
+
+echo "== 6. unknown prefix: unmatched, then assigned by staff"
+r6=$(paybill "$unknown-1042" 55)
+t6=""
+for _ in $(seq 1 60); do
+  t6=$(sql "SELECT id FROM transactions WHERE provider = 'mpesa' AND provider_transaction_id = '$r6' AND app_id IS NULL")
+  [[ -n "$t6" ]] && break
+  sleep 0.5
+done
+check "unknown prefix recorded as unmatched" "$([[ -n "$t6" ]] && echo yes || echo no)" yes
+check "no event before assignment" "$(count_events payment.received receipt "$r6")" "0"
+if [[ -n "$t6" ]]; then
+  admin txn assign --id "$t6" --app "$PREFIX" --reason "e2e: customer mistyped the prefix" --actor e2e-mpesa >/dev/null ||
+    bad "admin txn assign failed"
+  expect_event "payment.received after admin txn assign" payment.received transaction_id "$t6"
+  if admin txn assign --id "$t6" --app "$PREFIX" --reason "e2e: second assign" --actor e2e-mpesa >/dev/null 2>&1; then
+    bad "a payment can be assigned only once"
+  else
+    ok "a payment can be assigned only once"
+  fi
+fi
+
+echo "== 7. reversal by an admin"
+rr="RV$(date +%s | tail -c 9)"
+admin txn reverse --id "$c1_txn" --receipt "$rr" --reason "e2e: Safaricom reversed the payment" --actor e2e-mpesa >/dev/null ||
+  bad "admin txn reverse failed"
+expect_event "transaction.reversed delivered and verified" transaction.reversed reverses_transaction_id "$c1_txn"
+check "reversal names the charge" "$(event_field transaction.reversed reverses_transaction_id "$c1_txn" charge_id)" "$c1_id"
+check "reversal is kind reversal" "$(event_field transaction.reversed reverses_transaction_id "$c1_txn" kind)" "reversal"
+check "charge reversed (API)" "$(charge_status "$c1_id")" "reversed"
+
+echo "== 8. deliveries"
 rejected() { if [[ -f "$work/out/rejected.jsonl" ]]; then wc -l <"$work/out/rejected.jsonl" | tr -d ' '; else echo 0; fi; }
 check "no genuine webhook failed signature verification" "$(rejected)" "0"
 # A forged delivery (right shape, wrong secret) must be refused by the SDK.
 forged=$(docker exec "$RECEIVER" php -r '
-  $body = json_encode(["object"=>"event","id"=>"00000000-0000-7000-8000-000000000000","type"=>"payment_request.paid","api_version"=>"2026-11-24","created_at"=>gmdate("c"),"data"=>new stdClass]);
+  $body = json_encode(["object"=>"event","id"=>"00000000-0000-7000-8000-000000000000","type"=>"charge.succeeded","api_version"=>"2026-11-25","created_at"=>gmdate("c"),"data"=>new stdClass]);
   $t = time(); $sig = "t=$t,v1=" . hash_hmac("sha256", "$t.$body", "whsec_not_the_secret");
   $ctx = stream_context_create(["http"=>["method"=>"POST","header"=>"Content-Type: application/json\r\nTalksasa-Signature: $sig\r\n","content"=>$body,"ignore_errors"=>true]]);
   @file_get_contents("http://127.0.0.1:'"$PORT"'/hook", false, $ctx);
@@ -170,13 +243,18 @@ forged=$(docker exec "$RECEIVER" php -r '
 check "forged webhook refused by the PHP SDK" "$forged" "400"
 check "forged webhook logged as rejected" "$(rejected)" "1"
 check "event id header matches body" "$(python3 -c "
-import json,sys
+import json
 print(all(json.loads(l)['id']==json.loads(l)['header_id'] for l in open('$work/out/events.jsonl')))")" "True"
 dups=$(python3 -c "
 import json,collections
-c=collections.Counter((json.loads(l)['type'], json.loads(l).get('push_id') or json.loads(l).get('request_id') or json.loads(l).get('transaction_id')) for l in open('$work/out/events.jsonl'))
-print(sum(1 for k,v in c.items() if v>1 and k[0].startswith(('stk_push.','payment_request.paid'))))")
-check "no event delivered twice for the same subject" "$dups" "0"
+c=collections.Counter()
+for l in open('$work/out/events.jsonl'):
+    e=json.loads(l)
+    c[e['id']]+=1
+    if e['type'] in ('charge.succeeded','stk_push.succeeded','payment.received','transaction.reversed'):
+        c[(e['type'], e.get('charge_id') if e['type']=='charge.succeeded' else e.get('push_id') or e.get('transaction_id'))]+=1
+print(sum(1 for v in c.values() if v>1))")
+check "no event (or money event for the same subject) delivered twice" "$dups" "0"
 
 echo
 echo "e2e-mpesa: $pass passed, $fail failed"
