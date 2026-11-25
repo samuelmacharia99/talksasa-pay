@@ -188,3 +188,32 @@ func TestWebhookAllowLoopbackDevelopmentOnly(t *testing.T) {
 		t.Fatalf("loopback webhooks accepted in staging: %v", err)
 	}
 }
+
+func TestPortAndSecretsFromEnv(t *testing.T) {
+	base := map[string]string{"TSP_DATABASE_URL": "postgres://u:p@h/db?sslmode=disable", "TSP_MASTER_KEYS": "1:x",
+		"TSP_API_KEY_PEPPER": pepper, "PORT": "9090"}
+	cfg, err := Load(src(base, nil, 0o600))
+	if err != nil || cfg.HTTP.Addr != ":9090" {
+		t.Fatalf("PORT: %v %q", err, cfg.HTTP.Addr)
+	}
+	base["TSP_HTTP_ADDR"] = "127.0.0.1:7000"
+	if cfg, err = Load(src(base, nil, 0o600)); err != nil || cfg.HTTP.Addr != "127.0.0.1:7000" {
+		t.Fatalf("TSP_HTTP_ADDR must win over PORT: %v %q", err, cfg.HTTP.Addr)
+	}
+
+	prod := map[string]string{"TSP_ENV": "production", "TSP_DATABASE_URL": "postgres://u:p@h/db?sslmode=require",
+		"TSP_MASTER_KEYS": "1:x", "TSP_API_KEY_PEPPER": pepper,
+		"TSP_PAY_BASE_URL": "https://pay.example/", "TSP_ADMIN_SETUP_BASE_URL": "https://a.example/setup/"}
+	if _, err := Load(src(prod, nil, 0o600)); err == nil || !strings.Contains(err.Error(), "TSP_SECRETS_FROM_ENV") {
+		t.Fatalf("production must refuse env secrets by default: %v", err)
+	}
+	prod["TSP_SECRETS_FROM_ENV"] = "true"
+	cfg, err = Load(src(prod, nil, 0o600))
+	if err != nil || !cfg.SecretsFromEnv || cfg.Database.URL.Reveal() == "" {
+		t.Fatalf("opt-in: %v %+v", err, cfg)
+	}
+	prod["TSP_DATABASE_URL"] = "postgres://u:p@h/db?sslmode=disable"
+	if _, err := Load(src(prod, nil, 0o600)); err == nil || !strings.Contains(err.Error(), "sslmode") {
+		t.Fatalf("the opt-in must not relax database TLS: %v", err)
+	}
+}

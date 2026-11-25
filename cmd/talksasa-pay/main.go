@@ -2,6 +2,7 @@
 //
 //	talksasa-pay api                 serve the HTTP API
 //	talksasa-pay worker              run background jobs (webhooks, expiry, retention)
+//	talksasa-pay serve               api and worker in one process (single-process hosts)
 //	talksasa-pay migrate up|down|version
 //	talksasa-pay admin ...           operator commands (apps, API keys, audit)
 //	talksasa-pay keygen --version N  print a new master keyring line
@@ -29,7 +30,8 @@ const usage = `usage: talksasa-pay <command> [args]
 
 commands:
   api          serve the HTTP API
-  worker       run background jobs (webhook delivery, request expiry, retention)
+  worker       run background jobs (M-Pesa callbacks, webhooks, expiry, retention)
+  serve        api and worker in one process (for hosts that run a single process)
   migrate      up | down | version   (uses TSP_MIGRATE_DATABASE_URL[_FILE])
   admin        operator commands; run "talksasa-pay admin" for details
   keygen       print a new master keyring line: keygen --version N
@@ -54,6 +56,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = runAPI(ctx, stderr)
 	case "worker":
 		err = runWorker(ctx, stderr)
+	case "serve":
+		err = runServe(ctx, stderr)
 	case "migrate":
 		err = runMigrate(args[1:], stderr)
 	case "admin":

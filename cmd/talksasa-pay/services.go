@@ -49,6 +49,9 @@ func newApp(ctx context.Context, logw io.Writer, component string) (*services, e
 		return nil, fmt.Errorf("configuration:\n%w", err)
 	}
 	logger := newLogger(logw, cfg.Env, cfg.LogLevel).With(slog.String("component", component))
+	if cfg.SecretsFromEnv {
+		logger.Warn("secrets are read from environment variables (TSP_SECRETS_FROM_ENV); prefer *_FILE where the host can mount files")
+	}
 
 	keys, err := crypto.ParseKeyring(cfg.Crypto.MasterKeys.Reveal(), cfg.Crypto.ActiveKeyVersion)
 	if err != nil {

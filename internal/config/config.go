@@ -37,15 +37,18 @@ func (e Environment) IsProductionLike() bool { return e == EnvStaging || e == En
 type Config struct {
 	Env      Environment
 	LogLevel slog.Level
-	HTTP     HTTPConfig
-	Metrics  MetricsConfig
-	Database DatabaseConfig
-	Crypto   CryptoConfig
-	Admin    AdminConfig
-	Public   PublicConfig
-	API      APIConfig
-	Worker   WorkerConfig
-	Mpesa    MpesaConfig
+	// SecretsFromEnv: secrets were allowed straight from environment
+	// variables in staging/production (TSP_SECRETS_FROM_ENV).
+	SecretsFromEnv bool
+	HTTP           HTTPConfig
+	Metrics        MetricsConfig
+	Database       DatabaseConfig
+	Crypto         CryptoConfig
+	Admin          AdminConfig
+	Public         PublicConfig
+	API            APIConfig
+	Worker         WorkerConfig
+	Mpesa          MpesaConfig
 	// TrustedProxies are peers (the Next.js servers, the reverse proxy)
 	// whose X-Talksasa-Client-IP header is believed. Anyone else's is ignored.
 	TrustedProxies []netip.Prefix
@@ -214,10 +217,20 @@ func OSSource() Source {
 	return Source{Getenv: os.Getenv, ReadFile: os.ReadFile, Stat: os.Stat}
 }
 
+// defaultHTTPAddr is the public listener when TSP_HTTP_ADDR is unset: all
+// interfaces on $PORT when the host provides one (platforms that route to
+// the port they assign), else :8088.
+func defaultHTTPAddr(src Source) string {
+	if p := strings.TrimSpace(src.Getenv("PORT")); p != "" {
+		return ":" + p
+	}
+	return ":8088"
+}
+
 // Load reads and validates the configuration needed by the api, worker and
 // admin commands.
 func Load(src Source) (*Config, error) {
-	l := loader{src: src}
+	l := newLoader(src)
 
 	cfg := &Config{}
 	cfg.Env = Environment(l.str("TSP_ENV", string(EnvDevelopment)))
@@ -227,9 +240,10 @@ func Load(src Source) (*Config, error) {
 		l.fail("TSP_ENV", fmt.Errorf("must be development, staging or production, got %q", cfg.Env))
 	}
 	cfg.LogLevel = l.level("TSP_LOG_LEVEL", slog.LevelInfo)
+	cfg.SecretsFromEnv = l.envSecrets && cfg.Env.IsProductionLike()
 
 	cfg.HTTP = HTTPConfig{
-		Addr:              l.str("TSP_HTTP_ADDR", ":8088"),
+		Addr:              l.str("TSP_HTTP_ADDR", defaultHTTPAddr(src)),
 		ReadHeaderTimeout: l.duration("TSP_HTTP_READ_HEADER_TIMEOUT", 5*time.Second),
 		ReadTimeout:       l.duration("TSP_HTTP_READ_TIMEOUT", 15*time.Second),
 		WriteTimeout:      l.duration("TSP_HTTP_WRITE_TIMEOUT", 30*time.Second),
@@ -315,7 +329,7 @@ func Load(src Source) (*Config, error) {
 
 // LoadMigrate reads only what the migrate command needs: the owner-role DSN.
 func LoadMigrate(src Source) (env Environment, dsn Secret, err error) {
-	l := loader{src: src}
+	l := newLoader(src)
 	env = Environment(l.str("TSP_ENV", string(EnvDevelopment)))
 	dsn = l.secret("TSP_MIGRATE_DATABASE_URL", env, true)
 	if err := l.err(); err != nil {
@@ -488,6 +502,16 @@ func validateDSN(name string, dsn Secret, env Environment) error {
 type loader struct {
 	src  Source
 	errs []error
+	// envSecrets: TSP_SECRETS_FROM_ENV=true lets staging/production read
+	// secrets straight from environment variables, for hosts that cannot
+	// mount secret files. Off by default: *_FILE stays the rule.
+	envSecrets bool
+}
+
+func newLoader(src Source) loader {
+	l := loader{src: src}
+	l.envSecrets = l.boolean("TSP_SECRETS_FROM_ENV", false)
+	return l
 }
 
 func (l *loader) fail(name string, err error) {
@@ -614,8 +638,8 @@ func (l *loader) secret(name string, env Environment, required bool) Secret {
 		}
 		return NewSecret(strings.TrimSpace(string(b)))
 	case direct != "":
-		if env.IsProductionLike() {
-			l.fail(name, fmt.Errorf("secrets must be provided via %s in %s", fileVar, env))
+		if env.IsProductionLike() && !l.envSecrets {
+			l.fail(name, fmt.Errorf("secrets must be provided via %s in %s (or set TSP_SECRETS_FROM_ENV=true on hosts that only offer environment variables)", fileVar, env))
 			return Secret{}
 		}
 		return NewSecret(strings.TrimSpace(direct))

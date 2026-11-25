@@ -55,6 +55,7 @@ then `curl -H "Authorization: Bearer tsp_test_..." localhost:8088/v1/whoami`.
 M-Pesa (Daraja sandbox setup, going live, daily checks, needs review,
 unmatched payments, reversals): [docs/runbooks/mpesa.md](docs/runbooks/mpesa.md);
 for app developers: [docs/api](docs/api/README.md).
+Platform hosts (Procfile, env vars only): [docs/runbooks/paas.md](docs/runbooks/paas.md).
 Load test: `go run ./cmd/loadtest -h` (local stack only; it creates charges
 and fake M-Pesa payments, then checks the money invariants).
 `make help` lists every target. Metrics are on `127.0.0.1:9464/metrics`
