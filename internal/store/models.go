@@ -958,6 +958,28 @@ type MpesaCallback struct {
 	TransactionID *uuid.UUID
 }
 
+// The gateway's one M-Pesa paybill (Daraja) configuration. Credentials are encrypted and write-only. Never deleted.
+type MpesaSetting struct {
+	ID                       int16
+	Environment              string
+	Shortcode                string
+	StkShortcode             *string
+	ConsumerKeyCiphertext    []byte
+	ConsumerSecretCiphertext []byte
+	PasskeyCiphertext        []byte
+	KeyVersion               int32
+	CallbackBaseUrl          string
+	UpdatedBy                string
+	UpdatedAt                time.Time
+	Version                  int64
+	UrlsRegisteredAt         *time.Time
+	UrlsRegisteredBy         *string
+	UrlsRegisteredUrl        *string
+	UrlsRegisteredShortcode  *string
+	LastTestAt               *time.Time
+	LastTestOk               *bool
+}
+
 // STK push prompts sent through Daraja. Owns the pending mpesa_stk transaction the callback completes.
 type StkPush struct {
 	ID                uuid.UUID

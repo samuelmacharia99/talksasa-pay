@@ -35,7 +35,9 @@ the audit log.
   user reset       --email EMAIL --actor NAME   (lost 2FA / re-onboard: new setup link)
   user disable     --email EMAIL --actor NAME   (offboarding)
   audit verify     check the audit log hash chain
-  mpesa register-urls --actor NAME   register the paybill's C2B callback URLs with Safaricom
+  mpesa register-urls --actor NAME [--confirm production]
+                   register the paybill's C2B callback URLs with Safaricom (the
+                   settings in effect: admin panel Settings, else TSP_MPESA_*)
   mpesa status     M-Pesa configuration (no secrets) and STK/callback counts to watch
   seed demo        --actor NAME   development only: demo apps (and, later, charges and payments)
 `
@@ -65,6 +67,7 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	actorName := fs.String("actor", "", "your name, recorded in the audit log")
 	email := fs.String("email", "", "staff email")
 	role := fs.String("role", "", "staff role: viewer, finance, approver or admin")
+	confirm := fs.String("confirm", "", `type "production" to act on production M-Pesa settings`)
 	if err := fs.Parse(args); err != nil {
 		return usageError{adminUsage}
 	}
@@ -264,13 +267,14 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		if err := needActor(); err != nil {
 			return err
 		}
-		if a.mpesa == nil {
-			return errors.New("M-Pesa is off (TSP_MPESA_ENV is not set)")
-		}
-		return registerC2BURLs(ctx, a.mpesa, a.pool, actor, a.cfg.Public.Paybill, a.cfg.Mpesa.CallbackToken.Reveal(), stdout)
+		return registerC2BURLs(ctx, a.mpesaSettings, actor, *confirm, stdout)
 
 	case "mpesa status":
-		return printMpesaStatus(ctx, a.cfg, store.New(a.pool), stdout)
+		st, err := a.mpesaSettings.Status(ctx)
+		if err != nil {
+			return err
+		}
+		return printMpesaStatus(ctx, st, store.New(a.pool), stdout)
 
 	}
 	return usageError{adminUsage}

@@ -19,9 +19,10 @@ func TestRedaction(t *testing.T) {
 		slog.String("phone", "254712345678"), slog.Any("db", config.NewSecret("postgres://u:pw@h/db")),
 		slog.Group("daraja", slog.String("access_token", "atok")),
 		slog.String("receipt", "SKL4ABCD12"),
+		slog.String("consumer_key", "ckey123"), slog.String("ConsumerKey", "ckey456"), slog.String("callback_token", "cbtok"),
 	)
 	out := buf.String()
-	for _, leaked := range []string{"hunter2", "s3cr3t", `"pk"`, "cred\"", "Bearer abc", `"tok"`, "254712345678", "pw@h", "atok"} {
+	for _, leaked := range []string{"hunter2", "s3cr3t", `"pk"`, "cred\"", "Bearer abc", `"tok"`, "254712345678", "pw@h", "atok", "ckey123", "ckey456", "cbtok"} {
 		if strings.Contains(out, leaked) {
 			t.Errorf("leaked %q in %s", leaked, out)
 		}

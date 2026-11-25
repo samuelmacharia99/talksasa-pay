@@ -153,6 +153,7 @@ func TestRBACMatrix(t *testing.T) {
 		store.AdminRoleApprover: {PermRead: true},
 		store.AdminRoleAdmin: {
 			PermRead: true, PermManageApps: true, PermManageUsers: true, PermResolvePayments: true, PermReversePayments: true,
+			PermManageSettings: true,
 		},
 	}
 	for _, role := range store.AllAdminRoleValues() {

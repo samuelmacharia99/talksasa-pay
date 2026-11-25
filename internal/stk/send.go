@@ -56,7 +56,7 @@ const (
 //     stk_push.failed, return the push with ErrDaraja; transient (outcome
 //     unknown) -> leave initiating for the sweeper, return the push.
 func (s *Service) Send(ctx context.Context, actor audit.Actor, p SendParams) (push Push, replayed bool, err error) {
-	if s.o.Client == nil {
+	if !s.available() {
 		return Push{}, false, ErrUnavailable
 	}
 	if err := actor.Validate(); err != nil {

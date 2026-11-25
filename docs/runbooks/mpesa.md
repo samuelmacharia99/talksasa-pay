@@ -20,11 +20,30 @@ receipt. A prompt Safaricom calls "successful" without a receipt goes to
 **needs review** and waits for a person (see below).
 
 **Secrets rule:** consumer key, consumer secret, passkey and the callback
-token are secrets. They live only in the SOPS bundle. Never paste them into
-chat, tickets, email, shell history or logs. If one leaks, rotate it
-(bottom of this page).
+token are secrets. The callback token lives only in the SOPS bundle. The
+Daraja credentials are entered by an admin on the admin panel's
+**Settings** page, which stores them encrypted in the database (or, as a
+fallback, in the SOPS bundle). Never paste them into chat, tickets, email,
+shell history or logs. If one leaks, rotate it (bottom of this page).
 
-## Settings
+## Where the paybill is configured
+
+**Normally on the admin panel's Settings page** (admin role only; see
+[settings.md](settings.md)): environment, paybill, optional STK short code,
+callback base URL and the three Daraja credentials, plus **Test
+credentials** and **Register URLs with Safaricom** buttons. Saved settings
+win over the variables below, apply to the api and worker within a few
+seconds without a restart, and every change is in the audit log.
+
+**The `TSP_MPESA_*` variables are the fallback** while nothing is saved on
+the Settings page (a fresh deployment, or one that has always used SOPS).
+Three things always come from the deployment configuration, whatever is
+saved: the callback token (`TSP_MPESA_CALLBACK_TOKEN_FILE`), Safaricom's
+callback networks (`TSP_MPESA_CALLBACK_CIDRS`) and, in development only,
+`TSP_MPESA_BASE_URL`. The callback token must be set even when M-Pesa is
+configured on the Settings page; without it the page says M-Pesa stays off.
+
+## Configuration variables (fallback)
 
 | Variable | Secret? | Meaning |
 |---|---|---|
@@ -92,7 +111,13 @@ Do this once per environment that should talk to the Daraja sandbox
 - The test credentials page also lists the sandbox **C2B short code** and a
   test phone number. Note them for the smoke test.
 
-### 3. Put the secrets into the SOPS bundle
+### 3. Put the callback token into the SOPS bundle, then the rest in Settings
+
+Only the **callback token** must go into the bundle. Enter the consumer key,
+secret, passkey, short code and callback base URL on the admin panel's
+**Settings** page (step 4 alternative below), straight from the Daraja
+page; the panel encrypts them and never shows them again. The older
+all-in-SOPS setup below still works and is the fallback.
 
 The mechanism is in [secrets.md](secrets.md): each environment has
 `secrets/<env>.enc.yaml`, encrypted with the environment's age key, and the
@@ -147,6 +172,13 @@ TSP_MPESA_CALLBACK_CIDRS=            # empty is allowed in the sandbox; see "IP 
 Deploy (`scripts/deploy.sh staging`). The api log says M-Pesa is on and in
 which environment; it never prints the credentials.
 
+**Or, instead of steps 3-4 for everything but the token:** sign in to the
+admin panel as an admin, open **Settings**, choose **Sandbox**, enter
+`174379`, the callback base URL (`https://<api-domain>/`) and the three
+credentials, **Save settings**, then **Test credentials** (it asks Daraja
+for an access token; "Credentials accepted" means the key and secret are
+right; the passkey is only proven by a real prompt).
+
 ### 5. Make the callbacks reachable
 
 Safaricom must reach `TSP_MPESA_CALLBACK_BASE_URL` over HTTPS from the
@@ -165,10 +197,13 @@ internet.
 
 ### 6. Register the C2B URL
 
-C2B confirmations only arrive after the URL is registered with Safaricom:
+C2B confirmations only arrive after the URL is registered with Safaricom.
+On the **Settings** page press **Register URLs with Safaricom** (the page
+then shows when and by whom), or from the command line (same code, same
+audit record):
 
 ```sh
-talksasa-pay admin mpesa register-urls --actor "Your Name"
+talksasa-pay admin mpesa register-urls --actor "Your Name" [--confirm production]
 # locally: make admin ARGS='mpesa register-urls --actor "Your Name"'
 ```
 
@@ -220,19 +255,22 @@ The production paybill already exists. Before switching it on:
 - [ ] A **production** Daraja app approved by Safaricom for the paybill
       (Go Live in the portal), with M-Pesa Express and C2B.
 - [ ] Production consumer key/secret and the **production passkey** (sent by
-      Safaricom for the short code) in `secrets/production.enc.yaml`, typed
-      in with `sops`, never sent by email or chat. A fresh callback token.
-- [ ] `TSP_MPESA_ENV=production`, `TSP_MPESA_PAYBILL` = the paybill,
+      Safaricom for the short code) entered by an admin on the **Settings**
+      page (Production, typed confirmation), or in
+      `secrets/production.enc.yaml` with `sops`; never sent by email or chat.
+      A fresh callback token in the bundle.
+- [ ] On Settings (or with `TSP_MPESA_ENV=production`, `TSP_MPESA_PAYBILL` = the paybill,
       `TSP_MPESA_SHORTCODE` unset (defaults to the paybill) unless Safaricom
       gave a different STK short code, `TSP_MPESA_CALLBACK_BASE_URL` =
-      `https://<production api domain>/`.
+      `https://<production api domain>/` in the env file).
 - [ ] `TSP_MPESA_CALLBACK_CIDRS` = Safaricom's current list (see above).
 - [ ] **C2B registration.** Safaricom allows registering the confirmation URL
       for a production short code only once; changing it later goes
       through Safaricom support. Check the URL (base, token) twice, then run
       `talksasa-pay admin mpesa register-urls --actor "..."` once. If the
       paybill was registered to another system before, ask Safaricom to
-      clear it first. Remember: one confirmation URL per paybill is exactly
+      clear it first. (On the Settings page production registration needs
+      the word "production" typed; on the CLI `--confirm production`.) Remember: one confirmation URL per paybill is exactly
       why Talksasa Pay exists, so no product may register its own.
 - [ ] A real KES 10 prompt to a staff phone pays a test bill; a real KES 10
       paybill payment to a test payer's account number is applied; both
@@ -308,7 +346,8 @@ ever counted twice; each M-Pesa receipt is recorded once.
 
 | Symptom | Likely cause |
 |---|---|
-| `/v1` stk-push answers `503 mpesa_unavailable`; pay page shows no prompt form | `TSP_MPESA_ENV` empty, or the bill is above KES 250,000 (pay page only). |
+| `/v1` stk-push answers `503 mpesa_unavailable`; pay page shows no prompt form | Nothing saved on Settings and `TSP_MPESA_ENV` empty; or Settings shows a problem (usually `TSP_MPESA_CALLBACK_TOKEN` missing); or the charge is above KES 250,000 (pay page only). |
+| Settings saved but the worker still uses the old ones | It re-reads them within about 5 seconds; the worker log says `mpesa: enabled` with the new `version`. A log line "could not load the saved settings" means the master keyring lacks the key they were sealed with. |
 | `502 mpesa_error` on every prompt | Wrong consumer key/secret or passkey, wrong short code for the environment, or Daraja down. The api log has Daraja's error (never the credentials). |
 | Prompts reach phones but results never arrive; everything ends "needs review" or failed after a minute | Callbacks can't reach us: wrong `TSP_MPESA_CALLBACK_BASE_URL`, tunnel closed, IP allow-list blocking Safaricom (look for the callback alarm log line), or the sandbox simply not calling back. |
 | Callback log alarm "unknown token" | Someone is probing, or the token was rotated without re-registering C2B. |
@@ -316,9 +355,10 @@ ever counted twice; each M-Pesa receipt is recorded once.
 
 ## Rotating credentials
 
-- **Consumer secret / key:** regenerate in the Daraja portal, update the
-  bundle with `sops`, deploy. Brief prompt failures during the deploy are
-  possible; do it at a quiet time.
+- **Consumer secret / key:** regenerate in the Daraja portal and enter the
+  new value on **Settings** (leave the other credential fields empty to keep
+  them), then **Test credentials**. No deploy needed. (Fallback setups:
+  update the bundle with `sops` and deploy.)
 - **Passkey:** only Safaricom issues it; same process.
 - **Callback token:** generate a new one, update the bundle, deploy, then
   re-register C2B (in production through Safaricom). STK callbacks use the

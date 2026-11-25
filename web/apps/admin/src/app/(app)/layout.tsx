@@ -42,6 +42,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
           </NavGroup>
           <NavGroup label="Admin">
             <NavLink href="/audit">Audit log</NavLink>
+            <NavLink href="/settings">Settings</NavLink>
             {canManageUsers ? <NavLink href="/staff">Staff</NavLink> : null}
           </NavGroup>
         </nav>

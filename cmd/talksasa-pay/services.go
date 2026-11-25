@@ -13,7 +13,7 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/ledger"
-	"github.com/talksasa/talksasa-pay/internal/mpesa"
+	"github.com/talksasa/talksasa-pay/internal/mpesasettings"
 	"github.com/talksasa/talksasa-pay/internal/platform/crypto"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/queue"
@@ -33,10 +33,14 @@ type services struct {
 	ledger    *ledger.Service
 	admin     *admin.Service
 	reporting *reporting.Service
-	// stk is always set; with M-Pesa off it has no Daraja client
-	// (Available() is false) and mpesa is nil.
-	stk   *stk.Service
-	mpesa *mpesa.HTTPClient
+	// stk is always set. Its Daraja client is the settings provider:
+	// Available() follows the paybill saved in the admin panel (or the
+	// TSP_MPESA_* fallback) and is false while M-Pesa is off.
+	stk *stk.Service
+	// mpesaSettings edits the paybill settings; mpesa serves the current
+	// Daraja client and paybill to the api and worker.
+	mpesaSettings *mpesasettings.Service
+	mpesa         *mpesasettings.Provider
 }
 
 func newApp(ctx context.Context, logw io.Writer, component string) (*services, error) {
@@ -61,32 +65,31 @@ func newApp(ctx context.Context, logw io.Writer, component string) (*services, e
 		pool.Close()
 		return nil, err
 	}
-	emitter := events.NewEmitter(apiview.View{PayBaseURL: cfg.Public.PayBaseURL, Paybill: cfg.Public.Paybill}, queue.NewEnqueuer(riverClient))
+	// M-Pesa settings: saved in the admin panel (database) or, failing
+	// that, TSP_MPESA_*. The provider rebuilds the Daraja client on change.
+	settingsLog := logger
+	if component == "admin" {
+		settingsLog = slog.New(slog.DiscardHandler) // CLI commands stay quiet
+	}
+	mpesaSettings := mpesasettings.NewService(mpesasettings.Options{
+		Pool: pool, Keyring: keys, Env: cfg.Env, Mpesa: cfg.Mpesa, Paybill: cfg.Public.Paybill, Logger: settingsLog,
+	})
+	mpesaProvider := mpesasettings.NewProvider(ctx, mpesaSettings, 0)
+	emitter := events.NewEmitter(apiview.View{PayBaseURL: cfg.Public.PayBaseURL, PaybillFrom: mpesaProvider.PaybillShortCode}, queue.NewEnqueuer(riverClient))
 	adminCfg := admin.DefaultConfig()
 	adminCfg.IdleTimeout = cfg.Admin.IdleTimeout
 	adminCfg.AbsoluteTimeout = cfg.Admin.AbsoluteTimeout
 	adminCfg.SetupBaseURL = cfg.Admin.SetupBaseURL
 	pepper := []byte(cfg.Crypto.APIKeyPepper.Reveal())
 	ledgerSvc := ledger.NewService(pool, logger)
-	mc, err := newMpesaClient(cfg, logger, component)
-	if err != nil {
-		pool.Close()
-		return nil, err
-	}
-	stkOpts := stk.Options{
-		Pool: pool, Ledger: ledgerSvc, Events: emitter,
+	stkSvc := stk.NewService(stk.Options{
+		Pool: pool, Ledger: ledgerSvc, Events: emitter, Client: mpesaProvider,
 		Callbacks: queue.NewEnqueuer(riverClient), Logger: logger,
 		QueryAfter: cfg.Mpesa.QueryAfter, GiveUpAfter: cfg.Mpesa.GiveUpAfter,
-	}
-	if mc != nil {
-		// Only a non-nil client: a typed nil would make Available() true.
-		stkOpts.Client = mc
-	}
-	stkSvc := stk.NewService(stkOpts)
-	var prompter charge.Prompter
-	if stkSvc.Available() {
-		prompter = stkSvc
-	}
+	})
+	// Always the STK service: while M-Pesa is off, Send answers
+	// ErrUnavailable and the charge is created without a prompt.
+	var prompter charge.Prompter = stkSvc
 	return &services{
 		cfg:    cfg,
 		logger: logger,
@@ -102,35 +105,10 @@ func newApp(ctx context.Context, logw io.Writer, component string) (*services, e
 		admin:     admin.NewService(admin.Options{Pool: pool, Keyring: keys, Pepper: pepper, Config: adminCfg, Logger: logger}),
 		reporting: reporting.NewService(pool),
 		stk:       stkSvc,
-		mpesa:     mc,
-	}, nil
-}
 
-// newMpesaClient builds the Daraja client when M-Pesa is configured (nil,
-// nil when it is off). Long-running components log which mode they run in;
-// secrets are never logged.
-func newMpesaClient(cfg *config.Config, logger *slog.Logger, component string) (*mpesa.HTTPClient, error) {
-	m := cfg.Mpesa
-	announce := component != "admin" // CLI commands stay quiet
-	if !m.Enabled() {
-		if announce {
-			logger.Info("mpesa: off")
-		}
-		return nil, nil
-	}
-	c, err := mpesa.NewClient(mpesa.ClientOptions{
-		Env: m.Env, BaseURL: m.BaseURL, ShortCode: m.ShortCode,
-		ConsumerKey: m.ConsumerKey, ConsumerSecret: m.ConsumerSecret, Passkey: m.Passkey, CallbackToken: m.CallbackToken,
-		CallbackBaseURL: m.CallbackBaseURL, Timeout: m.RequestTimeout, Logger: logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("mpesa client: %w", err)
-	}
-	if announce {
-		logger.Info("mpesa: enabled", slog.String("env", m.Env), slog.String("shortcode", m.ShortCode),
-			slog.String("callback_base", m.CallbackBaseURL), slog.Int("callback_cidrs", len(m.CallbackCIDRs)))
-	}
-	return c, nil
+		mpesaSettings: mpesaSettings,
+		mpesa:         mpesaProvider,
+	}, nil
 }
 
 func (a *services) close() { a.pool.Close() }
