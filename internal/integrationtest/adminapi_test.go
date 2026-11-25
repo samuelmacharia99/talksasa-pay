@@ -38,10 +38,7 @@ func newAPIEnv(t *testing.T) *apiEnv {
 		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
 		AuthLimiter:    httpx.NewRateLimiter(6000, 6000), // tests exercise auth many times
 	}
-	// TODO(gateway-core): `Ledger: a.ledger` once ledger.Service.AssignToApp lands.
-	if l, ok := any(a.ledger).(adminapi.LedgerService); ok {
-		deps.Ledger = l
-	}
+	deps.Ledger = a.ledger
 	return &apiEnv{
 		adminEnv: a, deps: deps, admin: adminapi.NewRouter(deps),
 		pub: httpapi.NewRouter(httpapi.Deps{Logger: a.logger, Pool: a.db.App, Apps: a.apps, Reporting: rep,

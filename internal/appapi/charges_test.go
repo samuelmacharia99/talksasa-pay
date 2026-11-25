@@ -612,7 +612,6 @@ func TestChargeRoutesWithoutService(t *testing.T) {
 // TestChargesRealService runs the /v1 charge routes against the real
 // charge service and database (no M-Pesa).
 func TestChargesRealService(t *testing.T) {
-	t.Skip("needs agent-1 money core")
 	e := newEnv(t, nil, func(d *appapi.Deps) {
 		d.Charges = charge.NewService(charge.Options{Pool: d.Pool, Events: events.NewEmitter(d.View, nil), Logger: d.Logger})
 	})

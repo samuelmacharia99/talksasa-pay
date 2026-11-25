@@ -1,8 +1,3 @@
-//go:build gatewaycore
-
-// TODO(gateway-core): drop the build tag once ledger.Service.AssignToApp and
-// Reverse land (they are stubs on the gateway foundation).
-
 package integrationtest
 
 import (

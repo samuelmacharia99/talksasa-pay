@@ -9,8 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/talksasa/talksasa-pay/internal/apiview"
 	"github.com/talksasa/talksasa-pay/internal/app"
 	"github.com/talksasa/talksasa-pay/internal/audit"
+	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/platform/crypto"
 	"github.com/talksasa/talksasa-pay/internal/testutil/testdb"
 )
@@ -27,7 +29,7 @@ func TestSeedDemo(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	a := &services{pool: d.App, logger: logger, apps: app.NewService(app.Options{
 		Pool: d.App, Keyring: kr, APIKeyPepper: []byte(strings.Repeat("p", 40)), Logger: logger,
-	})}
+	}), events: events.NewEmitter(apiview.View{PayBaseURL: "http://pay.test/"}, nil)}
 	actor := audit.CLI("seed-test")
 
 	var out bytes.Buffer

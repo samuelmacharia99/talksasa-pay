@@ -17,6 +17,7 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/accountref"
 	"github.com/talksasa/talksasa-pay/internal/app"
 	"github.com/talksasa/talksasa-pay/internal/audit"
+	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/ledger"
 	"github.com/talksasa/talksasa-pay/internal/money"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
@@ -113,7 +114,7 @@ func seedDemo(ctx context.Context, a *services, actor audit.Actor, w io.Writer) 
 
 	err := db.WithTx(ctx, a.pool, actor.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
 		for _, dc := range demoCharges {
-			if err := seedCharge(ctx, q, apps[dc.prefix], dc); err != nil {
+			if err := seedCharge(ctx, q, a.events, apps[dc.prefix], dc); err != nil {
 				return fmt.Errorf("seed %s: %w", dc.ref, err)
 			}
 		}
@@ -145,7 +146,7 @@ func seedDemo(ctx context.Context, a *services, actor audit.Actor, w io.Writer) 
 
 func seedKey(ref string) string { return "seed-demo-" + ref }
 
-func seedCharge(ctx context.Context, q *store.Queries, ap app.App, dc demoCharge) error {
+func seedCharge(ctx context.Context, q *store.Queries, em *events.Emitter, ap app.App, dc demoCharge) error {
 	acct, err := accountref.Generate(ap.AccountPrefix)
 	if err != nil {
 		return err
@@ -191,8 +192,7 @@ func seedCharge(ctx context.Context, q *store.Queries, ap app.App, dc demoCharge
 		if err != nil {
 			return err
 		}
-		// TODO(gateway-core): ledger.SucceedCharge once it lands.
-		_, err = q.MarkChargeSucceeded(ctx, store.MarkChargeSucceededParams{TransactionID: &txn.ID, ID: c.ID})
+		_, err = ledger.SucceedCharge(ctx, q, em, c.ID, txn.ID)
 		return err
 	}
 
@@ -249,8 +249,7 @@ func seedCharge(ctx context.Context, q *store.Queries, ap app.App, dc demoCharge
 		if err := finish(store.StkPushStatusSucceeded, "0", "The service request is processed successfully."); err != nil {
 			return err
 		}
-		// TODO(gateway-core): ledger.SucceedCharge once it lands.
-		_, err = q.MarkChargeSucceeded(ctx, store.MarkChargeSucceededParams{TransactionID: &paid.ID, ID: c.ID})
+		_, err = ledger.SucceedCharge(ctx, q, em, c.ID, paid.ID)
 		return err
 	}
 	return fmt.Errorf("unknown demo state %d", dc.state)

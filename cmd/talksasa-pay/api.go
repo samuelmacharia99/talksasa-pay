@@ -52,7 +52,7 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 	adminHandler := adminapi.NewRouter(adminapi.Deps{
 		Logger: a.logger.With(slog.String("listener", "admin")), Admin: a.admin, Apps: a.apps, Reporting: a.reporting,
 		Metrics: metrics.NewHTTP(reg, "admin"), TrustedProxies: a.cfg.TrustedProxies, MaxBodyBytes: 64 << 10,
-		Webhooks: webhook.NewDeliveries(a.pool, a.river), STK: a.stk, Ledger: adminLedger(a.ledger),
+		Webhooks: webhook.NewDeliveries(a.pool, a.river), STK: a.stk, Ledger: a.ledger,
 	})
 	adminSrv := httpx.NewServer(a.cfg.Admin.Addr, adminHandler, a.cfg.HTTP, a.logger)
 

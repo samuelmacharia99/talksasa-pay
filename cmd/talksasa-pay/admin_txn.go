@@ -2,33 +2,17 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/google/uuid"
 
-	"github.com/talksasa/talksasa-pay/internal/adminapi"
 	"github.com/talksasa/talksasa-pay/internal/audit"
 	"github.com/talksasa/talksasa-pay/internal/ledger"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/store"
 )
-
-// adminLedger returns the ledger as the admin API and CLI use it, or nil
-// when this build's ledger cannot assign payments yet.
-//
-// TODO(gateway-core): once ledger.Service.AssignToApp lands this is just
-// `return l` (and can be inlined).
-func adminLedger(l *ledger.Service) adminapi.LedgerService {
-	if s, ok := any(l).(adminapi.LedgerService); ok {
-		return s
-	}
-	return nil
-}
-
-var errNoLedger = errors.New("this build cannot assign payments yet (ledger.AssignToApp is missing)")
 
 // txnAssign routes an unmatched payment (unknown account prefix) to an app.
 // The app then gets payment.received. Audited with the operator and reason.
@@ -54,11 +38,7 @@ func txnAssign(ctx context.Context, a *services, actor audit.Actor, txnRef, appR
 	if err != nil {
 		return fmt.Errorf("--app %q: %w", appRef, err)
 	}
-	l := adminLedger(a.ledger)
-	if l == nil {
-		return errNoLedger
-	}
-	txn, err := l.AssignToApp(ctx, actor, id, ap.ID, strings.TrimSpace(reason))
+	txn, err := a.ledger.AssignToApp(ctx, actor, id, ap.ID, strings.TrimSpace(reason))
 	if err != nil {
 		return err
 	}
