@@ -123,13 +123,20 @@ func seedDemo(ctx context.Context, a *services, actor audit.Actor, w io.Writer) 
 			return err
 		}
 		// Paybill money with no waiting charge: forwarded to the app as
-		// payment.received (the app decides what it pays).
-		if _, err := seedC2B(ctx, q, ptr(apps["HOST"].ID), nil, "HOST-9ZZZ", 1750); err != nil {
-			return err
-		}
-		// Money for a suspended app: still recorded (money rule 8).
-		if _, err := seedC2B(ctx, q, ptr(apps["SMS"].ID), nil, "SMS-1042", 300); err != nil {
-			return err
+		// payment.received (the app decides what it pays). Money for a
+		// suspended app is still recorded and forwarded (money rule 8).
+		for _, f := range []struct {
+			prefix, account string
+			amount          int64
+		}{{"HOST", "HOST-9ZZZ", 1750}, {"SMS", "SMS-1042", 300}} {
+			id := apps[f.prefix].ID
+			txn, err := seedC2B(ctx, q, &id, nil, f.account, f.amount)
+			if err != nil {
+				return err
+			}
+			if err := a.events.EmitPaymentReceived(ctx, q, id, txn.ID, nil); err != nil {
+				return err
+			}
 		}
 		// Unknown prefix: held unmatched until staff assign it.
 		_, err := seedC2B(ctx, q, nil, nil, "ACME-77", 4200)

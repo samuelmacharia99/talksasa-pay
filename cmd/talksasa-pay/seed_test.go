@@ -62,6 +62,13 @@ func TestSeedDemo(t *testing.T) {
 		`SELECT count(*) FROM charges c JOIN transactions t ON t.id = c.transaction_id
 		  WHERE c.status = 'succeeded' AND t.status = 'succeeded' AND t.amount = c.amount
 		    AND t.provider_transaction_id IS NOT NULL`: 4,
+		// Every succeeded payment routed to an app was announced to it
+		// (cmd/loadtest/invariants.sql money_without_event).
+		`SELECT count(*) FROM transactions t
+		  WHERE t.kind = 'payment' AND t.status = 'succeeded' AND t.app_id IS NOT NULL
+		    AND NOT EXISTS (SELECT 1 FROM events e WHERE e.app_id = t.app_id AND e.subject_id IN (t.id, t.charge_id)
+		      AND ((e.type = 'payment.received' AND e.data->>'id' = t.id::text)
+		        OR (e.type = 'charge.succeeded' AND e.data->>'transaction_id' = t.id::text)))`: 0,
 	} {
 		if got := count(sql); got != want {
 			t.Errorf("%s: %d, want %d", sql, got, want)

@@ -270,6 +270,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	if cfg.check && cfg.concurrency > 0 {
 		fmt.Fprintln(stdout, "\ninvariants (this run, via /v1):")
+		// The checks read every charge of the run, so they too meet the
+		// per-key rate limit: wait out 429s instead of failing on them.
+		client.retries = max(client.retries, 20)
 		v, err := apiInvariants(ctx, client, expect, feedStart, runStart, cfg.settle)
 		if err != nil {
 			fmt.Fprintln(stdout, "FAIL: invariant checks:", err)

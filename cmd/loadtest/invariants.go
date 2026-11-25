@@ -198,7 +198,9 @@ func apiInvariants(ctx context.Context, c *apiClient, rc *runCharges, feedStart 
 		}
 	}
 	for _, t := range txns {
-		if t.Kind == "payment" && t.Status == "succeeded" && !told[t.ID] {
+		// Only this run's money: transactions are listed from a minute
+		// earlier (clock skew), but the feed is read from the run's start.
+		if t.Kind == "payment" && t.Status == "succeeded" && !told[t.ID] && !t.CreatedAt.Before(runStart) {
 			v.add("money_event", t.ID)
 		}
 	}

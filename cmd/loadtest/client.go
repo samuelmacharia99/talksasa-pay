@@ -82,16 +82,17 @@ type (
 		ResultCode *string `json:"result_code"`
 	}
 	Transaction struct {
-		ID                string  `json:"id"`
-		Kind              string  `json:"kind"`
-		Direction         string  `json:"direction"`
-		Channel           string  `json:"channel"`
-		Status            string  `json:"status"`
-		Amount            int64   `json:"amount"`
-		Receipt           *string `json:"receipt"`
-		AccountNumber     *string `json:"account_number"`
-		ChargeID          *string `json:"charge_id"`
-		DuplicateOfCharge *string `json:"duplicate_of_charge"`
+		ID                string    `json:"id"`
+		Kind              string    `json:"kind"`
+		Direction         string    `json:"direction"`
+		Channel           string    `json:"channel"`
+		Status            string    `json:"status"`
+		Amount            int64     `json:"amount"`
+		Receipt           *string   `json:"receipt"`
+		AccountNumber     *string   `json:"account_number"`
+		ChargeID          *string   `json:"charge_id"`
+		DuplicateOfCharge *string   `json:"duplicate_of_charge"`
+		CreatedAt         time.Time `json:"created_at"`
 	}
 	Page[T any] struct {
 		Data       []T     `json:"data"`

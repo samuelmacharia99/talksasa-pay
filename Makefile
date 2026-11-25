@@ -63,7 +63,7 @@ image: ## build the production image
 
 # Admin CLI against the local database, e.g.
 #   make admin ARGS='product create --name "Cloud Hosting" --prefix HOST --actor "Jane"'
-admin: ## run an admin command: make admin ARGS='product list'
+admin: ## run an admin command: make admin ARGS='app list'
 	TSP_ENV=development TSP_DATABASE_URL_FILE=$(SECRETS)/database_url TSP_MASTER_KEYS_FILE=$(SECRETS)/master_keys \
 	TSP_API_KEY_PEPPER_FILE=$(SECRETS)/api_key_pepper $(GO) run ./cmd/talksasa-pay admin $(ARGS)
 
