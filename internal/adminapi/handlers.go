@@ -508,27 +508,6 @@ func (h *handlers) listUnmatched(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, mapPage(page, toTxnRow))
 }
 
-// notImplemented answers admin routes whose behaviour has not landed yet.
-// TODO(gateway-core): remove once assign and reverse are implemented.
-func notImplemented(w http.ResponseWriter, r *http.Request) {
-	httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusNotImplemented, "not_implemented", "This endpoint is not implemented yet."))
-}
-
-// assignTransaction: POST /transactions/{id}/assign {app_id, reason}. Staff
-// route an unmatched payment to an app (audited); the app then gets
-// payment.received.
-func (h *handlers) assignTransaction(w http.ResponseWriter, r *http.Request) {
-	// TODO(gateway-core): AssignTransactionApp + EmitPaymentReceived + audit.
-	notImplemented(w, r)
-}
-
-// reverseTransaction: POST /transactions/{id}/reverse {reason}. Admin only
-// (money rule 9): ledger.Service.Reverse.
-func (h *handlers) reverseTransaction(w http.ResponseWriter, r *http.Request) {
-	// TODO(gateway-core): call ledger.Service.Reverse.
-	notImplemented(w, r)
-}
-
 func firstErr(errs ...error) error {
 	for _, e := range errs {
 		if e != nil {

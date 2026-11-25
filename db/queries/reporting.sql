@@ -70,7 +70,7 @@ SELECT t.id, t.channel, t.status, t.amount, t.provider_transaction_id, t.phone, 
  LIMIT @lim;
 
 -- name: GetTransactionAdmin :one
-SELECT t.*, a.account_prefix, a.name AS app_name, c.reference AS charge_reference
+SELECT t.*, a.account_prefix, a.name AS app_name, a.status AS app_status, c.reference AS charge_reference
   FROM transactions t
   LEFT JOIN apps a ON a.id = t.app_id
   LEFT JOIN charges c ON c.id = t.charge_id
