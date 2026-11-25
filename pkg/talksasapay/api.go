@@ -51,39 +51,10 @@ func requireID(what, v string) error {
 	return nil
 }
 
-// Whoami returns the product the API key belongs to.
+// Whoami returns the app the API key belongs to.
 func (c *Client) Whoami(ctx context.Context) (*WhoAmI, error) {
 	var out WhoAmI
 	if _, err := c.do(ctx, request{method: http.MethodGet, path: "/whoami"}, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-// UpsertPayer creates or updates the payer keyed by your externalRef.
-// created is true when the payer was new (201). Safe to retry.
-func (c *Client) UpsertPayer(ctx context.Context, externalRef string, in PayerInput) (payer *Payer, created bool, err error) {
-	if err := requireID("external_ref", externalRef); err != nil {
-		return nil, false, err
-	}
-	if in.Phones == nil {
-		in.Phones = []string{}
-	}
-	var out Payer
-	resp, err := c.do(ctx, request{method: http.MethodPut, path: "/payers/" + pathSegment(externalRef), body: in}, &out)
-	if err != nil {
-		return nil, false, err
-	}
-	return &out, resp.status == http.StatusCreated, nil
-}
-
-// GetPayer returns a payer, including its credit balance.
-func (c *Client) GetPayer(ctx context.Context, externalRef string) (*Payer, error) {
-	if err := requireID("external_ref", externalRef); err != nil {
-		return nil, err
-	}
-	var out Payer
-	if _, err := c.do(ctx, request{method: http.MethodGet, path: "/payers/" + pathSegment(externalRef)}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -96,47 +67,85 @@ func NewIdempotencyKey() string {
 	return "tspgo_" + hex.EncodeToString(b[:])
 }
 
-// CreatePaymentRequest asks a payer to pay. replayed is true when the server
-// returned an earlier identical request for the same idempotency key (200).
-// Any credit the payer holds is applied at once, so the result may already
-// be partially_paid or paid.
-func (c *Client) CreatePaymentRequest(ctx context.Context, in PaymentRequestInput) (pr *PaymentRequest, replayed bool, err error) {
-	key := in.IdempotencyKey
-	if key == "" {
-		key = NewIdempotencyKey()
+func idemKey(given string) (string, error) {
+	if given == "" {
+		return NewIdempotencyKey(), nil
 	}
-	if len(key) > 255 {
-		return nil, false, invalid("idempotency key longer than 255 characters")
+	if len(given) > 255 {
+		return "", invalid("idempotency key longer than 255 characters")
 	}
-	var out PaymentRequest
-	resp, err := c.do(ctx, request{method: http.MethodPost, path: "/payment-requests", body: in, idemKey: key}, &out)
+	for _, r := range given {
+		if r < 0x20 || r == 0x7f {
+			return "", invalid("idempotency key contains control characters")
+		}
+	}
+	return given, nil
+}
+
+func checkPhone(phone string) (string, error) {
+	phone = strings.TrimSpace(phone)
+	if phone == "" || len(phone) > 20 {
+		return "", invalid("phone must be 1-20 characters")
+	}
+	return phone, nil
+}
+
+// CreateCharge creates a pending charge for exactly in.Amount KES. The
+// result carries CheckoutURL (a hosted pay page) and Paybill (manual M-Pesa
+// instructions). With in.Phone the first prompt is sent at once and
+// returned as LatestSTKPush; the charge is created even if that prompt
+// fails (LatestSTKPush is then the failed push, or nil when M-Pesa is
+// unavailable).
+//
+// The call always carries an Idempotency-Key (in.IdempotencyKey, or a
+// random one per call) and its automatic retries reuse it, so one call
+// creates at most one charge. replayed is true when the server returned the
+// charge of an earlier call with the same key. A charge with the same
+// reference fails with duplicate_reference.
+func (c *Client) CreateCharge(ctx context.Context, in ChargeInput) (charge *Charge, replayed bool, err error) {
+	key, err := idemKey(in.IdempotencyKey)
+	if err != nil {
+		return nil, false, err
+	}
+	if in.Phone != "" {
+		if in.Phone, err = checkPhone(in.Phone); err != nil {
+			return nil, false, err
+		}
+	}
+	if in.ExpiresIn%time.Second != 0 {
+		return nil, false, invalid("ExpiresIn must be whole seconds")
+	}
+	var out Charge
+	resp, err := c.do(ctx, request{method: http.MethodPost, path: "/charges", body: in, idemKey: key}, &out)
 	if err != nil {
 		return nil, false, err
 	}
 	return &out, resp.status == http.StatusOK || resp.header.Get("Idempotent-Replayed") == "true", nil
 }
 
-// GetPaymentRequest returns one payment request.
-func (c *Client) GetPaymentRequest(ctx context.Context, id string) (*PaymentRequest, error) {
+// GetCharge returns one charge with its latest prompt.
+func (c *Client) GetCharge(ctx context.Context, id string) (*Charge, error) {
 	if err := requireID("id", id); err != nil {
 		return nil, err
 	}
-	var out PaymentRequest
-	if _, err := c.do(ctx, request{method: http.MethodGet, path: "/payment-requests/" + pathSegment(id)}, &out); err != nil {
+	var out Charge
+	if _, err := c.do(ctx, request{method: http.MethodGet, path: "/charges/" + pathSegment(id)}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-// CancelPaymentRequest cancels an open request with nothing paid on it.
-// Idempotent (cancelling a cancelled request returns it), so it is retried
-// like a GET. A request with money on it fails with not_cancellable.
-func (c *Client) CancelPaymentRequest(ctx context.Context, id string) (*PaymentRequest, error) {
+// CancelCharge cancels a pending charge (charge.cancelled). Idempotent
+// (cancelling a cancelled charge returns it), so it is retried like a GET.
+// A charge that is not pending fails with not_cancellable. A prompt already
+// on the phone is not withdrawn: if the customer still pays, the charge
+// succeeds (late money is never dropped).
+func (c *Client) CancelCharge(ctx context.Context, id string) (*Charge, error) {
 	if err := requireID("id", id); err != nil {
 		return nil, err
 	}
-	var out PaymentRequest
-	r := request{method: http.MethodPost, path: "/payment-requests/" + pathSegment(id) + "/cancel", idempotent: true}
+	var out Charge
+	r := request{method: http.MethodPost, path: "/charges/" + pathSegment(id) + "/cancel", idempotent: true}
 	if _, err := c.do(ctx, r, &out); err != nil {
 		return nil, err
 	}
@@ -144,35 +153,33 @@ func (c *Client) CancelPaymentRequest(ctx context.Context, id string) (*PaymentR
 }
 
 // STKPush sends an M-Pesa payment prompt to phone (07XXXXXXXX, 01XXXXXXXX,
-// 2547XXXXXXXX or +2547XXXXXXXX) for the request's full outstanding balance.
-// replayed is true when the server returned the push of an earlier call with
-// the same idempotency key.
+// 2547XXXXXXXX or +2547XXXXXXXX) for the charge's exact amount. replayed is
+// true when the server returned the push of an earlier call with the same
+// idempotency key.
 //
 // The call always carries an Idempotency-Key, and its automatic retries
-// (network errors, 429, 503 overloaded/timeout) reuse it, so one call sends
-// at most one prompt. 409 stk_in_progress / not_payable / amount_too_large,
-// 503 mpesa_unavailable and 502 mpesa_error are returned at once (check with
-// IsCode). The outcome arrives as stk_push.* events; the bill is paid only
-// when payment_request.paid arrives.
-func (c *Client) STKPush(ctx context.Context, requestID, phone string, opts STKPushOptions) (push *STKPush, replayed bool, err error) {
-	if err := requireID("payment request id", requestID); err != nil {
+// (network errors, 429, 503 overloaded/busy/timeout) reuse it, so one call
+// sends at most one prompt. 409 stk_in_progress / not_payable /
+// amount_too_large, 503 mpesa_unavailable and 502 mpesa_error are returned
+// at once (check with IsCode). The outcome arrives as stk_push.* events; the
+// charge is paid only when charge.succeeded arrives. A failed prompt leaves
+// the charge pending: prompt again with a new key.
+func (c *Client) STKPush(ctx context.Context, chargeID, phone string, opts STKPushOptions) (push *STKPush, replayed bool, err error) {
+	if err := requireID("charge id", chargeID); err != nil {
 		return nil, false, err
 	}
-	phone = strings.TrimSpace(phone)
-	if phone == "" || len(phone) > 20 {
-		return nil, false, invalid("phone must be 1-20 characters")
+	phone, err = checkPhone(phone)
+	if err != nil {
+		return nil, false, err
 	}
-	key := opts.IdempotencyKey
-	if key == "" {
-		key = NewIdempotencyKey()
-	}
-	if len(key) > 255 {
-		return nil, false, invalid("idempotency key longer than 255 characters")
+	key, err := idemKey(opts.IdempotencyKey)
+	if err != nil {
+		return nil, false, err
 	}
 	var out STKPush
 	r := request{
 		method:  http.MethodPost,
-		path:    "/payment-requests/" + pathSegment(requestID) + "/stk-push",
+		path:    "/charges/" + pathSegment(chargeID) + "/stk-push",
 		body:    map[string]string{"phone": phone},
 		idemKey: key,
 	}
@@ -195,20 +202,18 @@ func (c *Client) GetSTKPush(ctx context.Context, id string) (*STKPush, error) {
 	return &out, nil
 }
 
-// ListPaymentRequestsParams filters ListPaymentRequests. Zero values are omitted.
-type ListPaymentRequestsParams struct {
-	Status    string // open | partially_paid | paid | cancelled | expired
-	Reference string
-	Payer     string // payer external_ref
+// ListChargesParams filters ListCharges. Zero values are omitted.
+type ListChargesParams struct {
+	Status    string // ChargePending ... ChargeReversed
+	Reference string // exact reference
 	Cursor    string // start after this page cursor
 	Limit     int    // page size 1..200 (server default 50)
 }
 
-func (p ListPaymentRequestsParams) query() url.Values {
+func (p ListChargesParams) query() url.Values {
 	q := url.Values{}
 	setNonEmpty(q, "status", p.Status)
 	setNonEmpty(q, "reference", p.Reference)
-	setNonEmpty(q, "payer", p.Payer)
 	setNonEmpty(q, "cursor", p.Cursor)
 	if p.Limit > 0 {
 		q.Set("limit", strconv.Itoa(p.Limit))
@@ -216,30 +221,30 @@ func (p ListPaymentRequestsParams) query() url.Values {
 	return q
 }
 
-// ListPaymentRequestsPage returns one page, newest first.
-func (c *Client) ListPaymentRequestsPage(ctx context.Context, p ListPaymentRequestsParams) (*Page[PaymentRequest], error) {
-	var out Page[PaymentRequest]
-	if _, err := c.do(ctx, request{method: http.MethodGet, path: "/payment-requests", query: p.query()}, &out); err != nil {
+// ListChargesPage returns one page of charges, newest first.
+func (c *Client) ListChargesPage(ctx context.Context, p ListChargesParams) (*Page[Charge], error) {
+	var out Page[Charge]
+	if _, err := c.do(ctx, request{method: http.MethodGet, path: "/charges", query: p.query()}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-// ListPaymentRequests iterates over every matching request, newest first,
-// fetching pages as needed. Iteration stops after the first error.
+// ListCharges iterates over every matching charge, newest first, fetching
+// pages as needed. Iteration stops after the first error.
 //
-//	for pr, err := range c.ListPaymentRequests(ctx, talksasapay.ListPaymentRequestsParams{Status: "open"}) {
+//	for ch, err := range c.ListCharges(ctx, talksasapay.ListChargesParams{Status: talksasapay.ChargePending}) {
 //		if err != nil { return err }
 //		...
 //	}
-func (c *Client) ListPaymentRequests(ctx context.Context, p ListPaymentRequestsParams) iter.Seq2[PaymentRequest, error] {
-	return paginate(p.Cursor, func(cursor string) (*Page[PaymentRequest], error) {
+func (c *Client) ListCharges(ctx context.Context, p ListChargesParams) iter.Seq2[Charge, error] {
+	return paginate(p.Cursor, func(cursor string) (*Page[Charge], error) {
 		p.Cursor = cursor
-		return c.ListPaymentRequestsPage(ctx, p)
+		return c.ListChargesPage(ctx, p)
 	})
 }
 
-// GetTransaction returns one transaction and where its money went.
+// GetTransaction returns one transaction.
 func (c *Client) GetTransaction(ctx context.Context, id string) (*Transaction, error) {
 	if err := requireID("id", id); err != nil {
 		return nil, err
@@ -253,15 +258,15 @@ func (c *Client) GetTransaction(ctx context.Context, id string) (*Transaction, e
 
 // ListTransactionsParams filters ListTransactions. Zero values are omitted.
 type ListTransactionsParams struct {
-	Payer  string // payer external_ref
-	Since  time.Time
-	Cursor string
-	Limit  int
+	ChargeID string // only the money for this charge
+	Since    time.Time
+	Cursor   string
+	Limit    int
 }
 
 func (p ListTransactionsParams) query() url.Values {
 	q := url.Values{}
-	setNonEmpty(q, "payer", p.Payer)
+	setNonEmpty(q, "charge_id", p.ChargeID)
 	if !p.Since.IsZero() {
 		q.Set("since", p.Since.UTC().Format(time.RFC3339Nano))
 	}

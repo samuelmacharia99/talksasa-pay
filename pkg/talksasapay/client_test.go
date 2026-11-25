@@ -95,31 +95,34 @@ func newTestClient(t *testing.T, f *fake, opts ...Option) (*Client, *[]time.Dura
 	return c, slept
 }
 
-var samplePR = map[string]any{
-	"object": "payment_request", "id": "0193a5f2-0000-7000-8000-000000000001", "reference": "INV-1",
-	"description": "Hosting", "currency": "KES", "amount": 1500, "amount_paid": 0, "outstanding": 1500,
-	"status": "open", "payer": map[string]any{"external_ref": "cust/1", "account_number": "HOST-1042"},
-	"pay_url": "https://pay.example/abc", "paybill": map[string]any{"business_number": "123456", "account_number": "HOST-1042"},
-	"expires_at": nil, "created_at": "2026-11-24T10:00:00Z", "updated_at": "2026-11-24T10:00:00Z",
-	"paid_at": nil, "closed_at": nil, "future_field": map[string]any{"x": 1},
-}
+const testChargeID = "0193a5f2-0000-7000-8000-000000000001"
 
-var samplePayer = map[string]any{
-	"object": "payer", "id": "0193a5f2-0000-7000-8000-000000000009", "external_ref": "cust/1", "account_number": "HOST-1042",
-	"display_name": "Jane", "email": nil, "phones": []string{"0712***678"}, "status": "active", "credit_balance": 200,
-	"created_at": "2026-11-24T10:00:00Z", "updated_at": "2026-11-24T10:00:00Z",
+var sampleCharge = map[string]any{
+	"object": "charge", "id": testChargeID, "reference": "INV-1", "amount": 1500, "currency": "KES",
+	"description": "Hosting", "metadata": map[string]any{"invoice_id": 42}, "account_number": "HOST-4K7QZ9M",
+	"status": "pending", "checkout_url": "https://pay.example/c/abc",
+	"paybill":    map[string]any{"business_number": "123456", "account_number": "HOST-4K7QZ9M"},
+	"expires_at": "2026-11-25T10:00:00Z", "succeeded_at": nil, "transaction_id": nil, "latest_stk_push": nil,
+	"created_at": "2026-11-24T10:00:00Z", "updated_at": "2026-11-24T10:00:00Z", "future_field": map[string]any{"x": 1},
 }
 
 var sampleTxn = map[string]any{
 	"object": "transaction", "id": "0193a5f2-0000-7000-8000-00000000000a", "kind": "payment", "direction": "in",
-	"channel": "mpesa_c2b", "status": "succeeded", "amount": 2000, "currency": "KES", "receipt": "TKA1B2C3D4",
-	"phone": "0712***678", "payer": map[string]any{"external_ref": "cust/1", "account_number": "HOST-1042"},
-	"payment_request_id": nil, "reverses_transaction_id": nil,
-	"allocations": []map[string]any{
-		{"payment_request_id": "0193a5f2-0000-7000-8000-000000000001", "amount": 1500, "kind": "payment"},
-		{"payment_request_id": nil, "amount": 500, "kind": "payment"},
-	},
+	"channel": "mpesa_stk", "status": "succeeded", "amount": 1500, "currency": "KES", "receipt": "TKA1B2C3D4",
+	"phone": "0712***678", "account_number": "HOST-4K7QZ9M", "charge_id": testChargeID, "reverses_transaction_id": nil,
 	"occurred_at": "2026-11-24T10:01:00Z", "created_at": "2026-11-24T10:01:01Z", "completed_at": "2026-11-24T10:01:02Z",
+}
+
+// with returns a copy of m with the given keys replaced.
+func with(m map[string]any, kv ...any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		out[kv[i].(string)] = kv[i+1]
+	}
+	return out
 }
 
 func checkCommon(t *testing.T, r recorded, method, path string) {
@@ -178,13 +181,13 @@ func TestNew(t *testing.T) {
 }
 
 func TestWhoami(t *testing.T) {
-	f := newFake(t, jsonResp(200, map[string]any{"product_id": "p1", "product_name": "Cloud Hosting", "account_prefix": "HOST", "key_id": "abc123", "extra": true}))
+	f := newFake(t, jsonResp(200, map[string]any{"app_id": "a1", "app_name": "Cloud Hosting", "account_prefix": "HOST", "key_id": "abc123", "extra": true}))
 	c, _ := newTestClient(t, f, WithUserAgent("hosting/1.0"))
 	w, err := c.Whoami(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.ProductName != "Cloud Hosting" || w.AccountPrefix != "HOST" || w.KeyID != "abc123" {
+	if w.AppID != "a1" || w.AppName != "Cloud Hosting" || w.AccountPrefix != "HOST" || w.KeyID != "abc123" {
 		t.Fatalf("%+v", w)
 	}
 	r := f.requests()[0]
@@ -194,73 +197,39 @@ func TestWhoami(t *testing.T) {
 	}
 }
 
-func TestUpsertAndGetPayerEscapesExternalRef(t *testing.T) {
-	f := newFake(t, jsonResp(201, samplePayer), jsonResp(200, samplePayer), jsonResp(200, samplePayer))
-	c, _ := newTestClient(t, f)
-	ctx := context.Background()
-	email := "jane@example.com"
-	p, created, err := c.UpsertPayer(ctx, "cust/1 ?#%", PayerInput{DisplayName: "Jane", Email: &email, Phones: []string{"0712345678"}})
-	if err != nil || !created {
-		t.Fatalf("created=%v err=%v", created, err)
-	}
-	if p.AccountNumber != "HOST-1042" || p.CreditBalance != 200 || p.CreatedAt.IsZero() || p.Email != nil {
-		t.Fatalf("%+v", p)
-	}
-	_, created, err = c.UpsertPayer(ctx, "..", PayerInput{DisplayName: "Jane"})
-	if err != nil || created {
-		t.Fatalf("created=%v err=%v", created, err)
-	}
-	if _, err := c.GetPayer(ctx, "ü"); err != nil {
-		t.Fatal(err)
-	}
-	reqs := f.requests()
-	checkCommon(t, reqs[0], "PUT", "/v1/payers/cust%2F1%20%3F%23%25")
-	if reqs[0].Body != `{"display_name":"Jane","email":"jane@example.com","phones":["0712345678"]}` {
-		t.Fatalf("body %s", reqs[0].Body)
-	}
-	if reqs[0].Header.Get("Idempotency-Key") != "" {
-		t.Fatal("PUT should not carry an Idempotency-Key")
-	}
-	checkCommon(t, reqs[1], "PUT", "/v1/payers/%2E%2E")
-	if reqs[1].Body != `{"display_name":"Jane","email":null,"phones":[]}` {
-		t.Fatalf("body %s", reqs[1].Body)
-	}
-	checkCommon(t, reqs[2], "GET", "/v1/payers/%C3%BC")
-
-	if _, _, err := c.UpsertPayer(ctx, "", PayerInput{}); !errors.Is(err, ErrInvalidArgument) {
-		t.Fatalf("empty ref: %v", err)
-	}
-	if len(f.requests()) != 3 {
-		t.Fatal("invalid argument still sent a request")
-	}
-}
-
-func TestCreatePaymentRequest(t *testing.T) {
+func TestCreateCharge(t *testing.T) {
 	replay := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Idempotent-Replayed", "true")
-		jsonResp(200, samplePR)(w, r)
+		jsonResp(200, sampleCharge)(w, r)
 	}
-	f := newFake(t, jsonResp(201, samplePR), replay, jsonResp(201, samplePR))
+	withPush := with(sampleCharge, "latest_stk_push", sampleSTK)
+	f := newFake(t, jsonResp(201, withPush), replay, jsonResp(201, sampleCharge))
 	c, _ := newTestClient(t, f)
 	ctx := context.Background()
-	exp := time.Date(2026, 12, 31, 21, 0, 0, 0, time.FixedZone("EAT", 3*3600))
-	in := PaymentRequestInput{Payer: "cust/1", Reference: "INV-1", Description: "Hosting", Amount: 1500, ExpiresAt: &exp, IdempotencyKey: "INV-1-v1"}
-	pr, replayed, err := c.CreatePaymentRequest(ctx, in)
+	in := ChargeInput{
+		Amount: 1500, Reference: "INV-1", Description: "Hosting", Phone: " 0712345678 ", AccountNumber: "HOST-1042",
+		Metadata: map[string]any{"invoice_id": 42}, ExpiresIn: time.Hour, IdempotencyKey: "INV-1-v1",
+	}
+	ch, replayed, err := c.CreateCharge(ctx, in)
 	if err != nil || replayed {
 		t.Fatalf("replayed=%v err=%v", replayed, err)
 	}
-	if pr.Amount != 1500 || pr.Outstanding != 1500 || pr.Paybill == nil || pr.Payer.AccountNumber != "HOST-1042" || pr.ExpiresAt != nil {
-		t.Fatalf("%+v", pr)
+	if ch.Amount != 1500 || !ch.Pending() || ch.Succeeded() || ch.Paybill == nil || ch.AccountNumber != "HOST-4K7QZ9M" ||
+		ch.CheckoutURL != "https://pay.example/c/abc" || ch.Metadata["invoice_id"] != float64(42) || *ch.Description != "Hosting" ||
+		ch.TransactionID != nil || ch.SucceededAt != nil || ch.ExpiresAt.IsZero() {
+		t.Fatalf("%+v", ch)
 	}
-	if _, replayed, err = c.CreatePaymentRequest(ctx, in); err != nil || !replayed {
+	if ch.LatestSTKPush == nil || ch.LatestSTKPush.ChargeID != testChargeID || !ch.LatestSTKPush.Pending() {
+		t.Fatalf("latest push %+v", ch.LatestSTKPush)
+	}
+	if _, replayed, err = c.CreateCharge(ctx, in); err != nil || !replayed {
 		t.Fatalf("replayed=%v err=%v", replayed, err)
 	}
-	in.IdempotencyKey, in.ExpiresAt = "", nil
-	if _, _, err := c.CreatePaymentRequest(ctx, in); err != nil {
+	if _, _, err := c.CreateCharge(ctx, ChargeInput{Amount: 10, Reference: "r"}); err != nil {
 		t.Fatal(err)
 	}
 	reqs := f.requests()
-	checkCommon(t, reqs[0], "POST", "/v1/payment-requests")
+	checkCommon(t, reqs[0], "POST", "/v1/charges")
 	if reqs[0].Header.Get("Idempotency-Key") != "INV-1-v1" {
 		t.Fatalf("key %q", reqs[0].Header.Get("Idempotency-Key"))
 	}
@@ -268,104 +237,141 @@ func TestCreatePaymentRequest(t *testing.T) {
 	if err := json.Unmarshal([]byte(reqs[0].Body), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body["payer"] != "cust/1" || body["amount"] != float64(1500) || body["expires_at"] != "2026-12-31T21:00:00+03:00" || len(body) != 5 {
+	if body["amount"] != float64(1500) || body["reference"] != "INV-1" || body["phone"] != "0712345678" ||
+		body["account_number"] != "HOST-1042" || body["expires_in"] != float64(3600) || body["description"] != "Hosting" ||
+		body["metadata"].(map[string]any)["invoice_id"] != float64(42) || len(body) != 7 {
 		t.Fatalf("body %v", body)
 	}
 	if strings.Contains(reqs[0].Body, "INV-1-v1") {
 		t.Fatal("idempotency key leaked into the body")
 	}
+	if reqs[2].Body != `{"amount":10,"reference":"r"}` {
+		t.Fatalf("minimal body %s", reqs[2].Body)
+	}
 	auto := reqs[2].Header.Get("Idempotency-Key")
 	if !strings.HasPrefix(auto, "tspgo_") || len(auto) != 6+32 {
 		t.Fatalf("auto key %q", auto)
-	}
-	if strings.Contains(reqs[2].Body, "expires_at") {
-		t.Fatalf("nil expires_at sent: %s", reqs[2].Body)
 	}
 	if k1, k2 := NewIdempotencyKey(), NewIdempotencyKey(); k1 == k2 {
 		t.Fatal("keys repeat")
 	}
 }
 
-func TestGetAndCancelPaymentRequest(t *testing.T) {
-	f := newFake(t, jsonResp(200, samplePR))
+func TestCreateChargeValidatesLocally(t *testing.T) {
+	f := newFake(t, jsonResp(201, sampleCharge))
+	c, _ := newTestClient(t, f)
+	for _, in := range []ChargeInput{
+		{Amount: 1, Reference: "r", IdempotencyKey: strings.Repeat("k", 256)},
+		{Amount: 1, Reference: "r", IdempotencyKey: "bad\nkey"},
+		{Amount: 1, Reference: "r", Phone: strings.Repeat("7", 21)},
+		{Amount: 1, Reference: "r", ExpiresIn: 1500 * time.Millisecond},
+	} {
+		if _, _, err := c.CreateCharge(context.Background(), in); !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("%+v: %v", in, err)
+		}
+	}
+	if n := len(f.requests()); n != 0 {
+		t.Fatalf("%d requests sent", n)
+	}
+}
+
+func TestGetAndCancelCharge(t *testing.T) {
+	succeeded := with(sampleCharge, "status", "succeeded", "paybill", nil, "transaction_id", sampleTxn["id"],
+		"succeeded_at", "2026-11-24T10:01:02Z", "latest_stk_push", with(sampleSTK, "status", "succeeded"))
+	f := newFake(t, jsonResp(200, succeeded), jsonResp(200, with(sampleCharge, "status", "cancelled", "paybill", nil)))
 	c, _ := newTestClient(t, f)
 	ctx := context.Background()
-	id := "0193a5f2-0000-7000-8000-000000000001"
-	if _, err := c.GetPaymentRequest(ctx, id); err != nil {
+	ch, err := c.GetCharge(ctx, testChargeID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.CancelPaymentRequest(ctx, id); err != nil {
+	if !ch.Succeeded() || ch.Paybill != nil || *ch.TransactionID != sampleTxn["id"] || ch.SucceededAt == nil || ch.LatestSTKPush.Status != STKSucceeded {
+		t.Fatalf("%+v", ch)
+	}
+	ch, err = c.CancelCharge(ctx, "a/b")
+	if err != nil || ch.Status != ChargeCancelled || ch.Pending() {
+		t.Fatalf("%+v %v", ch, err)
+	}
+	if _, err := c.GetCharge(ctx, ""); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatal(err)
 	}
-	if _, err := c.GetPaymentRequest(ctx, ""); !errors.Is(err, ErrInvalidArgument) {
-		t.Fatal(err)
-	}
-	if _, err := c.CancelPaymentRequest(ctx, "a/b"); err != nil {
+	if _, err := c.CancelCharge(ctx, ""); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatal(err)
 	}
 	reqs := f.requests()
-	checkCommon(t, reqs[0], "GET", "/v1/payment-requests/"+id)
-	checkCommon(t, reqs[1], "POST", "/v1/payment-requests/"+id+"/cancel")
+	if len(reqs) != 2 {
+		t.Fatalf("%d requests", len(reqs))
+	}
+	checkCommon(t, reqs[0], "GET", "/v1/charges/"+testChargeID)
+	checkCommon(t, reqs[1], "POST", "/v1/charges/a%2Fb/cancel")
 	if reqs[1].Body != "" || reqs[1].Header.Get("Idempotency-Key") != "" {
 		t.Fatalf("cancel sent body %q key %q", reqs[1].Body, reqs[1].Header.Get("Idempotency-Key"))
 	}
-	checkCommon(t, reqs[2], "POST", "/v1/payment-requests/a%2Fb/cancel")
+}
+
+func TestPathSegmentEscaping(t *testing.T) {
+	f := newFake(t, jsonResp(200, sampleCharge))
+	c, _ := newTestClient(t, f)
+	ctx := context.Background()
+	for _, id := range []string{"cust/1 ?#%", "..", "ü"} {
+		if _, err := c.GetCharge(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reqs := f.requests()
+	for i, want := range []string{"/v1/charges/cust%2F1%20%3F%23%25", "/v1/charges/%2E%2E", "/v1/charges/%C3%BC"} {
+		checkCommon(t, reqs[i], "GET", want)
+	}
 }
 
 func TestTransactions(t *testing.T) {
-	f := newFake(t, jsonResp(200, sampleTxn), jsonResp(200, map[string]any{"data": []any{sampleTxn}, "next_cursor": nil}))
+	reversal := with(sampleTxn, "id", "rev-1", "kind", "reversal", "direction", "out", "channel", "manual", "receipt", nil,
+		"reverses_transaction_id", sampleTxn["id"])
+	f := newFake(t, jsonResp(200, sampleTxn), jsonResp(200, map[string]any{"data": []any{sampleTxn, reversal}, "next_cursor": nil}))
 	c, _ := newTestClient(t, f)
 	ctx := context.Background()
 	tx, err := c.GetTransaction(ctx, "0193a5f2-0000-7000-8000-00000000000a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tx.Amount != 2000 || len(tx.Allocations) != 2 || tx.Allocations[1].PaymentRequestID != nil || *tx.Receipt != "TKA1B2C3D4" || tx.Payer.ExternalRef != "cust/1" {
+	if tx.Amount != 1500 || *tx.Receipt != "TKA1B2C3D4" || *tx.ChargeID != testChargeID || *tx.AccountNumber != "HOST-4K7QZ9M" || tx.Kind != KindPayment {
 		t.Fatalf("%+v", tx)
 	}
 	since := time.Date(2026, 11, 1, 3, 0, 0, 0, time.FixedZone("EAT", 3*3600))
-	n := 0
-	for tx, err := range c.ListTransactions(ctx, ListTransactionsParams{Payer: "cust/1", Since: since, Limit: 10}) {
+	var kinds []string
+	for tx, err := range c.ListTransactions(ctx, ListTransactionsParams{ChargeID: testChargeID, Since: since, Limit: 10}) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if tx.ID == "" {
-			t.Fatal("empty")
-		}
-		n++
+		kinds = append(kinds, tx.Kind)
 	}
-	if n != 1 {
-		t.Fatalf("n=%d", n)
+	if strings.Join(kinds, ",") != "payment,reversal" {
+		t.Fatalf("kinds %v", kinds)
 	}
 	reqs := f.requests()
 	checkCommon(t, reqs[0], "GET", "/v1/transactions/0193a5f2-0000-7000-8000-00000000000a")
 	checkCommon(t, reqs[1], "GET", "/v1/transactions")
-	if reqs[1].RawQuery != "limit=10&payer=cust%2F1&since=2026-11-01T00%3A00%3A00Z" {
+	if reqs[1].RawQuery != "charge_id="+testChargeID+"&limit=10&since=2026-11-01T00%3A00%3A00Z" {
 		t.Fatalf("query %s", reqs[1].RawQuery)
 	}
 }
 
-func TestListPaymentRequestsIterator(t *testing.T) {
+func TestListChargesIterator(t *testing.T) {
 	page := func(cursor any, ids ...string) func(http.ResponseWriter, *http.Request) {
 		var data []map[string]any
 		for _, id := range ids {
-			pr := map[string]any{}
-			for k, v := range samplePR {
-				pr[k] = v
-			}
-			pr["id"] = id
-			data = append(data, pr)
+			data = append(data, with(sampleCharge, "id", id))
 		}
 		return jsonResp(200, map[string]any{"data": data, "next_cursor": cursor})
 	}
 	f := newFake(t, page("c1", "a", "b"), page("c2", "c"), page(nil, "d"))
 	c, _ := newTestClient(t, f)
 	var ids []string
-	for pr, err := range c.ListPaymentRequests(context.Background(), ListPaymentRequestsParams{Status: StatusOpen, Payer: "cust 1", Limit: 2}) {
+	for ch, err := range c.ListCharges(context.Background(), ListChargesParams{Status: ChargePending, Reference: "INV 1", Limit: 2}) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ids = append(ids, pr.ID)
+		ids = append(ids, ch.ID)
 	}
 	if strings.Join(ids, ",") != "a,b,c,d" {
 		t.Fatalf("ids %v", ids)
@@ -374,9 +380,9 @@ func TestListPaymentRequestsIterator(t *testing.T) {
 	if len(reqs) != 3 {
 		t.Fatalf("%d requests", len(reqs))
 	}
-	want := []string{"limit=2&payer=cust+1&status=open", "cursor=c1&limit=2&payer=cust+1&status=open", "cursor=c2&limit=2&payer=cust+1&status=open"}
+	want := []string{"limit=2&reference=INV+1&status=pending", "cursor=c1&limit=2&reference=INV+1&status=pending", "cursor=c2&limit=2&reference=INV+1&status=pending"}
 	for i, r := range reqs {
-		checkCommon(t, r, "GET", "/v1/payment-requests")
+		checkCommon(t, r, "GET", "/v1/charges")
 		if r.RawQuery != want[i] {
 			t.Fatalf("page %d query %s", i, r.RawQuery)
 		}
@@ -385,7 +391,7 @@ func TestListPaymentRequestsIterator(t *testing.T) {
 	// Breaking early fetches no further pages.
 	f2 := newFake(t, page("c1", "a", "b"))
 	c2, _ := newTestClient(t, f2)
-	for range c2.ListPaymentRequests(context.Background(), ListPaymentRequestsParams{}) {
+	for range c2.ListCharges(context.Background(), ListChargesParams{}) {
 		break
 	}
 	if len(f2.requests()) != 1 {
@@ -396,7 +402,7 @@ func TestListPaymentRequestsIterator(t *testing.T) {
 	f3 := newFake(t, page("same", "a"))
 	c3, _ := newTestClient(t, f3)
 	var lastErr error
-	for _, err := range c3.ListPaymentRequests(context.Background(), ListPaymentRequestsParams{}) {
+	for _, err := range c3.ListCharges(context.Background(), ListChargesParams{}) {
 		lastErr = err
 	}
 	if lastErr == nil || len(f3.requests()) != 2 {
@@ -407,11 +413,19 @@ func TestListPaymentRequestsIterator(t *testing.T) {
 	f4 := newFake(t, page("c1", "a"), problem(404, CodeNotFound, nil))
 	c4, _ := newTestClient(t, f4)
 	var got []error
-	for _, err := range c4.ListPaymentRequests(context.Background(), ListPaymentRequestsParams{}) {
+	for _, err := range c4.ListCharges(context.Background(), ListChargesParams{}) {
 		got = append(got, err)
 	}
 	if len(got) != 2 || got[0] != nil || !IsNotFound(got[1]) {
 		t.Fatalf("%v", got)
+	}
+
+	// The single-page call.
+	f5 := newFake(t, page("next", "x"))
+	c5, _ := newTestClient(t, f5)
+	p, err := c5.ListChargesPage(context.Background(), ListChargesParams{Cursor: "c9"})
+	if err != nil || len(p.Data) != 1 || *p.NextCursor != "next" || f5.requests()[0].RawQuery != "cursor=c9" {
+		t.Fatalf("%+v %v", p, err)
 	}
 }
 
@@ -420,7 +434,7 @@ func TestErrorDecoding(t *testing.T) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.Header().Set("X-Request-Id", "req-v")
 		w.WriteHeader(422)
-		_, _ = io.WriteString(w, `{"type":"https://docs/validation","title":"Invalid request","status":422,"code":"validation_failed","detail":"2 fields are invalid","errors":[{"field":"amount","message":"must be at least 1"},{"field":"payer","message":"required"}],"new":1}`)
+		_, _ = io.WriteString(w, `{"type":"https://docs/validation","title":"Invalid request","status":422,"code":"validation_failed","detail":"2 fields are invalid","errors":[{"field":"amount","message":"must be at least 1"},{"field":"reference","message":"required"}],"new":1}`)
 	}
 	html := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -432,7 +446,7 @@ func TestErrorDecoding(t *testing.T) {
 	c, _ := newTestClient(t, f)
 	ctx := context.Background()
 
-	_, _, err := c.CreatePaymentRequest(ctx, PaymentRequestInput{Payer: "p", Reference: "r", Description: "d", Amount: 1})
+	_, _, err := c.CreateCharge(ctx, ChargeInput{Reference: "r", Amount: 1})
 	if !IsCode(err, CodeDuplicateReference) || IsCode(err, CodeNotFound) || StatusCode(err) != 409 {
 		t.Fatalf("%v", err)
 	}
@@ -443,12 +457,12 @@ func TestErrorDecoding(t *testing.T) {
 	if !strings.Contains(err.Error(), "409 duplicate_reference: d (request_id req-1)") {
 		t.Fatalf("%q", err.Error())
 	}
-	_, _, err = c.CreatePaymentRequest(ctx, PaymentRequestInput{})
+	_, _, err = c.CreateCharge(ctx, ChargeInput{})
 	ae, ok := AsAPIError(err)
 	if !ok || ae.Code != CodeValidationFailed || len(ae.FieldErrors) != 2 || ae.FieldErrors[0].Field != "amount" || ae.RequestID != "req-v" {
 		t.Fatalf("%+v", ae)
 	}
-	if !strings.Contains(err.Error(), "[amount: must be at least 1; payer: required]") {
+	if !strings.Contains(err.Error(), "[amount: must be at least 1; reference: required]") {
 		t.Fatalf("%q", err.Error())
 	}
 	_, err = c.Whoami(ctx)
@@ -466,7 +480,7 @@ func TestErrorDecoding(t *testing.T) {
 
 func TestRetryGETOnTransientStatuses(t *testing.T) {
 	for _, status := range []int{429, 502, 503, 504} {
-		f := newFake(t, problem(status, "x", nil), problem(status, "x", nil), jsonResp(200, map[string]any{"product_id": "p"}))
+		f := newFake(t, problem(status, "x", nil), problem(status, "x", nil), jsonResp(200, map[string]any{"app_id": "a"}))
 		var events []LogEvent
 		c, slept := newTestClient(t, f, WithRetryBackoff(100*time.Millisecond, time.Second), WithLogger(func(e LogEvent) { events = append(events, e) }))
 		if _, err := c.Whoami(context.Background()); err != nil {
@@ -557,9 +571,9 @@ func TestBackoffCapped(t *testing.T) {
 func TestPOSTRetrySafety(t *testing.T) {
 	ctx := context.Background()
 	// Create always carries a key, so it is retried, with the SAME key.
-	f := newFake(t, problem(502, "", nil), jsonResp(201, samplePR))
+	f := newFake(t, problem(502, "", nil), jsonResp(201, sampleCharge))
 	c, _ := newTestClient(t, f)
-	if _, _, err := c.CreatePaymentRequest(ctx, PaymentRequestInput{Payer: "p", Reference: "r", Description: "d", Amount: 1}); err != nil {
+	if _, _, err := c.CreateCharge(ctx, ChargeInput{Reference: "r", Amount: 1}); err != nil {
 		t.Fatal(err)
 	}
 	reqs := f.requests()
@@ -567,9 +581,9 @@ func TestPOSTRetrySafety(t *testing.T) {
 		t.Fatalf("create retry: %d requests, keys %q %q", len(reqs), reqs[0].Header.Get("Idempotency-Key"), reqs[len(reqs)-1].Header.Get("Idempotency-Key"))
 	}
 	// Cancel is idempotent by contract.
-	f2 := newFake(t, problem(503, "", nil), jsonResp(200, samplePR))
+	f2 := newFake(t, problem(503, "", nil), jsonResp(200, sampleCharge))
 	c2, _ := newTestClient(t, f2)
-	if _, err := c2.CancelPaymentRequest(ctx, "id"); err != nil || len(f2.requests()) != 2 {
+	if _, err := c2.CancelCharge(ctx, "id"); err != nil || len(f2.requests()) != 2 {
 		t.Fatalf("cancel: %v, %d requests", err, len(f2.requests()))
 	}
 	// A POST that is neither keyed nor idempotent is never retried.
@@ -595,15 +609,15 @@ func dropConn(w http.ResponseWriter, _ *http.Request) {
 
 func TestNetworkErrors(t *testing.T) {
 	ctx := context.Background()
-	f := newFake(t, dropConn, jsonResp(200, samplePayer))
+	f := newFake(t, dropConn, jsonResp(200, sampleCharge))
 	c, _ := newTestClient(t, f)
-	if _, err := c.GetPayer(ctx, "x"); err != nil || len(f.requests()) != 2 {
+	if _, err := c.GetCharge(ctx, "x"); err != nil || len(f.requests()) != 2 {
 		t.Fatalf("GET after drop: %v, %d", err, len(f.requests()))
 	}
-	f2 := newFake(t, dropConn, jsonResp(200, samplePayer))
+	f2 := newFake(t, dropConn, jsonResp(200, sampleCharge))
 	c2, _ := newTestClient(t, f2)
-	if _, _, err := c2.UpsertPayer(ctx, "x", PayerInput{DisplayName: "a"}); err != nil || len(f2.requests()) != 2 {
-		t.Fatalf("PUT after drop: %v, %d", err, len(f2.requests()))
+	if _, _, err := c2.CreateCharge(ctx, ChargeInput{Reference: "x", Amount: 1}); err != nil || len(f2.requests()) != 2 {
+		t.Fatalf("keyed POST after drop: %v, %d", err, len(f2.requests()))
 	}
 	f3 := newFake(t, dropConn, jsonResp(200, map[string]any{}))
 	c3, _ := newTestClient(t, f3)

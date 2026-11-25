@@ -1,17 +1,20 @@
-// Package talksasapay is the Go client for the Talksasa Pay product API
-// (/v1, api/product.openapi.yaml). It depends only on the standard library.
+// Package talksasapay is the Go client for the Talksasa Pay app API
+// (/v1, api/app.openapi.yaml): charges, M-Pesa prompts, transactions, the
+// events feed and webhook verification. It depends only on the standard
+// library.
 //
 //	c, err := talksasapay.New("https://pay-api.talksasa.co.ke", key)
-//	payer, created, err := c.UpsertPayer(ctx, "cust-42", talksasapay.PayerInput{DisplayName: "Jane"})
-//	pr, _, err := c.CreatePaymentRequest(ctx, talksasapay.PaymentRequestInput{
-//		Payer: "cust-42", Reference: "INV-1001", Description: "Hosting", Amount: 1500,
-//		IdempotencyKey: "INV-1001-v1",
+//	charge, _, err := c.CreateCharge(ctx, talksasapay.ChargeInput{
+//		Amount: 1500, Reference: "INV-1001", Description: "Hosting",
+//		Phone: "0712345678", // optional: prompt right away
 //	})
+//	// redirect to charge.CheckoutURL, or wait for charge.succeeded
 //
-// Retries: requests that are safe to repeat (GET, PUT, POST with an
-// Idempotency-Key, and cancel, which is idempotent by contract) are retried
-// on network errors and on 429/502/503/504 with exponential backoff and
-// jitter, honouring Retry-After. Other POSTs are never retried.
+// Retries: requests that are safe to repeat (GET; CreateCharge and STKPush,
+// which always carry an Idempotency-Key that every retry reuses; and
+// CancelCharge, idempotent by contract) are retried on network errors and
+// on 429/502/503/504 with exponential backoff and jitter, honouring
+// Retry-After. mpesa_error and mpesa_unavailable are never retried.
 //
 // Errors returned by the API are *APIError; use IsCode / AsAPIError.
 // Webhooks: VerifyWebhook and WebhookHandler.
@@ -33,7 +36,7 @@ import (
 )
 
 // Version is the client version reported in the User-Agent.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 const (
 	defaultTimeout     = 30 * time.Second
@@ -105,7 +108,7 @@ func WithUserAgent(suffix string) Option { return func(c *Client) { c.uaSuffix =
 // WithLogger installs a hook called after every HTTP attempt.
 func WithLogger(l Logger) Option { return func(c *Client) { c.logger = l } }
 
-// Client calls the Talksasa Pay product API. It is safe for concurrent use.
+// Client calls the Talksasa Pay app API. It is safe for concurrent use.
 type Client struct {
 	base        *url.URL // ends in /v1, no trailing slash
 	apiKey      string

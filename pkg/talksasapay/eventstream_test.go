@@ -43,8 +43,8 @@ func mkEvents(n int) []map[string]any {
 	var out []map[string]any
 	for i := range n {
 		out = append(out, map[string]any{
-			"object": "event", "id": fmt.Sprintf("ev-%d", i), "type": EventPaymentRequestPaid, "api_version": "2026-11-24",
-			"created_at": "2026-11-24T10:00:00Z", "data": samplePR,
+			"object": "event", "id": fmt.Sprintf("ev-%d", i), "type": EventChargeSucceeded, "api_version": "2026-11-25",
+			"created_at": "2026-11-24T10:00:00Z", "data": sampleCharge,
 		})
 	}
 	return out
@@ -61,8 +61,8 @@ func TestEventStreamPoll(t *testing.T) {
 		LoadCursor: func(context.Context) (string, error) { return cursor, nil },
 		SaveCursor: func(_ context.Context, cur string) error { cursor = cur; saves = append(saves, cur); return nil },
 		Handle: func(_ context.Context, ev Event) error {
-			pr, err := ev.PaymentRequest()
-			if err != nil || pr.Amount != 1500 {
+			ch, err := ev.Charge()
+			if err != nil || ch.Amount != 1500 {
 				return fmt.Errorf("decode: %w", err)
 			}
 			if _, err := ev.Transaction(); err == nil {

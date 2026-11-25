@@ -96,7 +96,7 @@ func TestWebhookSignatureVectors(t *testing.T) {
 func TestVerifyWebhook(t *testing.T) {
 	secret := []byte("whsec_unit")
 	now := time.Unix(1764000000, 0)
-	body := []byte(`{"object":"event","id":"ev-1","type":"transaction.allocated","api_version":"2026-11-24","created_at":"2026-11-24T10:00:00Z","data":{"object":"transaction","id":"tx","amount":2000,"allocations":[],"created_at":"2026-11-24T10:00:00Z"},"new_top_level":1}`)
+	body := []byte(`{"object":"event","id":"ev-1","type":"transaction.reversed","api_version":"2026-11-25","created_at":"2026-11-24T10:00:00Z","data":{"object":"transaction","id":"tx","kind":"reversal","amount":2000,"reverses_transaction_id":"tx0","created_at":"2026-11-24T10:00:00Z"},"new_top_level":1}`)
 	hdr := func(sig, id string) http.Header {
 		h := http.Header{}
 		if sig != "" {
@@ -109,11 +109,11 @@ func TestVerifyWebhook(t *testing.T) {
 	}
 	good := SignWebhook(now, body, secret)
 	ev, err := VerifyWebhook(secret, hdr(good, "ev-1"), body, now.Add(-299*time.Second), 0)
-	if err != nil || ev.ID != "ev-1" || ev.Type != EventTransactionAllocated {
+	if err != nil || ev.ID != "ev-1" || ev.Type != EventTransactionReversed {
 		t.Fatalf("ev=%+v err=%v", ev, err)
 	}
 	tx, err := ev.Transaction()
-	if err != nil || tx.Amount != 2000 {
+	if err != nil || tx.Amount != 2000 || tx.Kind != KindReversal || *tx.ReversesTransactionID != "tx0" {
 		t.Fatalf("tx=%+v err=%v", tx, err)
 	}
 	cases := []struct {
@@ -153,7 +153,7 @@ func TestVerifyWebhook(t *testing.T) {
 func TestWebhookHandler(t *testing.T) {
 	secret := []byte("whsec_handler")
 	now := time.Unix(1764000000, 0)
-	body := []byte(`{"object":"event","id":"ev-9","type":"payer.credit_changed","api_version":"2026-11-24","created_at":"2026-11-24T10:00:00Z","data":{"payer":{"external_ref":"c","account_number":"HOST-1"},"delta":500,"credit_balance":500,"transaction_id":null}}`)
+	body := []byte(`{"object":"event","id":"ev-9","type":"payment.received","api_version":"2026-11-25","created_at":"2026-11-24T10:00:00Z","data":{"object":"transaction","id":"t1","kind":"payment","direction":"in","channel":"mpesa_c2b","status":"succeeded","amount":500,"currency":"KES","receipt":"TK1","phone":null,"account_number":"HOST-1","charge_id":null,"reverses_transaction_id":null,"occurred_at":null,"created_at":"2026-11-24T10:00:00Z","completed_at":null,"duplicate_of_charge":null}}`)
 	var got []Event
 	fail := false
 	var rejections []error
@@ -177,9 +177,9 @@ func TestWebhookHandler(t *testing.T) {
 	if code := send("POST", body, SignWebhook(now, body, secret)); code != 200 {
 		t.Fatalf("valid: %d", code)
 	}
-	cc, err := got[0].CreditChange()
-	if len(got) != 1 || err != nil || cc.Delta != 500 || cc.TransactionID != nil {
-		t.Fatalf("got %+v %+v %v", got, cc, err)
+	pr, err := got[0].PaymentReceived()
+	if len(got) != 1 || err != nil || pr.Amount != 500 || *pr.AccountNumber != "HOST-1" || pr.DuplicateOfCharge != nil || pr.ChargeID != nil {
+		t.Fatalf("got %+v %+v %v", got, pr, err)
 	}
 	if code := send("POST", body, SignWebhook(now, body, []byte("wrong"))); code != 400 {
 		t.Fatalf("bad sig: %d", code)
