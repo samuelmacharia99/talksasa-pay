@@ -1,9 +1,3 @@
-//go:build gatewaycore
-
-// TODO(gateway-core): M-Pesa chaos/invariant suite, still written against
-// payers and payment requests. Compiled only with -tags gatewaycore until
-// the money core ports it to charges.
-
 package integrationtest
 
 // M-Pesa chaos: Send under concurrency and crashes.
@@ -18,10 +12,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/talksasa/talksasa-pay/internal/allocation"
 	"github.com/talksasa/talksasa-pay/internal/audit"
 	"github.com/talksasa/talksasa-pay/internal/events"
-	"github.com/talksasa/talksasa-pay/internal/money"
 	"github.com/talksasa/talksasa-pay/internal/mpesa"
 	"github.com/talksasa/talksasa-pay/internal/stk"
 	"github.com/talksasa/talksasa-pay/internal/store"
@@ -30,7 +22,7 @@ import (
 // Scenario 5: Daraja accepted the push but we never saved its answer (a
 // transient error after acceptance stands in for a crash between Tx A and
 // Tx B). (a) the success callback arrives: matched as an orphan, money
-// recorded once on the TARGET request (not the payer's oldest); (b) no
+// recorded once on the TARGET charge (not another live one); (b) no
 // callback: the sweeper fails it after InitiatingTimeout; (c) a late
 // callback after (b): recorded once as a rescue; (d) callback duplicates
 // racing sweepers that are failing the same orphan push.
@@ -40,9 +32,8 @@ func TestMpesaCrashBetweenTxAAndDaraja(t *testing.T) {
 	prod := m.app("CRASH").App.ID
 
 	setup := func(amount int64) (oldest, target uuid.UUID, p stk.Push, co, ph string) {
-		pa := m.mpesaPayer(prod)
-		old := m.request(prod, pa.ID, amount+1)
-		tgt := m.request(prod, pa.ID, amount)
+		old := m.charge(prod, amount+1)
+		tgt := m.charge(prod, amount)
 		ph = newPhone(5)
 		p = m.mustSend(prod, tgt.ID, ph)
 		if p.Status != store.StkPushStatusInitiating {
@@ -56,8 +47,8 @@ func TestMpesaCrashBetweenTxAAndDaraja(t *testing.T) {
 		if n, sum := m.succeededFor(target); n != 1 || sum != amount {
 			t.Fatalf("%s: %d payments totalling %d on the target", what, n, sum)
 		}
-		assertStatus(t, m.reqState(prod, target), allocation.StatusPaid, money.KES(amount))
-		assertStatus(t, m.reqState(prod, oldest), allocation.StatusOpen, 0)
+		m.assertCharge(target, store.ChargeStatusSucceeded)
+		m.assertCharge(oldest, store.ChargeStatusPending)
 	}
 
 	t.Run("callback arrives", func(t *testing.T) {
@@ -91,7 +82,7 @@ func TestMpesaCrashBetweenTxAAndDaraja(t *testing.T) {
 		if c := m.eventsFor(p.ID, events.STKPushFailed); c != 1 {
 			t.Fatalf("failed events %d", c)
 		}
-		assertStatus(t, m.reqState(prod, tgt), allocation.StatusOpen, 0)
+		m.assertCharge(tgt, store.ChargeStatusPending)
 	})
 
 	t.Run("late callback after give-up", func(t *testing.T) {
@@ -136,7 +127,7 @@ func TestMpesaCrashBetweenTxAAndDaraja(t *testing.T) {
 		}
 		t.Logf("outcomes %v", outcomes)
 	})
-	m.mpesaInvariants(invariantOpts{allowCreditWithPayable: false})
+	m.mpesaInvariants()
 }
 
 // Scenario 6: many Sends for the same request at once. Different keys and
@@ -145,17 +136,16 @@ func TestMpesaCrashBetweenTxAAndDaraja(t *testing.T) {
 func TestMpesaConcurrentSends(t *testing.T) {
 	m := newMpesaEnv(t, nil, nil)
 	prod := m.app("SEND").App.ID
-	pa := m.mpesaPayer(prod)
 	actor := audit.App(prod)
 	const n = 50
 
 	t.Run("different keys and pay page", func(t *testing.T) {
-		req := m.request(prod, pa.ID, 900)
+		req := m.charge(prod, 900)
 		before := m.client.pushCount()
 		var won atomic.Int64
 		start := time.Now()
 		errs := storm(n, func(i int) error {
-			sp := stk.SendParams{AppID: prod, RequestID: req.ID, Phone: newPhone(0), Source: stk.SourcePayPage}
+			sp := stk.SendParams{AppID: prod, ChargeID: req.ID, Phone: newPhone(0), Source: stk.SourcePayPage}
 			if i%2 == 0 {
 				sp.Source, sp.IdempotencyKey = stk.SourceApp, uuid.NewString()
 			}
@@ -176,10 +166,10 @@ func TestMpesaConcurrentSends(t *testing.T) {
 		if won.Load() != 1 {
 			t.Fatalf("%d sends won", won.Load())
 		}
-		if c := m.count(`SELECT count(*) FROM stk_pushes WHERE payment_request_id = $1`, req.ID); c != 1 {
+		if c := m.count(`SELECT count(*) FROM stk_pushes WHERE charge_id = $1`, req.ID); c != 1 {
 			t.Fatalf("%d pushes", c)
 		}
-		if c := m.count(`SELECT count(*) FROM transactions WHERE payment_request_id = $1`, req.ID); c != 1 {
+		if c := m.count(`SELECT count(*) FROM transactions WHERE charge_id = $1`, req.ID); c != 1 {
 			t.Fatalf("%d transactions", c)
 		}
 		if got := m.client.pushCount() - before; got != 1 {
@@ -188,13 +178,13 @@ func TestMpesaConcurrentSends(t *testing.T) {
 	})
 
 	t.Run("same key", func(t *testing.T) {
-		req := m.request(prod, pa.ID, 950)
+		req := m.charge(prod, 950)
 		key, ph := uuid.NewString(), newPhone(0)
 		before := m.client.pushCount()
 		ids := make([]uuid.UUID, n)
 		var fresh atomic.Int64
 		errs := storm(n, func(i int) error {
-			p, replayed, err := m.svc.Send(m.ctx, actor, stk.SendParams{AppID: prod, RequestID: req.ID, Phone: ph, Source: stk.SourceApp, IdempotencyKey: key})
+			p, replayed, err := m.svc.Send(m.ctx, actor, stk.SendParams{AppID: prod, ChargeID: req.ID, Phone: ph, Source: stk.SourceApp, IdempotencyKey: key})
 			if err != nil {
 				return err
 			}
@@ -222,11 +212,11 @@ func TestMpesaConcurrentSends(t *testing.T) {
 		const reqs = 10
 		var ids [reqs]uuid.UUID
 		for i := range ids {
-			ids[i] = m.request(prod, pa.ID, int64(1000+i)).ID
+			ids[i] = m.charge(prod, int64(1000+i)).ID
 		}
 		var won [reqs]atomic.Int64
 		errs := storm(reqs*10, func(i int) error {
-			_, replayed, err := m.svc.Send(m.ctx, actor, stk.SendParams{AppID: prod, RequestID: ids[i%reqs], Phone: newPhone(0), Source: stk.SourcePayPage})
+			_, replayed, err := m.svc.Send(m.ctx, actor, stk.SendParams{AppID: prod, ChargeID: ids[i%reqs], Phone: newPhone(0), Source: stk.SourcePayPage})
 			if err == nil && !replayed {
 				won[i%reqs].Add(1)
 				return nil
@@ -262,5 +252,5 @@ func TestMpesaConcurrentSends(t *testing.T) {
 		_, err := m.deliver(store.MpesaCallbackKindStk, stkFailureBody(cos[i], "1032", "Request cancelled by user"))
 		return err
 	}))
-	m.mpesaInvariants(invariantOpts{})
+	m.mpesaInvariants()
 }

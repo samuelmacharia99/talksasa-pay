@@ -1,9 +1,3 @@
-//go:build gatewaycore
-
-// TODO(gateway-core): M-Pesa chaos/invariant suite, still written against
-// payers and payment requests. Compiled only with -tags gatewaycore until
-// the money core ports it to charges.
-
 package integrationtest
 
 // M-Pesa chaos: callbacks racing each other, the sweeper, staff and Send.
@@ -19,9 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/talksasa/talksasa-pay/internal/allocation"
 	"github.com/talksasa/talksasa-pay/internal/events"
-	"github.com/talksasa/talksasa-pay/internal/money"
 	"github.com/talksasa/talksasa-pay/internal/mpesa"
 	"github.com/talksasa/talksasa-pay/internal/stk"
 	"github.com/talksasa/talksasa-pay/internal/store"
@@ -29,8 +21,8 @@ import (
 
 // Scenario 1: the same STK success callback delivered 50 times at once
 // (each stored separately, processed concurrently, and every stored copy
-// processed twice). One succeeded transaction, request paid once, one
-// payment_request.paid event. Run on the normal path (push sent) and on
+// processed twice). One succeeded transaction, charge paid once, one
+// charge.succeeded event. Run on the normal path (push sent) and on
 // the orphan path (Daraja's answer was never saved: push initiating).
 func TestMpesaDuplicateSuccessCallbackStorm(t *testing.T) {
 	for _, orphan := range []bool{false, true} {
@@ -41,8 +33,7 @@ func TestMpesaDuplicateSuccessCallbackStorm(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			m := newMpesaEnv(t, nil, nil)
 			prod := m.app("DUP").App.ID
-			pa := m.mpesaPayer(prod)
-			req := m.request(prod, pa.ID, 1500)
+			req := m.charge(prod, 1500)
 			ph := newPhone(0)
 			if orphan {
 				m.client.setHook(func(context.Context, mpesa.STKPushRequest, string) error { return transientErr })
@@ -84,9 +75,9 @@ func TestMpesaDuplicateSuccessCallbackStorm(t *testing.T) {
 			if n, sum := m.succeededFor(req.ID); n != 1 || sum != 1500 {
 				t.Fatalf("succeeded payments for request: %d totalling %d, want 1 of 1500", n, sum)
 			}
-			assertStatus(t, m.reqState(prod, req.ID), allocation.StatusPaid, 1500)
-			if c := m.eventsFor(req.ID, events.PaymentRequestPaid); c != 1 {
-				t.Fatalf("payment_request.paid events: %d", c)
+			m.assertCharge(req.ID, store.ChargeStatusSucceeded)
+			if c := m.eventsFor(req.ID, events.ChargeSucceeded); c != 1 {
+				t.Fatalf("charge.succeeded events: %d", c)
 			}
 			if c := m.eventsFor(p.ID, events.STKPushSucceeded); c != 1 {
 				t.Fatalf("stk_push.succeeded events: %d", c)
@@ -97,7 +88,7 @@ func TestMpesaDuplicateSuccessCallbackStorm(t *testing.T) {
 			if c := m.count(`SELECT count(*) FROM transactions WHERE app_id IS NULL`); c != 0 {
 				t.Fatalf("%d duplicate callbacks recorded as unmatched money", c)
 			}
-			m.mpesaInvariants(invariantOpts{})
+			m.mpesaInvariants()
 		})
 	}
 }
@@ -112,13 +103,12 @@ func TestMpesaCallbackRacesSweeper(t *testing.T) {
 		o.GiveUpAfter = 10 * time.Minute
 	})
 	prod := m.app("SWP").App.ID
-	pa := m.mpesaPayer(prod)
 
 	const iterations = 40
 	var sweeperFirst, callbackFirst int
 	for i := 0; i < iterations; i++ {
 		amount := int64(100 + i)
-		req := m.request(prod, pa.ID, amount)
+		req := m.charge(prod, amount)
 		ph := newPhone(2)
 		p := m.mustSend(prod, req.ID, ph)
 		co := *p.CheckoutRequestID
@@ -151,7 +141,7 @@ func TestMpesaCallbackRacesSweeper(t *testing.T) {
 			txn.ProviderTransactionID == nil || *txn.ProviderTransactionID != receipt {
 			t.Fatalf("iteration %d: push %s, txn %s (receipt %v); want succeeded with %s", i, got.Status, txn.Status, txn.ProviderTransactionID, receipt)
 		}
-		assertStatus(t, m.reqState(prod, req.ID), allocation.StatusPaid, money.KES(amount))
+		m.assertCharge(req.ID, store.ChargeStatusSucceeded)
 		switch reviewed.Load() {
 		case 0:
 			callbackFirst++
@@ -168,7 +158,7 @@ func TestMpesaCallbackRacesSweeper(t *testing.T) {
 		}
 	}
 	t.Logf("sweeper first %d, callback first %d; queries=%d", sweeperFirst, callbackFirst, m.client.queries.Load())
-	m.mpesaInvariants(invariantOpts{})
+	m.mpesaInvariants()
 }
 
 // Scenario 3: the success callback arrives while Send is still waiting for
@@ -178,7 +168,6 @@ func TestMpesaCallbackRacesSweeper(t *testing.T) {
 func TestMpesaCallbackBeforeSendCommits(t *testing.T) {
 	m := newMpesaEnv(t, nil, nil)
 	prod := m.app("EARLY").App.ID
-	pa := m.mpesaPayer(prod)
 
 	type accepted struct {
 		checkout string
@@ -198,7 +187,7 @@ func TestMpesaCallbackBeforeSendCommits(t *testing.T) {
 	for i := 0; i < iterations; i++ {
 		gate.Lock()
 		amount := int64(200 + i)
-		req := m.request(prod, pa.ID, amount)
+		req := m.charge(prod, amount)
 		ph := newPhone(0)
 		type sendRes struct {
 			p   stk.Push
@@ -259,7 +248,7 @@ func TestMpesaCallbackBeforeSendCommits(t *testing.T) {
 		if n, sum := m.succeededFor(req.ID); n != 1 || sum != amount {
 			t.Fatalf("iteration %d (%s): %d payments totalling %d", i, mode, n, sum)
 		}
-		assertStatus(t, m.reqState(prod, req.ID), allocation.StatusPaid, money.KES(amount))
+		m.assertCharge(req.ID, store.ChargeStatusSucceeded)
 		if c := m.eventsFor(got.ID, events.STKPushSent); c != 1 {
 			t.Fatalf("iteration %d (%s): stk_push.sent events %d", i, mode, c)
 		}
@@ -268,7 +257,7 @@ func TestMpesaCallbackBeforeSendCommits(t *testing.T) {
 		t.Fatalf("%d early callbacks recorded as unmatched money", c)
 	}
 	t.Logf("modes %v, retries %d", modes, m.retries.Load())
-	m.mpesaInvariants(invariantOpts{})
+	m.mpesaInvariants()
 }
 
 // Scenario 4: the same receipt reaches us as an STK callback and as a C2B
@@ -279,14 +268,13 @@ func TestMpesaSameReceiptSTKAndC2B(t *testing.T) {
 	prod := m.app("BOTH").App.ID
 	outcomes := map[string]int{}
 	for i := 0; i < 30; i++ {
-		pa := m.mpesaPayer(prod)
 		amount := int64(300 + i)
-		req := m.request(prod, pa.ID, amount)
+		req := m.charge(prod, amount)
 		ph := newPhone(0)
 		p := m.mustSend(prod, req.ID, ph)
 		receipt := newMpesaReceipt()
 		stkBody := stkSuccessBody(*p.CheckoutRequestID, receipt, amount, ph)
-		c2b := c2bBody(receipt, amount, pa.AccountNumber)
+		c2b := c2bBody(receipt, amount, req.AccountNumber)
 		errs := storm(4, func(g int) error {
 			if g%2 == 0 {
 				_, err := m.deliver(store.MpesaCallbackKindStk, stkBody)
@@ -300,15 +288,10 @@ func TestMpesaSameReceiptSTKAndC2B(t *testing.T) {
 		if c := m.receiptRows(receipt); c != 1 {
 			t.Fatalf("iteration %d: receipt on %d rows", i, c)
 		}
-		var payerMoney int64
-		if err := m.db.Owner.QueryRow(m.ctx, `SELECT coalesce(sum(amount),0)::bigint FROM transactions
-			WHERE payer_account_id = $1 AND status = 'succeeded'`, pa.ID).Scan(&payerMoney); err != nil {
-			t.Fatal(err)
+		if n, sum := m.succeededFor(req.ID); n != 1 || sum != amount {
+			t.Fatalf("iteration %d: charge received %d payments totalling %d, want 1 of %d", i, n, sum, amount)
 		}
-		if payerMoney != amount {
-			t.Fatalf("iteration %d: payer received %d, want %d", i, payerMoney, amount)
-		}
-		assertStatus(t, m.reqState(prod, req.ID), allocation.StatusPaid, money.KES(amount))
+		m.assertCharge(req.ID, store.ChargeStatusSucceeded)
 		got := m.push(p.ID)
 		switch got.Status {
 		case store.StkPushStatusSucceeded:
@@ -325,7 +308,7 @@ func TestMpesaSameReceiptSTKAndC2B(t *testing.T) {
 		}
 	}
 	t.Logf("outcomes %v, retries %d", outcomes, m.retries.Load())
-	m.mpesaInvariants(invariantOpts{})
+	m.mpesaInvariants()
 }
 
 // Scenario 7: Safaricom reports a different amount than the push asked
@@ -334,8 +317,7 @@ func TestMpesaSameReceiptSTKAndC2B(t *testing.T) {
 func TestMpesaAmountMismatch(t *testing.T) {
 	m := newMpesaEnv(t, nil, nil)
 	prod := m.app("MISM").App.ID
-	pa := m.mpesaPayer(prod)
-	req := m.request(prod, pa.ID, 1000)
+	req := m.charge(prod, 1000)
 	ph := newPhone(0)
 	p := m.mustSend(prod, req.ID, ph)
 	co := *p.CheckoutRequestID
@@ -363,7 +345,7 @@ func TestMpesaAmountMismatch(t *testing.T) {
 	if n, _ := m.succeededFor(req.ID); n != 0 {
 		t.Fatalf("%d payments recorded", n)
 	}
-	assertStatus(t, m.reqState(prod, req.ID), allocation.StatusOpen, 0)
+	m.assertCharge(req.ID, store.ChargeStatusNeedsReview)
 	if m.alarms("amount") == 0 {
 		t.Fatal("no alarm logged for the amount mismatch")
 	}
@@ -380,7 +362,7 @@ func TestMpesaAmountMismatch(t *testing.T) {
 			t.Fatalf("confirm after mismatch: %v", err)
 		}
 	}
-	m.mpesaInvariants(invariantOpts{})
+	m.mpesaInvariants()
 }
 
 // Scenario 7b: when the sweeper sends the push to review first ("paid, no
@@ -389,8 +371,7 @@ func TestMpesaAmountMismatch(t *testing.T) {
 func TestMpesaAmountMismatchAfterSweeperReview(t *testing.T) {
 	m := newMpesaEnv(t, nil, nil)
 	prod := m.app("MISB").App.ID
-	pa := m.mpesaPayer(prod)
-	req := m.request(prod, pa.ID, 1000)
+	req := m.charge(prod, 1000)
 	ph := newPhone(0)
 	p := m.mustSend(prod, req.ID, ph)
 	co := *p.CheckoutRequestID
@@ -408,9 +389,9 @@ func TestMpesaAmountMismatchAfterSweeperReview(t *testing.T) {
 	_, err := m.svc.Resolve(m.ctx, mpesaStaff(), stk.ResolveParams{TransactionID: txn.ID, Confirm: true, Receipt: receipt, Reason: "portal shows the receipt"})
 	if err == nil {
 		t.Fatalf("staff confirmed KES %d with receipt %s although Safaricom reported KES 10 for it (failure_code=%s); request now %+v",
-			txn.Amount, receipt, deref(txn.FailureCode), m.reqState(prod, req.ID).Status)
+			txn.Amount, receipt, deref(txn.FailureCode), m.chargeOf(req.ID).Status)
 	}
-	m.mpesaInvariants(invariantOpts{})
+	m.mpesaInvariants()
 }
 
 // Scenario 9: staff resolve a needs_review payment while the late callback
@@ -419,14 +400,13 @@ func TestMpesaAmountMismatchAfterSweeperReview(t *testing.T) {
 func TestMpesaResolveRacesLateCallback(t *testing.T) {
 	m := newMpesaEnv(t, nil, nil)
 	prod := m.app("RES").App.ID
-	pa := m.mpesaPayer(prod)
 	outcomes := map[string]int{}
 	var mu sync.Mutex
 	note := func(k string) { mu.Lock(); outcomes[k]++; mu.Unlock() }
 
 	for i := 0; i < 36; i++ {
 		amount := int64(400 + i)
-		req := m.request(prod, pa.ID, amount)
+		req := m.charge(prod, amount)
 		ph := newPhone(2)
 		p := m.mustSend(prod, req.ID, ph)
 		co := *p.CheckoutRequestID
@@ -465,7 +445,7 @@ func TestMpesaResolveRacesLateCallback(t *testing.T) {
 		if n, sum := m.succeededFor(req.ID); n != 1 || sum != amount {
 			t.Fatalf("iteration %d (%s): %d payments totalling %d", i, kind, n, sum)
 		}
-		assertStatus(t, m.reqState(prod, req.ID), allocation.StatusPaid, money.KES(amount))
+		m.assertCharge(req.ID, store.ChargeStatusSucceeded)
 		if got := m.push(p.ID); got.Status != store.StkPushStatusSucceeded {
 			t.Fatalf("iteration %d (%s): push %s", i, kind, got.Status)
 		}
@@ -474,7 +454,7 @@ func TestMpesaResolveRacesLateCallback(t *testing.T) {
 		}
 	}
 	t.Logf("outcomes %v", outcomes)
-	m.mpesaInvariants(invariantOpts{})
+	m.mpesaInvariants()
 }
 
 // Scenario 10: the callback job is retried after a transient failure
@@ -482,11 +462,10 @@ func TestMpesaResolveRacesLateCallback(t *testing.T) {
 func TestMpesaCallbackJobRetriedIdempotent(t *testing.T) {
 	m := newMpesaEnv(t, nil, nil)
 	prod := m.app("RETRY").App.ID
-	pa := m.mpesaPayer(prod)
 	var cancelled atomic.Int64
 	for i := 0; i < 25; i++ {
 		amount := int64(500 + i)
-		req := m.request(prod, pa.ID, amount)
+		req := m.charge(prod, amount)
 		ph := newPhone(0)
 		orphan := i%2 == 1
 		if orphan {
@@ -514,10 +493,10 @@ func TestMpesaCallbackJobRetriedIdempotent(t *testing.T) {
 		if n, sum := m.succeededFor(req.ID); n != 1 || sum != amount {
 			t.Fatalf("iteration %d: %d payments totalling %d", i, n, sum)
 		}
-		assertStatus(t, m.reqState(prod, req.ID), allocation.StatusPaid, money.KES(amount))
+		m.assertCharge(req.ID, store.ChargeStatusSucceeded)
 	}
 	t.Logf("cancelled attempts %d", cancelled.Load())
-	m.mpesaInvariants(invariantOpts{})
+	m.mpesaInvariants()
 }
 
 func deref(s *string) string {
@@ -537,18 +516,18 @@ func completedViaC2B(m *mpesaEnv, txnID uuid.UUID) bool {
 
 // A paybill payment that matches a waiting prompt completes it; if the
 // customer then ALSO approves the prompt (a second, different receipt), both
-// payments are recorded — nothing is lost and nothing is doubled.
+// payments are recorded — nothing is lost and nothing is doubled. The
+// second is reported as payment.received with duplicate_of_charge (rule 6).
 func TestMpesaC2BCompletesWaitingPromptThenSecondPayment(t *testing.T) {
 	m := newMpesaEnv(t, nil, nil)
 	prod := m.app("TWICE").App.ID
-	pa := m.mpesaPayer(prod)
-	older := m.request(prod, pa.ID, 700) // oldest-first would pick this one
-	req := m.request(prod, pa.ID, 500)
+	other := m.charge(prod, 700) // another live charge of the app
+	req := m.charge(prod, 500)
 	ph := newPhone(0)
 	p := m.mustSend(prod, req.ID, ph)
 
 	r1 := newMpesaReceipt()
-	if _, err := m.deliver(store.MpesaCallbackKindC2bConfirmation, c2bBody(r1, 500, pa.AccountNumber)); err != nil {
+	if _, err := m.deliver(store.MpesaCallbackKindC2bConfirmation, c2bBody(r1, 500, req.AccountNumber)); err != nil {
 		t.Fatal(err)
 	}
 	if got := m.push(p.ID); got.Status != store.StkPushStatusSucceeded {
@@ -557,8 +536,8 @@ func TestMpesaC2BCompletesWaitingPromptThenSecondPayment(t *testing.T) {
 	if !completedViaC2B(m, p.TransactionID) {
 		t.Fatal("prompt transaction not completed by the C2B notice")
 	}
-	assertStatus(t, m.reqState(prod, req.ID), allocation.StatusPaid, 500)
-	assertStatus(t, m.reqState(prod, older.ID), allocation.StatusOpen, 0)
+	m.assertCharge(req.ID, store.ChargeStatusSucceeded)
+	m.assertCharge(other.ID, store.ChargeStatusPending)
 
 	// Duplicate STK callback with the SAME receipt: nothing new.
 	if _, err := m.deliver(store.MpesaCallbackKindStk, stkSuccessBody(*p.CheckoutRequestID, r1, 500, ph)); err != nil {
@@ -574,35 +553,38 @@ func TestMpesaC2BCompletesWaitingPromptThenSecondPayment(t *testing.T) {
 	if m.receiptRows(r1) != 1 || m.receiptRows(r2) != 1 {
 		t.Fatalf("receipts recorded r1=%d r2=%d, want 1/1", m.receiptRows(r1), m.receiptRows(r2))
 	}
-	var total int64
-	if err := m.db.Owner.QueryRow(m.ctx, `SELECT coalesce(sum(amount),0)::bigint FROM transactions
-		WHERE payer_account_id = $1 AND status = 'succeeded'`, pa.ID).Scan(&total); err != nil {
-		t.Fatal(err)
+	if n, total := m.succeededFor(req.ID); n != 2 || total != 1000 {
+		t.Fatalf("charge received %d payments totalling %d, want 2 of 1000 (two real payments)", n, total)
 	}
-	if total != 1000 {
-		t.Fatalf("payer received %d, want 1000 (two real payments)", total)
+	if c := m.count(`SELECT count(*) FROM events WHERE type = 'payment.received' AND data->>'duplicate_of_charge' = $1`, req.ID.String()); c != 1 {
+		t.Fatalf("duplicate_of_charge events %d, want 1", c)
 	}
-	// The second payment moved on to the older bill (target already paid).
-	assertStatus(t, m.reqState(prod, older.ID), allocation.StatusPartiallyPaid, 500)
-	m.mpesaInvariants(invariantOpts{})
+	// The second payment never pays another charge.
+	m.assertCharge(other.ID, store.ChargeStatusPending)
+	m.mpesaInvariants()
 }
 
-// A paybill payment for a different amount than the waiting prompt is an
-// ordinary paybill payment (oldest bill first); the prompt keeps waiting.
+// A paybill payment for a different amount than the waiting prompt is
+// forwarded to the app as payment.received; the charge and its prompt keep
+// waiting.
 func TestMpesaC2BDifferentAmountLeavesPromptWaiting(t *testing.T) {
 	m := newMpesaEnv(t, nil, nil)
 	prod := m.app("DIFF").App.ID
-	pa := m.mpesaPayer(prod)
-	req := m.request(prod, pa.ID, 500)
+	req := m.charge(prod, 500)
 	p := m.mustSend(prod, req.ID, newPhone(0))
-	if _, err := m.deliver(store.MpesaCallbackKindC2bConfirmation, c2bBody(newMpesaReceipt(), 200, pa.AccountNumber)); err != nil {
+	id, err := m.deliver(store.MpesaCallbackKindC2bConfirmation, c2bBody(newMpesaReceipt(), 200, req.AccountNumber))
+	if err != nil {
 		t.Fatal(err)
 	}
 	if got := m.push(p.ID); got.Status != store.StkPushStatusSent {
 		t.Fatalf("push %s, want still sent", got.Status)
 	}
-	assertStatus(t, m.reqState(prod, req.ID), allocation.StatusPartiallyPaid, 200)
-	m.mpesaInvariants(invariantOpts{allowCreditWithPayable: true})
+	m.assertCharge(req.ID, store.ChargeStatusPending)
+	if c := m.count(`SELECT count(*) FROM events ev JOIN mpesa_callbacks cb ON cb.transaction_id = ev.subject_id
+		WHERE cb.id = $1 AND ev.type = 'payment.received'`, id); c != 1 {
+		t.Fatalf("payment.received events %d", c)
+	}
+	m.mpesaInvariants()
 }
 
 // The customer pays at the paybill (completing the waiting prompt) and then
@@ -611,10 +593,9 @@ func TestMpesaC2BDifferentAmountLeavesPromptWaiting(t *testing.T) {
 func TestMpesaC2BCompletesPromptThenPromptCancelled(t *testing.T) {
 	m := newMpesaEnv(t, nil, nil)
 	prod := m.app("CANCEL").App.ID
-	pa := m.mpesaPayer(prod)
-	req := m.request(prod, pa.ID, 500)
+	req := m.charge(prod, 500)
 	p := m.mustSend(prod, req.ID, newPhone(0))
-	if _, err := m.deliver(store.MpesaCallbackKindC2bConfirmation, c2bBody(newMpesaReceipt(), 500, pa.AccountNumber)); err != nil {
+	if _, err := m.deliver(store.MpesaCallbackKindC2bConfirmation, c2bBody(newMpesaReceipt(), 500, req.AccountNumber)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := m.deliver(store.MpesaCallbackKindStk, stkFailureBody(*p.CheckoutRequestID, "1032", "Request cancelled by user")); err != nil {
@@ -626,6 +607,6 @@ func TestMpesaC2BCompletesPromptThenPromptCancelled(t *testing.T) {
 	if n := m.alarms("STK failure callback after the push succeeded"); n != 0 {
 		t.Fatalf("%d alarms for an expected cancel after a paybill payment", n)
 	}
-	assertStatus(t, m.reqState(prod, req.ID), allocation.StatusPaid, 500)
-	m.mpesaInvariants(invariantOpts{})
+	m.assertCharge(req.ID, store.ChargeStatusSucceeded)
+	m.mpesaInvariants()
 }
