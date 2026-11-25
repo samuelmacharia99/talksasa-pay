@@ -211,10 +211,10 @@ done
 check "unknown prefix recorded as unmatched" "$([[ -n "$t6" ]] && echo yes || echo no)" yes
 check "no event before assignment" "$(count_events payment.received receipt "$r6")" "0"
 if [[ -n "$t6" ]]; then
-  admin txn assign --id "$t6" --app "$PREFIX" --reason "e2e: customer mistyped the prefix" --actor e2e-mpesa >/dev/null ||
+  admin txn assign --txn "$t6" --app "$PREFIX" --reason "e2e: customer mistyped the prefix" --actor e2e-mpesa >/dev/null ||
     bad "admin txn assign failed"
   expect_event "payment.received after admin txn assign" payment.received transaction_id "$t6"
-  if admin txn assign --id "$t6" --app "$PREFIX" --reason "e2e: second assign" --actor e2e-mpesa >/dev/null 2>&1; then
+  if admin txn assign --txn "$t6" --app "$PREFIX" --reason "e2e: second assign" --actor e2e-mpesa >/dev/null 2>&1; then
     bad "a payment can be assigned only once"
   else
     ok "a payment can be assigned only once"
@@ -223,7 +223,7 @@ fi
 
 echo "== 7. reversal by an admin"
 rr="RV$(date +%s | tail -c 9)"
-admin txn reverse --id "$c1_txn" --receipt "$rr" --reason "e2e: Safaricom reversed the payment" --actor e2e-mpesa >/dev/null ||
+admin txn reverse --txn "$c1_txn" --receipt "$rr" --reason "e2e: Safaricom reversed the payment" --actor e2e-mpesa >/dev/null ||
   bad "admin txn reverse failed"
 expect_event "transaction.reversed delivered and verified" transaction.reversed reverses_transaction_id "$c1_txn"
 check "reversal names the charge" "$(event_field transaction.reversed reverses_transaction_id "$c1_txn" charge_id)" "$c1_id"

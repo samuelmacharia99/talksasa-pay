@@ -324,7 +324,7 @@ Staff with the Finance or Admin role assign it:
 From the CLI (same rules, same audit entry):
 
 ```sh
-talksasa-pay admin txn assign --id <transaction id> --app HOST --reason "..." --actor "Your Name"
+talksasa-pay admin txn assign --txn <transaction id> --app HOST --reason "..." --actor "Your Name"
 ```
 
 Assignment is set once: an assigned payment can't be moved to another app.
@@ -345,7 +345,7 @@ system), record it so the books and the app agree. **Admin role only.**
 From the CLI:
 
 ```sh
-talksasa-pay admin txn reverse --id <transaction id> --receipt <reversal receipt> --reason "..." --actor "Your Name"
+talksasa-pay admin txn reverse --txn <transaction id> --receipt <reversal receipt> --reason "..." --actor "Your Name"
 ```
 
 A payment can be reversed once. Nothing is edited or deleted, and a
