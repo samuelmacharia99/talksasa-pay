@@ -281,4 +281,3 @@ func seedReceipt() string {
 	return "SD" + base32.StdEncoding.EncodeToString(b)
 }
 
-func ptr[T any](v T) *T { return &v }
