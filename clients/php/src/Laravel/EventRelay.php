@@ -21,20 +21,18 @@ use Talksasa\Pay\Model\EventType;
  */
 class EventRelay
 {
-    private const CLASSES = [
-        EventType::PAYMENT_REQUEST_CREATED => Events\PaymentRequestCreated::class,
-        EventType::PAYMENT_REQUEST_PARTIALLY_PAID => Events\PaymentRequestPartiallyPaid::class,
-        EventType::PAYMENT_REQUEST_PAID => Events\PaymentRequestPaid::class,
-        EventType::PAYMENT_REQUEST_REOPENED => Events\PaymentRequestReopened::class,
-        EventType::PAYMENT_REQUEST_CANCELLED => Events\PaymentRequestCancelled::class,
-        EventType::PAYMENT_REQUEST_EXPIRED => Events\PaymentRequestExpired::class,
-        EventType::TRANSACTION_ALLOCATED => Events\TransactionAllocated::class,
-        EventType::TRANSACTION_REVERSED => Events\TransactionReversed::class,
-        EventType::PAYER_CREDIT_CHANGED => Events\PayerCreditChanged::class,
+    /** Event type => the Laravel event dispatched for it (then WebhookReceived). */
+    public const CLASSES = [
+        EventType::CHARGE_SUCCEEDED => Events\ChargeSucceeded::class,
+        EventType::CHARGE_NEEDS_REVIEW => Events\ChargeNeedsReview::class,
+        EventType::CHARGE_EXPIRED => Events\ChargeExpired::class,
+        EventType::CHARGE_CANCELLED => Events\ChargeCancelled::class,
         EventType::STK_PUSH_SENT => Events\StkPushSent::class,
-        EventType::STK_PUSH_SUCCEEDED => Events\StkPushSucceeded::class,
         EventType::STK_PUSH_FAILED => Events\StkPushFailed::class,
+        EventType::STK_PUSH_SUCCEEDED => Events\StkPushSucceeded::class,
         EventType::STK_PUSH_NEEDS_REVIEW => Events\StkPushNeedsReview::class,
+        EventType::PAYMENT_RECEIVED => Events\PaymentReceived::class,
+        EventType::TRANSACTION_REVERSED => Events\TransactionReversed::class,
     ];
 
     public function __construct(

@@ -5,18 +5,19 @@ declare(strict_types=1);
 namespace Talksasa\Pay\Tests\Unit;
 
 use DateTimeImmutable;
-use DateTimeZone;
 use GuzzleHttp\Psr7\HttpFactory;
 use Talksasa\Pay\Client;
 use Talksasa\Pay\Exception\UnexpectedResponseException;
-use Talksasa\Pay\Model\Allocation;
-use Talksasa\Pay\Model\CreditChange;
-use Talksasa\Pay\Model\PaymentRequest;
+use Talksasa\Pay\Model\Charge;
+use Talksasa\Pay\Model\PaymentReceived;
+use Talksasa\Pay\Model\StkPush;
 use Talksasa\Pay\Model\Transaction;
 use Talksasa\Pay\Tests\Support\Fixtures;
 
 final class ClientTest extends ClientTestCase
 {
+    private const UUID4 = '/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/';
+
     private function assertCommonHeaders(): void
     {
         $r = $this->http->last();
@@ -27,142 +28,171 @@ final class ClientTest extends ClientTestCase
 
     public function testWhoami(): void
     {
-        $this->http->pushJson(200, ['product_id' => 'p-1', 'product_name' => 'Cloud Hosting', 'account_prefix' => 'HOST', 'key_id' => 'k1a2b3']);
+        $this->http->pushJson(200, Fixtures::whoami());
         $me = $this->client()->whoami();
 
         self::assertSame('GET', $this->http->last()->getMethod());
         self::assertSame(Fixtures::BASE_URL . '/v1/whoami', (string) $this->http->last()->getUri());
         $this->assertCommonHeaders();
         self::assertSame('HOST', $me->accountPrefix);
-        self::assertSame('Cloud Hosting', $me->productName);
+        self::assertSame('Cloud Hosting', $me->appName);
+        self::assertSame('0193a1b2-0000-7000-8000-0000000000a1', $me->appId);
         self::assertSame('k1a2b3', $me->keyId);
     }
 
-    public function testUpsertPayerSendsFullReplacementAndEncodesRef(): void
+    public function testCreateChargeMinimalGeneratesUuidV4IdempotencyKey(): void
     {
-        $this->http->pushJson(201, Fixtures::payer());
-        $payer = $this->client()->upsertPayer('cust/77 ü', 'Wanjiku Kamau', 'wanjiku@example.com', ['0712345678', '+254722000000']);
-
-        $r = $this->http->last();
-        self::assertSame('PUT', $r->getMethod());
-        self::assertSame('/v1/payers/cust%2F77%20%C3%BC', $r->getUri()->getPath());
-        self::assertSame('application/json', $r->getHeaderLine('Content-Type'));
-        self::assertSame(
-            ['display_name' => 'Wanjiku Kamau', 'email' => 'wanjiku@example.com', 'phones' => ['0712345678', '+254722000000']],
-            $this->http->lastJson(),
-        );
-        self::assertFalse($r->hasHeader('Idempotency-Key'));
-        $this->assertCommonHeaders();
-
-        self::assertSame('HOST-1042', $payer->accountNumber);
-        self::assertSame(200, $payer->creditBalance);
-        self::assertSame(['2547****5678'], $payer->phones);
-        self::assertTrue($payer->isActive());
-        self::assertSame('2026-11-02T10:00:00.500000+00:00', $payer->updatedAt->format('Y-m-d\TH:i:s.uP'));
-    }
-
-    public function testUpsertPayerDefaultsClearEmailAndPhones(): void
-    {
-        $this->http->pushJson(200, Fixtures::payer(['email' => null, 'phones' => []]));
-        $payer = $this->client()->upsertPayer('cust-77', 'Wanjiku');
-        self::assertSame(['display_name' => 'Wanjiku', 'email' => null, 'phones' => []], $this->http->lastJson());
-        self::assertNull($payer->email);
-    }
-
-    public function testGetPayer(): void
-    {
-        $this->http->pushJson(200, Fixtures::payer());
-        $this->client()->getPayer('cust-77');
-        self::assertSame('GET', $this->http->last()->getMethod());
-        self::assertSame('/v1/payers/cust-77', $this->http->last()->getUri()->getPath());
-        self::assertSame('', (string) $this->http->last()->getBody());
-    }
-
-    public function testCreatePaymentRequestGeneratesUuidV4IdempotencyKey(): void
-    {
-        $this->http->pushJson(201, Fixtures::paymentRequest());
-        $pr = $this->client()->createPaymentRequest('cust-77', 'INV-1042', 'Cloud hosting, December 2026', 1500);
+        $this->http->pushJson(201, Fixtures::charge());
+        $charge = $this->client()->createCharge(1500, 'INV-1042');
 
         $r = $this->http->last();
         self::assertSame('POST', $r->getMethod());
-        self::assertSame('/v1/payment-requests', $r->getUri()->getPath());
-        self::assertMatchesRegularExpression('/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', $r->getHeaderLine('Idempotency-Key'));
-        self::assertSame(
-            ['payer' => 'cust-77', 'reference' => 'INV-1042', 'description' => 'Cloud hosting, December 2026', 'amount' => 1500],
-            $this->http->lastJson(),
-        );
+        self::assertSame('/v1/charges', $r->getUri()->getPath());
+        self::assertSame('application/json', $r->getHeaderLine('Content-Type'));
+        self::assertMatchesRegularExpression(self::UUID4, $r->getHeaderLine('Idempotency-Key'));
+        self::assertSame(['reference' => 'INV-1042', 'amount' => 1500], $this->http->lastJson());
         $this->assertCommonHeaders();
 
-        self::assertSame(1300, $pr->outstanding);
-        self::assertSame(PaymentRequest::STATUS_PARTIALLY_PAID, $pr->status);
-        self::assertTrue($pr->isPayable());
-        self::assertSame('https://pay.talksasa.co.ke/tok_abc', $pr->payUrl);
-        self::assertSame('4123456', $pr->paybill?->businessNumber);
-        self::assertSame('cust-77', $pr->payer->externalRef);
+        self::assertSame(Fixtures::CHARGE_ID, $charge->id);
+        self::assertSame(1500, $charge->amount);
+        self::assertSame('KES', $charge->currency);
+        self::assertSame(Charge::STATUS_PENDING, $charge->status);
+        self::assertTrue($charge->isPending());
+        self::assertFalse($charge->isSucceeded());
+        self::assertFalse($charge->needsReview());
+        self::assertSame('HOST-4K7QZ9M', $charge->accountNumber);
+        self::assertSame('https://pay.talksasa.co.ke/c/tok_abc', $charge->checkoutUrl);
+        self::assertSame('4123456', $charge->paybill?->businessNumber);
+        self::assertSame('HOST-4K7QZ9M', $charge->paybill?->accountNumber);
+        self::assertSame(['invoice_id' => 42, 'customer' => 'cust-77'], $charge->metadata);
+        self::assertNull($charge->latestStkPush);
+        self::assertNull($charge->transactionId);
+        self::assertNull($charge->succeededAt);
         // Go nanoseconds are truncated to microseconds.
-        self::assertSame('2026-11-29T08:00:00.123456', $pr->createdAt->format('Y-m-d\TH:i:s.u'));
-        self::assertNull($pr->paidAt);
+        self::assertSame('2026-11-29T08:00:00.123456', $charge->createdAt->format('Y-m-d\TH:i:s.u'));
+        self::assertSame('2026-11-30T08:00:00+00:00', $charge->expiresAt->format(DATE_ATOM));
     }
 
-    public function testCreatePaymentRequestUsesGivenKeyAndExpiry(): void
+    public function testCreateChargeWithEverything(): void
     {
-        $this->http->pushJson(200, Fixtures::paymentRequest(), ['Idempotent-Replayed' => 'true']);
-        $expires = new DateTimeImmutable('2026-12-31 23:59:59', new DateTimeZone('Africa/Nairobi'));
-        $this->client()->createPaymentRequest(
-            payer: 'cust-77',
-            reference: 'INV-1042',
-            description: 'x',
+        $this->http->pushJson(201, Fixtures::charge([
+            'account_number' => 'HOST-1042',
+            'latest_stk_push' => Fixtures::stkPush(),
+        ]));
+        $charge = $this->client()->createCharge(
             amount: 1500,
-            expiresAt: $expires,
-            idempotencyKey: 'invoice-1042-v1',
+            reference: 'INV-1042',
+            description: 'Cloud hosting, December 2026',
+            phone: ' 0712345678 ',
+            accountNumber: 'HOST-1042',
+            metadata: ['invoice_id' => 42],
+            expiresIn: 3600,
+            idempotencyKey: 'invoice-42-charge-1',
         );
 
-        self::assertSame('invoice-1042-v1', $this->http->last()->getHeaderLine('Idempotency-Key'));
-        self::assertSame('2026-12-31T20:59:59Z', $this->http->lastJson()['expires_at']);
+        self::assertSame('invoice-42-charge-1', $this->http->last()->getHeaderLine('Idempotency-Key'));
+        self::assertSame([
+            'reference' => 'INV-1042',
+            'amount' => 1500,
+            'description' => 'Cloud hosting, December 2026',
+            'phone' => '0712345678',
+            'account_number' => 'HOST-1042',
+            'metadata' => ['invoice_id' => 42],
+            'expires_in' => 3600,
+        ], $this->http->lastJson());
+        self::assertInstanceOf(StkPush::class, $charge->latestStkPush);
+        self::assertSame(StkPush::STATUS_SENT, $charge->latestStkPush->status);
+        self::assertSame(Fixtures::CHARGE_ID, $charge->latestStkPush->chargeId);
     }
 
-    public function testCreatePaymentRequestRejectsBadKeyLocally(): void
+    public function testCreateChargeEmptyMetadataIsAnObject(): void
     {
-        $this->expectException(\InvalidArgumentException::class);
-        $this->client()->createPaymentRequest('c', 'r', 'd', 1, idempotencyKey: "bad\nkey");
+        $this->http->pushJson(201, Fixtures::charge(['metadata' => null, 'description' => null]));
+        $charge = $this->client()->createCharge(10, 'r', metadata: []);
+        self::assertSame('{"reference":"r","amount":10,"metadata":{}}', (string) $this->http->last()->getBody());
+        self::assertNull($charge->metadata);
+        self::assertNull($charge->description);
+    }
+
+    public function testCreateChargeRejectsBadInputLocally(): void
+    {
+        $cases = [
+            static fn (Client $c) => $c->createCharge(1, 'r', metadata: ['a', 'b']),
+            static fn (Client $c) => $c->createCharge(1, 'r', phone: '  '),
+            static fn (Client $c) => $c->createCharge(1, 'r', idempotencyKey: "bad\nkey"),
+            static fn (Client $c) => $c->createCharge(1, 'r', idempotencyKey: str_repeat('k', 256)),
+        ];
+        foreach ($cases as $i => $call) {
+            try {
+                $call($this->client());
+                self::fail("case {$i}: expected InvalidArgumentException");
+            } catch (\InvalidArgumentException) {
+            }
+        }
+        self::assertSame([], $this->http->requests);
+    }
+
+    public function testEachCreateGetsItsOwnKey(): void
+    {
+        $this->http->pushJson(201, Fixtures::charge())->pushJson(201, Fixtures::charge());
+        $c = $this->client();
+        $c->createCharge(1, 'a');
+        $c->createCharge(1, 'b');
+        self::assertNotSame($this->http->requests[0]->getHeaderLine('Idempotency-Key'), $this->http->requests[1]->getHeaderLine('Idempotency-Key'));
     }
 
     public function testCustomIdempotencyKeyGenerator(): void
     {
-        $this->http->pushJson(201, Fixtures::paymentRequest());
-        $this->client(keys: static fn (): string => 'fixed-key')->createPaymentRequest('c', 'r', 'd', 1);
+        $this->http->pushJson(201, Fixtures::charge());
+        $this->client(keys: static fn (): string => 'fixed-key')->createCharge(1, 'r');
         self::assertSame('fixed-key', $this->http->last()->getHeaderLine('Idempotency-Key'));
     }
 
-    public function testGetAndCancelPaymentRequest(): void
+    public function testGetAndCancelCharge(): void
     {
-        $this->http->pushJson(200, Fixtures::paymentRequest());
-        $this->http->pushJson(200, Fixtures::paymentRequest(['status' => 'cancelled', 'paybill' => null, 'closed_at' => '2026-11-30T00:00:00Z']));
+        $this->http->pushJson(200, Fixtures::succeededCharge());
+        $this->http->pushJson(200, Fixtures::charge(['status' => 'cancelled', 'paybill' => null]));
         $c = $this->client();
 
-        $c->getPaymentRequest(Fixtures::REQUEST_ID);
+        $got = $c->getCharge(Fixtures::CHARGE_ID);
         self::assertSame('GET', $this->http->last()->getMethod());
-        self::assertSame('/v1/payment-requests/' . Fixtures::REQUEST_ID, $this->http->last()->getUri()->getPath());
+        self::assertSame('/v1/charges/' . Fixtures::CHARGE_ID, $this->http->last()->getUri()->getPath());
+        self::assertTrue($got->isSucceeded());
+        self::assertSame(Fixtures::TXN_ID, $got->transactionId);
+        self::assertNotNull($got->succeededAt);
+        self::assertTrue($got->latestStkPush?->isSucceeded());
 
-        $pr = $c->cancelPaymentRequest(Fixtures::REQUEST_ID);
+        $cancelled = $c->cancelCharge('a/b');
         self::assertSame('POST', $this->http->last()->getMethod());
-        self::assertSame('/v1/payment-requests/' . Fixtures::REQUEST_ID . '/cancel', $this->http->last()->getUri()->getPath());
+        self::assertSame('/v1/charges/a%2Fb/cancel', $this->http->last()->getUri()->getPath());
         self::assertSame('', (string) $this->http->last()->getBody());
-        self::assertSame('cancelled', $pr->status);
-        self::assertNull($pr->paybill);
-        self::assertFalse($pr->isPayable());
-        self::assertNotNull($pr->closedAt);
+        self::assertFalse($this->http->last()->hasHeader('Idempotency-Key'));
+        self::assertSame(Charge::STATUS_CANCELLED, $cancelled->status);
+        self::assertNull($cancelled->paybill);
+        self::assertFalse($cancelled->isPending());
     }
 
-    public function testListPaymentRequestsQuery(): void
+    public function testEmptyIdIsRejectedLocally(): void
     {
-        $this->http->pushJson(200, ['data' => [Fixtures::paymentRequest()], 'next_cursor' => 'c2']);
-        $page = $this->client()->listPaymentRequests(status: 'open', reference: 'INV 1', payer: 'cust-77', cursor: 'c1', limit: 10);
+        $this->expectException(\InvalidArgumentException::class);
+        try {
+            $this->client()->getCharge('');
+        } finally {
+            self::assertSame([], $this->http->requests);
+        }
+    }
 
+    public function testListChargesQuery(): void
+    {
+        $this->http->pushJson(200, ['data' => [Fixtures::charge()], 'next_cursor' => 'c2']);
+        $page = $this->client()->listCharges(status: 'pending', reference: 'INV 1', cursor: 'c1', limit: 10);
+
+        self::assertSame('/v1/charges', $this->http->last()->getUri()->getPath());
         parse_str($this->http->last()->getUri()->getQuery(), $q);
-        self::assertSame(['status' => 'open', 'reference' => 'INV 1', 'payer' => 'cust-77', 'cursor' => 'c1', 'limit' => '10'], $q);
+        self::assertSame(['status' => 'pending', 'reference' => 'INV 1', 'cursor' => 'c1', 'limit' => '10'], $q);
         self::assertStringContainsString('reference=INV%201', $this->http->last()->getUri()->getQuery());
         self::assertCount(1, $page);
+        self::assertInstanceOf(Charge::class, $page->data[0]);
         self::assertSame('c2', $page->nextCursor);
         self::assertTrue($page->hasMore());
     }
@@ -170,70 +200,98 @@ final class ClientTest extends ClientTestCase
     public function testListOmitsNullFilters(): void
     {
         $this->http->pushJson(200, ['data' => [], 'next_cursor' => null]);
-        $page = $this->client()->listPaymentRequests();
+        $page = $this->client()->listCharges();
         self::assertSame('', $this->http->last()->getUri()->getQuery());
         self::assertFalse($page->hasMore());
     }
 
-    public function testPaymentRequestsGeneratorFollowsCursors(): void
+    public function testChargesGeneratorFollowsCursors(): void
     {
-        $this->http->pushJson(200, ['data' => [Fixtures::paymentRequest(['id' => 'a']), Fixtures::paymentRequest(['id' => 'b'])], 'next_cursor' => 'c2']);
-        $this->http->pushJson(200, ['data' => [Fixtures::paymentRequest(['id' => 'c'])], 'next_cursor' => null]);
+        $this->http->pushJson(200, ['data' => [Fixtures::charge(['id' => 'a']), Fixtures::charge(['id' => 'b'])], 'next_cursor' => 'c2']);
+        $this->http->pushJson(200, ['data' => [Fixtures::charge(['id' => 'c'])], 'next_cursor' => null]);
 
-        $gen = $this->client()->paymentRequests(status: 'open', pageSize: 2);
+        $gen = $this->client()->charges(status: 'pending', pageSize: 2);
         self::assertCount(0, $this->http->requests, 'generator is lazy');
-        $ids = array_map(static fn (PaymentRequest $p) => $p->id, iterator_to_array($gen, false));
+        $ids = array_map(static fn (Charge $c) => $c->id, iterator_to_array($gen, false));
 
         self::assertSame(['a', 'b', 'c'], $ids);
         self::assertCount(2, $this->http->requests);
         parse_str($this->http->requests[0]->getUri()->getQuery(), $q0);
         parse_str($this->http->requests[1]->getUri()->getQuery(), $q1);
-        self::assertSame(['status' => 'open', 'limit' => '2'], $q0);
-        self::assertSame(['status' => 'open', 'cursor' => 'c2', 'limit' => '2'], $q1);
+        self::assertSame(['status' => 'pending', 'limit' => '2'], $q0);
+        self::assertSame(['status' => 'pending', 'cursor' => 'c2', 'limit' => '2'], $q1);
     }
 
-    public function testTransactions(): void
+    public function testChargesGeneratorStopsOnRepeatedCursor(): void
+    {
+        $this->http->pushJson(200, ['data' => [Fixtures::charge(['id' => 'a'])], 'next_cursor' => 'same']);
+        $this->http->pushJson(200, ['data' => [Fixtures::charge(['id' => 'b'])], 'next_cursor' => 'same']);
+        $ids = [];
+        try {
+            foreach ($this->client()->charges() as $c) {
+                $ids[] = $c->id;
+            }
+            self::fail('expected exception');
+        } catch (UnexpectedResponseException $e) {
+            self::assertStringContainsString('repeated', $e->getMessage());
+        }
+        self::assertSame(['a', 'b'], $ids);
+        self::assertCount(2, $this->http->requests);
+    }
+
+    public function testTransactionsFilterByCharge(): void
     {
         $this->http->pushJson(200, ['data' => [Fixtures::transaction()], 'next_cursor' => 'n']);
         $this->http->pushJson(200, ['data' => [], 'next_cursor' => null]);
         $since = new DateTimeImmutable('2026-11-01T03:00:00+03:00');
 
-        $all = iterator_to_array($this->client()->transactions(payer: 'cust-77', since: $since), false);
+        $all = iterator_to_array($this->client()->transactions(chargeId: Fixtures::CHARGE_ID, since: $since), false);
 
         parse_str($this->http->requests[0]->getUri()->getQuery(), $q);
         self::assertSame('/v1/transactions', $this->http->requests[0]->getUri()->getPath());
-        self::assertSame(['payer' => 'cust-77', 'since' => '2026-11-01T00:00:00Z'], $q);
+        self::assertSame(['charge_id' => Fixtures::CHARGE_ID, 'since' => '2026-11-01T00:00:00Z'], $q);
         self::assertCount(1, $all);
         $t = $all[0];
         self::assertInstanceOf(Transaction::class, $t);
-        self::assertSame(2000, $t->amount);
+        self::assertSame(1500, $t->amount);
         self::assertSame('TKR12ABC34', $t->receipt);
-        self::assertCount(2, $t->allocations);
-        self::assertSame(1300, $t->allocations[0]->amount);
-        self::assertTrue($t->allocations[1]->isToCredit());
-        self::assertSame(Allocation::KIND_PAYMENT, $t->allocations[1]->kind);
+        self::assertSame(Fixtures::CHARGE_ID, $t->chargeId);
+        self::assertSame('HOST-4K7QZ9M', $t->accountNumber);
+        self::assertFalse($t->isReversal());
         self::assertSame('2026-11-30T06:15:00+00:00', $t->occurredAt?->format(DATE_ATOM));
+    }
+
+    public function testListTransactionsPage(): void
+    {
+        $this->http->pushJson(200, ['data' => [Fixtures::reversal()], 'next_cursor' => null]);
+        $page = $this->client()->listTransactions(cursor: 'c1', limit: 5);
+        parse_str($this->http->last()->getUri()->getQuery(), $q);
+        self::assertSame(['cursor' => 'c1', 'limit' => '5'], $q);
+        self::assertTrue($page->data[0]->isReversal());
+        self::assertSame(Fixtures::TXN_ID, $page->data[0]->reversesTransactionId);
     }
 
     public function testGetTransaction(): void
     {
-        $this->http->pushJson(200, Fixtures::transaction(['payer' => null, 'receipt' => null, 'phone' => null, 'occurred_at' => null]));
+        $this->http->pushJson(200, Fixtures::transaction(['charge_id' => null, 'receipt' => null, 'phone' => null, 'account_number' => null, 'occurred_at' => null]));
         $t = $this->client()->getTransaction(Fixtures::TXN_ID);
         self::assertSame('/v1/transactions/' . Fixtures::TXN_ID, $this->http->last()->getUri()->getPath());
-        self::assertNull($t->payer);
+        self::assertNull($t->chargeId);
         self::assertNull($t->receipt);
+        self::assertNull($t->accountNumber);
     }
 
     public function testListEventsAndTypedData(): void
     {
         $this->http->pushJson(200, [
             'data' => [
-                Fixtures::event('payment_request.paid', id: 'e1'),
-                Fixtures::event('transaction.allocated', id: 'e2'),
-                Fixtures::event('payer.credit_changed', id: 'e3'),
-                Fixtures::event('something.new', ['whatever' => 1], 'e4'),
+                Fixtures::event('charge.succeeded', id: 'e1'),
+                Fixtures::event('stk_push.failed', id: 'e2'),
+                Fixtures::event('payment.received', Fixtures::paymentReceived(['duplicate_of_charge' => Fixtures::CHARGE_ID]), 'e3'),
+                Fixtures::event('transaction.reversed', id: 'e4'),
+                Fixtures::event('something.new', ['whatever' => 1], 'e5'),
             ],
-            'next_cursor' => 'cur-4',
+            'next_cursor' => 'cur-5',
             'has_more' => false,
         ]);
         $page = $this->client()->listEvents(after: 'cur-0', limit: 50);
@@ -242,16 +300,21 @@ final class ClientTest extends ClientTestCase
         self::assertSame('/v1/events', $this->http->last()->getUri()->getPath());
         self::assertSame(['after' => 'cur-0', 'limit' => '50'], $q);
         self::assertFalse($page->hasMore);
-        self::assertSame('cur-4', $page->nextCursor);
-        [$e1, $e2, $e3, $e4] = $page->data;
-        self::assertTrue($e1->paymentRequest()->isPaid());
-        self::assertSame(2000, $e2->transaction()->amount);
-        self::assertInstanceOf(CreditChange::class, $e3->data);
-        self::assertSame(900, $e3->creditChange()->creditBalance);
-        self::assertSame(700, $e3->creditChange()->delta);
-        self::assertNull($e4->data);
-        self::assertSame(['whatever' => 1], $e4->rawData);
-        self::assertSame('2026-11-24', $e1->apiVersion);
+        self::assertSame('cur-5', $page->nextCursor);
+        [$e1, $e2, $e3, $e4, $e5] = $page->data;
+        self::assertTrue($e1->charge()->isSucceeded());
+        self::assertSame('2026-11-25', $e1->apiVersion);
+        self::assertTrue($e2->stkPush()->isFailed());
+        self::assertInstanceOf(PaymentReceived::class, $e3->data);
+        self::assertTrue($e3->paymentReceived()->isDuplicate());
+        self::assertSame(Fixtures::CHARGE_ID, $e3->paymentReceived()->duplicateOfCharge);
+        self::assertSame(700, $e3->transaction()->amount);
+        self::assertTrue($e4->transaction()->isReversal());
+        self::assertNotInstanceOf(PaymentReceived::class, $e4->data);
+        self::assertTrue($e4->isKnownType());
+        self::assertNull($e5->data);
+        self::assertFalse($e5->isKnownType());
+        self::assertSame(['whatever' => 1], $e5->rawData);
     }
 
     public function testEventsGeneratorDrainsFeed(): void
@@ -270,19 +333,19 @@ final class ClientTest extends ClientTestCase
 
     public function testMissingRequiredFieldThrows(): void
     {
-        $bad = Fixtures::paymentRequest();
+        $bad = Fixtures::charge();
         unset($bad['amount']);
         $this->http->pushJson(200, $bad);
         $this->expectException(UnexpectedResponseException::class);
         $this->expectExceptionMessage('"amount"');
-        $this->client()->getPaymentRequest('x');
+        $this->client()->getCharge('x');
     }
 
     public function testAmountAsFloatIsRejected(): void
     {
-        $this->http->pushJson(200, Fixtures::paymentRequest(['amount' => 1500.5]));
+        $this->http->pushJson(200, Fixtures::charge(['amount' => 1500.5]));
         $this->expectException(UnexpectedResponseException::class);
-        $this->client()->getPaymentRequest('x');
+        $this->client()->getCharge('x');
     }
 
     public function testNonJsonSuccessBodyThrows(): void

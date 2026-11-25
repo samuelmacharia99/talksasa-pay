@@ -11,7 +11,7 @@ import (
 
 var sampleSTK = map[string]any{
 	"object": "stk_push", "id": "0193a5f2-0000-7000-8000-0000000000cc",
-	"payment_request_id": "0193a5f2-0000-7000-8000-000000000001", "transaction_id": "0193a5f2-0000-7000-8000-00000000000a",
+	"charge_id": testChargeID, "transaction_id": "0193a5f2-0000-7000-8000-00000000000a",
 	"status": "sent", "amount": 1500, "phone": "2547****5678", "checkout_request_id": "ws_CO_1",
 	"result_code": nil, "result_desc": nil,
 	"created_at": "2026-11-24T10:00:00Z", "updated_at": "2026-11-24T10:00:01Z", "completed_at": nil, "future": 1,
@@ -39,14 +39,14 @@ func TestSTKPush(t *testing.T) {
 	}
 
 	reqs := f.requests()
-	checkCommon(t, reqs[0], "POST", "/v1/payment-requests/0193a5f2-0000-7000-8000-000000000001/stk-push")
+	checkCommon(t, reqs[0], "POST", "/v1/charges/0193a5f2-0000-7000-8000-000000000001/stk-push")
 	if reqs[0].Body != `{"phone":"0712345678"}` {
 		t.Fatalf("body %s", reqs[0].Body)
 	}
 	if k := reqs[0].Header.Get("Idempotency-Key"); !strings.HasPrefix(k, "tspgo_") {
 		t.Fatalf("auto key %q", k)
 	}
-	if reqs[1].RawPath != "/v1/payment-requests/a%2Fb/stk-push" || reqs[1].Header.Get("Idempotency-Key") != "invoice-1-stk-1" {
+	if reqs[1].RawPath != "/v1/charges/a%2Fb/stk-push" || reqs[1].Header.Get("Idempotency-Key") != "invoice-1-stk-1" {
 		t.Fatalf("%s key %q", reqs[1].RawPath, reqs[1].Header.Get("Idempotency-Key"))
 	}
 }
@@ -142,11 +142,11 @@ func TestGetSTKPushAndEvents(t *testing.T) {
 		if err != nil || got.ResultDesc == nil || *got.ResultDesc != "Request cancelled by user" {
 			t.Fatalf("%s: %v %+v", typ, err, got)
 		}
-		if _, err := ev.PaymentRequest(); err == nil {
-			t.Fatalf("%s decoded as a payment request", typ)
+		if _, err := ev.Charge(); err == nil {
+			t.Fatalf("%s decoded as a charge", typ)
 		}
 	}
-	if _, err := (Event{ID: "e", Type: EventPaymentRequestPaid, Data: data}).STKPush(); err == nil {
-		t.Fatal("payment_request.paid decoded as an STK push")
+	if _, err := (Event{ID: "e", Type: EventChargeSucceeded, Data: data}).STKPush(); err == nil {
+		t.Fatal("charge.succeeded decoded as an STK push")
 	}
 }

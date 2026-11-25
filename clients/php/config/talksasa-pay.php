@@ -11,7 +11,7 @@ return [
     'base_url' => env('TALKSASA_PAY_BASE_URL'),
 
     /*
-    | Product API key: tsp_live_... in production, tsp_test_... elsewhere.
+    | App API key: tsp_live_... in production, tsp_test_... elsewhere.
     | Keep it in .env only; never commit it, never log it.
     */
     'api_key' => env('TALKSASA_PAY_API_KEY'),

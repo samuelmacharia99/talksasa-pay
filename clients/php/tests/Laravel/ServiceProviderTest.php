@@ -22,7 +22,7 @@ final class ServiceProviderTest extends LaravelTestCase
 
     public function testFacadeCallsTheApi(): void
     {
-        $this->http->pushJson(200, ['product_id' => 'p', 'product_name' => 'Cloud', 'account_prefix' => 'HOST', 'key_id' => 'k']);
+        $this->http->pushJson(200, Fixtures::whoami());
         self::assertSame('HOST', TalksasaPay::whoami()->accountPrefix);
         self::assertSame('Bearer ' . Fixtures::API_KEY, $this->http->last()->getHeaderLine('Authorization'));
     }

@@ -1,6 +1,6 @@
 {
     "name": "talksasa/pay-php",
-    "description": "PHP client for the Talksasa Pay product API (/v1), webhook verification and a Laravel bridge.",
+    "description": "PHP client for the Talksasa Pay app API (/v1: charges, M-Pesa prompts, events), webhook verification and a Laravel bridge.",
     "type": "library",
     "license": "proprietary",
     "keywords": ["talksasa", "mpesa", "payments", "webhooks", "laravel"],

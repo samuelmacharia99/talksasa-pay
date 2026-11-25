@@ -7,7 +7,7 @@ namespace Talksasa\Pay\Tests\Laravel;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event as EventFacade;
-use Talksasa\Pay\Laravel\Events\PaymentRequestPaid;
+use Talksasa\Pay\Laravel\Events\ChargeSucceeded;
 use Talksasa\Pay\Laravel\Events\TalksasaPayEvent;
 use Talksasa\Pay\Laravel\Events\WebhookReceived;
 use Talksasa\Pay\Tests\Support\Fixtures;
@@ -17,7 +17,7 @@ final class PollEventsCommandTest extends LaravelTestCase
 {
     public function testPollsDispatchesAndStoresCursorInCache(): void
     {
-        EventFacade::fake([PaymentRequestPaid::class, WebhookReceived::class]);
+        EventFacade::fake([ChargeSucceeded::class, WebhookReceived::class]);
         $this->http->pushJson(200, ['data' => [Fixtures::event(id: 'e1'), Fixtures::event(id: 'e2')], 'next_cursor' => 'c2', 'has_more' => true]);
         $this->http->pushJson(200, ['data' => [Fixtures::event(id: 'e3')], 'next_cursor' => 'c3', 'has_more' => false]);
 
@@ -25,7 +25,7 @@ final class PollEventsCommandTest extends LaravelTestCase
             ->expectsOutputToContain('Read 3 event(s); dispatched 3 new, skipped 0')
             ->assertSuccessful();
 
-        EventFacade::assertDispatchedTimes(PaymentRequestPaid::class, 3);
+        EventFacade::assertDispatchedTimes(ChargeSucceeded::class, 3);
         EventFacade::assertDispatched(WebhookReceived::class, fn (WebhookReceived $e) => $e->source === TalksasaPayEvent::SOURCE_POLL);
         self::assertSame('c3', Cache::get('talksasa-pay:events-cursor'));
         self::assertSame('limit=100', $this->http->requests[0]->getUri()->getQuery());
@@ -39,7 +39,7 @@ final class PollEventsCommandTest extends LaravelTestCase
 
     public function testEventAlreadyDeliveredByWebhookIsNotDispatchedAgain(): void
     {
-        EventFacade::fake([PaymentRequestPaid::class, WebhookReceived::class]);
+        EventFacade::fake([ChargeSucceeded::class, WebhookReceived::class]);
         $body = json_encode(Fixtures::event(id: 'e1'), JSON_THROW_ON_ERROR);
         $this->call('POST', '/webhooks/talksasa-pay', [], [], [], [
             'CONTENT_TYPE' => 'application/json',
@@ -51,7 +51,7 @@ final class PollEventsCommandTest extends LaravelTestCase
             ->expectsOutputToContain('dispatched 1 new, skipped 1 already handled')
             ->assertSuccessful();
 
-        EventFacade::assertDispatchedTimes(PaymentRequestPaid::class, 2);
+        EventFacade::assertDispatchedTimes(ChargeSucceeded::class, 2);
     }
 
     public function testFailureKeepsCursorAndExitsNonZero(): void

@@ -1,6 +1,6 @@
 # talksasa/pay-php
 
-PHP client for the Talksasa Pay product API (`/v1`), webhook signature
+PHP client for the Talksasa Pay app API (`/v1`), webhook signature
 verification, and a Laravel bridge. The core works in any framework or none;
 the Laravel parts (`Talksasa\Pay\Laravel\*`) load only in Laravel.
 
@@ -11,9 +11,43 @@ the Laravel parts (`Talksasa\Pay\Laravel\*`) load only in Laravel.
   client is installed.
 - Laravel 12 or 13 for the bridge (auto-discovered).
 
-The contract is `api/product.openapi.yaml` in the Talksasa Pay repository.
-Money is always **integer KES**. Products can request and read money; they
-can never record, move or refund it.
+The contract is `api/app.openapi.yaml` in the Talksasa Pay repository (a
+contract test keeps this package in step with it).
+
+## How it works
+
+Talksasa Pay is a payment gateway, like Paystack or Flutterwave, for the
+Talksasa M-Pesa paybill. Your app creates a **charge** ("collect KES 1,500
+for my reference INV-1042"); the gateway prompts the customer's phone (STK
+push) and/or the customer pays at the paybill with the charge's account
+number; the gateway confirms the payment with Safaricom and tells your app,
+with the M-Pesa receipt, by webhook and in the events feed. The gateway
+knows nothing about your customers or invoices: keep your own mapping from
+`reference` (and `metadata`) to your records.
+
+Money rules you must handle:
+
+- Amounts are **integer KES**, 1 to 250,000 per charge. A charge's amount,
+  reference and account number never change: to charge a different amount,
+  cancel and create a new charge.
+- `reference` is unique among your charges (`DuplicateReferenceException`).
+- A charge is `succeeded` only when Safaricom confirms a payment with a
+  receipt for exactly its amount. **Mark your invoice paid only on
+  `charge.succeeded`** (`ChargeSucceeded`), never on a sent prompt or
+  `needs_review`.
+- A failed prompt does **not** fail the charge: it stays `pending` and you
+  can prompt again.
+- Late money is never dropped: a charge you cancelled, or that expired, can
+  still become `succeeded`.
+- Money that pays no waiting charge arrives as `payment.received`
+  (`PaymentReceived`): a customer paying an already-succeeded charge again
+  (`duplicateOfCharge` set: refund or credit it yourself), or a paybill
+  payment with your account prefix that matched no waiting charge (you
+  decide what it pays).
+- Talksasa staff may reverse a payment: `transaction.reversed`
+  (`TransactionReversed`), and the charge becomes `reversed`.
+- Your app can request and read money; it can never record, move or refund
+  it.
 
 ## Install
 
@@ -27,7 +61,7 @@ VCS repository:
     { "type": "path", "url": "../talksasa-pay/clients/php" }
     // or: { "type": "vcs", "url": "git@github.com:talksasa/pay-php.git" } after a subtree split
 ],
-"require": { "talksasa/pay-php": "^0.1" }
+"require": { "talksasa/pay-php": "^0.2" }
 ```
 
 ```sh
@@ -62,143 +96,98 @@ php artisan vendor:publish --tag=talksasa-pay-config
 php artisan vendor:publish --tag=talksasa-pay-migrations && php artisan migrate
 ```
 
-Check the credentials: `php artisan tinker` then `TalksasaPay::whoami()`.
+Check the credentials: `php artisan tinker` then `TalksasaPay::whoami()`
+(your app's name and account prefix).
 
-### Create a payer and a payment request, send the customer to pay
+### "Pay invoice": create a charge, then checkout or prompt
 
-```php
-use Talksasa\Pay\Client;
-use Talksasa\Pay\Exception\DuplicateReferenceException;
-use Talksasa\Pay\Laravel\Facades\TalksasaPay;
-
-// 1. Upsert the customer (idempotent; full replacement: always send the
-//    current email and the full phone list).
-$payer = TalksasaPay::upsertPayer(
-    externalRef: (string) $user->id,
-    displayName: $user->name,
-    email: $user->email,
-    phones: [$user->phone],             // 0712..., +254712..., 254712...
-);
-// $payer->accountNumber, e.g. "HOST-1042": what the customer types as the
-// M-Pesa paybill account number. Show it on their billing page.
-
-// 2. Ask them to pay an invoice. Pass a stable idempotency key.
-$request = TalksasaPay::createPaymentRequest(
-    payer: (string) $user->id,
-    reference: $invoice->number,         // only one open request per reference
-    description: "Cloud hosting, {$invoice->period}",
-    amount: $invoice->total_kes,         // int, whole shillings
-    expiresAt: now()->addDays(14),       // optional
-    idempotencyKey: "invoice-{$invoice->id}-v1",
-);
-
-$invoice->update(['talksasa_request_id' => $request->id]);
-
-// Credit the payer already held is applied at once:
-if ($request->isPaid()) {
-    // nothing to pay; you'll also get a payment_request.paid event
-}
-
-// 3. Redirect to the hosted pay page (STK push and paybill instructions).
-return redirect()->away($request->payUrl);
-```
-
-Or inject `Talksasa\Pay\Client` instead of using the facade.
-
-### "Pay invoice" button: send an M-Pesa payment prompt
-
-Instead of redirecting to the pay page, you can send the M-Pesa prompt
-(STK push) straight to the customer's phone. They see "Pay KES 1,500 to
-Talksasa" and enter their PIN. The prompt is always for the request's full
-outstanding balance (at most KES 250,000).
-
-**The golden rule: mark the invoice paid only on `payment_request.paid`.**
-`stk_push.sent` means the prompt reached the phone; `stk_push.needs_review`
-means Safaricom said "paid" without a receipt and Talksasa staff are checking.
-Neither is money.
+The whole flow, as tested in `tests/Laravel/PayInvoiceExampleTest.php`:
 
 ```php
-// app/Http/Controllers/PayInvoiceController.php
 use Illuminate\Http\Request;
 use Talksasa\Pay\Exception\{AmountTooLargeException, MpesaErrorException, MpesaUnavailableException,
     NotPayableException, StkInProgressException, ValidationException};
 use Talksasa\Pay\Laravel\Facades\TalksasaPay;
 
-final class PayInvoiceController
-{
-    public function __invoke(Request $request, Invoice $invoice)
-    {
-        $phone = $request->validate(['phone' => ['required', 'string', 'max:20']])['phone'];
+Route::post('/invoices/{invoice}/pay', function (Request $request, Invoice $invoice) {
+    if ($invoice->status === 'paid') {
+        return view('invoices.paid', compact('invoice'));
+    }
 
-        // 1. Create the payment request for this invoice, or get the same one
-        //    back: the idempotency key makes a second click (or a retry after
-        //    a crash) return the original request.
-        $pr = TalksasaPay::createPaymentRequest(
-            payer: (string) $invoice->user_id,           // upserted earlier, see above
+    // One charge per invoice: create it once (the invoice number is the
+    // reference), then reuse it.
+    if ($invoice->talksasa_charge_id === null) {
+        $charge = TalksasaPay::createCharge(
+            amount: $invoice->total_kes,
             reference: $invoice->number,
             description: "Invoice {$invoice->number}",
-            amount: $invoice->total_kes,
-            idempotencyKey: "invoice-{$invoice->id}-v1",
+            metadata: ['invoice_id' => $invoice->id],
+            idempotencyKey: "invoice-{$invoice->id}-charge",   // a retry after a crash returns the same charge
         );
-        $invoice->update(['talksasa_request_id' => $pr->id, 'stk_message' => null]);
-        if ($pr->isPaid()) {                              // credit covered it
-            return to_route('invoices.show', $invoice);
-        }
-
-        // 2. Send the prompt. The client sends an Idempotency-Key and retries
-        //    timeouts/429/503 with that SAME key, so one call = at most one prompt.
-        try {
-            TalksasaPay::stkPush($pr->id, $phone);
-        } catch (StkInProgressException) {
-            // A prompt is already on their phone: same "check your phone" screen.
-        } catch (ValidationException) {
-            return back()->withErrors(['phone' => 'Enter a Safaricom number, e.g. 0712 345 678.']);
-        } catch (AmountTooLargeException | NotPayableException | MpesaUnavailableException | MpesaErrorException) {
-            // Prompts are not possible right now: show the paybill steps.
-            return view('invoices.paybill', ['paybill' => $pr->paybill]);
-        }
-
-        return view('invoices.check-phone', ['invoice' => $invoice]);
-        // "Check your phone and enter your M-Pesa PIN." The page polls your
-        // own endpoint, which reads $invoice->status and $invoice->stk_message.
+        $invoice->update(['talksasa_charge_id' => $charge->id]);
+    } else {
+        $charge = TalksasaPay::getCharge($invoice->talksasa_charge_id);
     }
-}
+    if ($charge->isSucceeded()) {
+        return view('invoices.paid', compact('invoice'));
+    }
+
+    // Option 1: the hosted checkout page (prompt + paybill instructions + live status).
+    if (! $request->filled('phone')) {
+        return redirect()->away($charge->checkoutUrl);
+    }
+
+    // Option 2: prompt the phone from your own page.
+    try {
+        TalksasaPay::stkPush($charge->id, $request->input('phone'));
+    } catch (StkInProgressException) {
+        // A prompt is already on the phone: show the same screen.
+    } catch (ValidationException) {
+        return back()->withErrors(['phone' => 'Enter a Safaricom number, e.g. 0712 345 678.']);
+    } catch (AmountTooLargeException | NotPayableException | MpesaUnavailableException | MpesaErrorException) {
+        return view('invoices.paybill', ['paybill' => $charge->paybill]);   // business number + account number
+    }
+    return view('invoices.check-phone');   // "Check your phone and enter your M-Pesa PIN"
+});
 ```
 
-The listeners (queued in a real app):
+`createCharge(phone: ...)` sends the first prompt in the same call (see
+`$charge->latestStkPush`); the separate `stkPush()` is for "try again".
+
+Then listen (queued listeners; see the rules below):
 
 ```php
-use Talksasa\Pay\Laravel\Events\{PaymentRequestPaid, StkPushFailed};
+use Talksasa\Pay\Laravel\Events\{ChargeSucceeded, PaymentReceived, StkPushFailed, TransactionReversed};
 
-// The ONLY place the invoice becomes paid.
-Event::listen(function (PaymentRequestPaid $e) {
-    Invoice::where('talksasa_request_id', $e->paymentRequest->id)
-        ->where('status', '!=', 'paid')                  // idempotent
-        ->update(['status' => 'paid', 'paid_at' => $e->paymentRequest->paidAt]);
+// Paid. Also fires for a charge you cancelled or that expired (late money).
+Event::listen(ChargeSucceeded::class, function (ChargeSucceeded $e) {
+    Invoice::where('number', $e->charge->reference)
+        ->where('status', '!=', 'paid')                                    // idempotent
+        ->update(['status' => 'paid', 'paid_by_transaction' => $e->charge->transactionId]);
 });
 
-// The prompt was cancelled, timed out, wrong PIN, insufficient funds...
-Event::listen(function (StkPushFailed $e) {
-    Invoice::where('talksasa_request_id', $e->stkPush->paymentRequestId)
-        ->where('status', '!=', 'paid')
-        ->update(['stk_message' => $e->stkPush->resultDesc ?? 'The payment prompt failed.']);
+// Money that paid no waiting charge.
+Event::listen(PaymentReceived::class, function (PaymentReceived $e) {
+    $p = $e->payment;   // Talksasa\Pay\Model\PaymentReceived (a Transaction)
+    if ($p->isDuplicate()) {
+        // Paid twice for charge $p->duplicateOfCharge: refund or credit it.
+        Refund::queue($p->receipt, $p->amount, $p->phone);
+        return;
+    }
+    // A paybill payment with your prefix, e.g. to the customer's standing
+    // account number HOST-1042: you decide what it pays.
+    Payments::applyByAccountNumber($p->accountNumber, $p->amount, $p->id, $p->receipt);
 });
+
+// Staff reversed a payment: re-open what it paid.
+Event::listen(TransactionReversed::class, function (TransactionReversed $e) {
+    Invoice::where('paid_by_transaction', $e->transaction->reversesTransactionId)
+        ->update(['status' => 'unpaid', 'paid_by_transaction' => null]);
+});
+
+// Prompt not paid (cancelled, timed out, insufficient funds...). The charge stays pending.
+Event::listen(StkPushFailed::class, fn (StkPushFailed $e) => /* show $e->stkPush->resultDesc, offer "try again" */ null);
 ```
-
-On the "check your phone" page, when `stk_message` is set show it with a
-**Try again** button (which posts to the same controller; a new prompt is
-allowed once the old one has failed) and the paybill instructions
-(`$pr->paybill->businessNumber`, account `$pr->paybill->accountNumber`) as
-the fallback. Don't listen for `StkPushSent` / `StkPushNeedsReview` to
-change the invoice; at most show "We're confirming your payment".
-
-`TalksasaPay::getStkPush($id)` reads a prompt's current state if you need it
-(`$push->status`: `initiating`, `sent`, `succeeded`, `failed`,
-`needs_review`; `$push->resultCode`, `$push->resultDesc`,
-`$push->checkoutRequestId` to quote to support).
-
-Testing in the Safaricom sandbox and the full flow: `docs/api/stk-push.md`
-in the Talksasa Pay repository.
 
 ### Handle webhooks
 
@@ -218,39 +207,22 @@ and dispatches Laravel events:
 
 | Talksasa event | Laravel event | Payload |
 |---|---|---|
-| `payment_request.created` | `PaymentRequestCreated` | `$e->paymentRequest` |
-| `payment_request.partially_paid` | `PaymentRequestPartiallyPaid` | `$e->paymentRequest` |
-| `payment_request.paid` | `PaymentRequestPaid` | `$e->paymentRequest` |
-| `payment_request.reopened` (a payment was reversed) | `PaymentRequestReopened` | `$e->paymentRequest` |
-| `payment_request.cancelled` | `PaymentRequestCancelled` | `$e->paymentRequest` |
-| `payment_request.expired` | `PaymentRequestExpired` | `$e->paymentRequest` |
-| `transaction.allocated` | `TransactionAllocated` | `$e->transaction` |
-| `transaction.reversed` | `TransactionReversed` | `$e->transaction` |
-| `payer.credit_changed` | `PayerCreditChanged` | `$e->creditChange` |
-| `stk_push.sent` (prompt on the phone, not paid) | `StkPushSent` | `$e->stkPush` |
-| `stk_push.succeeded` (receipt recorded; `payment_request.paid` follows) | `StkPushSucceeded` | `$e->stkPush` |
-| `stk_push.failed` (cancelled, timed out, ...: `resultDesc`) | `StkPushFailed` | `$e->stkPush` |
-| `stk_push.needs_review` (success without receipt, staff checking; not paid) | `StkPushNeedsReview` | `$e->stkPush` |
-| every event, incl. future types | `WebhookReceived` | `$e->event` |
+| `charge.succeeded` (paid; mark the invoice paid) | `ChargeSucceeded` | `$e->charge` |
+| `charge.needs_review` (success without receipt, staff checking; NOT paid) | `ChargeNeedsReview` | `$e->charge` |
+| `charge.expired` | `ChargeExpired` | `$e->charge` |
+| `charge.cancelled` | `ChargeCancelled` | `$e->charge` |
+| `stk_push.sent` (prompt on the phone; not paid) | `StkPushSent` | `$e->stkPush` |
+| `stk_push.failed` (cancelled, timed out, ...: `resultDesc`; charge stays pending) | `StkPushFailed` | `$e->stkPush` |
+| `stk_push.succeeded` (receipt recorded; `charge.succeeded` comes with it) | `StkPushSucceeded` | `$e->stkPush` |
+| `stk_push.needs_review` (success without receipt; not paid) | `StkPushNeedsReview` | `$e->stkPush` |
+| `payment.received` (a duplicate, or a paybill payment that matched no charge) | `PaymentReceived` | `$e->payment` |
+| `transaction.reversed` (staff reversed a payment) | `TransactionReversed` | `$e->transaction` (the reversal) |
+| every event, incl. types this version does not know | `WebhookReceived` | `$e->event` |
 
 All live in `Talksasa\Pay\Laravel\Events`, carry the raw `$e->event`
-(`Talksasa\Pay\Model\Event`) and `$e->source` (`webhook` or `poll`).
-
-```php
-use Illuminate\Contracts\Queue\ShouldQueue;
-use Talksasa\Pay\Laravel\Events\PaymentRequestPaid;
-
-final class MarkInvoicePaid implements ShouldQueue
-{
-    public function handle(PaymentRequestPaid $e): void
-    {
-        $pr = $e->paymentRequest;   // state at the time of the event
-        Invoice::where('number', $pr->reference)
-            ->where('status', '!=', 'paid')          // idempotent
-            ->update(['status' => 'paid', 'paid_at' => $pr->paidAt]);
-    }
-}
-```
+(`Talksasa\Pay\Model\Event`) and `$e->source` (`webhook` or `poll`). Each
+event is dispatched as its specific class (if known), then as
+`WebhookReceived`.
 
 Rules for listeners:
 
@@ -263,8 +235,8 @@ Rules for listeners:
   throws, the de-duplication key is released and the webhook answers 500,
   so Talksasa redelivers it.
 - **Events can arrive out of order.** Act on the data's status (e.g.
-  `$pr->status`), and when in doubt re-read with
-  `TalksasaPay::getPaymentRequest($id)`.
+  `$e->charge->status`), and when in doubt re-read with
+  `TalksasaPay::getCharge($id)`.
 - Use a cache store shared by all app servers for de-duplication
   (`TALKSASA_PAY_DEDUPE_STORE=redis`, `database`, ...), not `array`/`file`
   on multiple hosts.
@@ -299,6 +271,7 @@ Schedule::command('talksasa-pay:poll-events')->everyFiveMinutes()->withoutOverla
 ```php
 use Talksasa\Pay\Client;
 use Talksasa\Pay\Events\{EventPoller, CallbackCursorStore};
+use Talksasa\Pay\Model\EventType;
 use Talksasa\Pay\Webhook\{Verifier, WebhookException};
 
 $client = new Client(
@@ -307,8 +280,8 @@ $client = new Client(
     // httpClient: any PSR-18 client; requestFactory/streamFactory: PSR-17
 );
 
-$request = $client->createPaymentRequest('cust-77', 'INV-1042', 'Hosting, Dec', 1500, idempotencyKey: 'invoice-1042-v1');
-header('Location: ' . $request->payUrl, true, 303);
+$charge = $client->createCharge(1500, 'INV-1042', 'Hosting, Dec', idempotencyKey: 'invoice-1042-charge');
+header('Location: ' . $charge->checkoutUrl, true, 303);
 
 // Webhook endpoint
 try {
@@ -322,7 +295,12 @@ try {
     exit;
 }
 if (!already_processed($event->id)) {                       // your de-duplication
-    handle($event);                                         // $event->type, $event->paymentRequest(), ...
+    match ($event->type) {
+        EventType::CHARGE_SUCCEEDED => mark_paid($event->charge()->reference, $event->charge()->transactionId),
+        EventType::PAYMENT_RECEIVED => route_payment($event->paymentReceived()),
+        EventType::TRANSACTION_REVERSED => reopen($event->transaction()->reversesTransactionId),
+        default => null,                                    // stk_push.*, charge.expired/cancelled, future types
+    };
 }
 http_response_code(200);
 
@@ -334,50 +312,76 @@ $poller = new EventPoller($client, new CallbackCursorStore(
 $poller->poll(fn ($event) => already_processed($event->id) || handle($event));
 ```
 
-Lists: `listPaymentRequests()`, `listTransactions()` return one `Page`
-(`->data`, `->nextCursor`); `paymentRequests()`, `transactions()` and
-`events()` are generators that fetch further pages lazily:
+## Client reference
+
+| Method | API |
+|---|---|
+| `whoami(): WhoAmI` | `GET /whoami` (`appId`, `appName`, `accountPrefix`, `keyId`) |
+| `createCharge(amount, reference, ?description, ?phone, ?accountNumber, ?metadata, ?expiresIn, ?idempotencyKey): Charge` | `POST /charges` |
+| `getCharge(id): Charge` | `GET /charges/{id}` |
+| `listCharges(?status, ?reference, ?cursor, ?limit): Page<Charge>` / `charges(?status, ?reference, ?pageSize): Generator<Charge>` | `GET /charges` |
+| `cancelCharge(id): Charge` | `POST /charges/{id}/cancel` |
+| `stkPush(chargeId, phone, ?idempotencyKey): StkPush` | `POST /charges/{id}/stk-push` |
+| `getStkPush(id): StkPush` | `GET /stk-pushes/{id}` |
+| `listTransactions(?chargeId, ?since, ?cursor, ?limit): Page<Transaction>` / `transactions(?chargeId, ?since, ?pageSize): Generator<Transaction>` | `GET /transactions` |
+| `getTransaction(id): Transaction` | `GET /transactions/{id}` |
+| `listEvents(?after, ?limit): EventPage` / `events(?after, ?pageSize): Generator<cursor, Event>` | `GET /events` |
+
+Models (`Talksasa\Pay\Model`, read-only): `Charge` (`status`, `checkoutUrl`,
+`paybill`, `accountNumber`, `metadata`, `transactionId`, `latestStkPush`,
+`isSucceeded()`, `isPending()`, `needsReview()`), `StkPush` (`chargeId`,
+`status`, `resultCode`, `resultDesc`, `isPending()`, `isFailed()`,
+`wasCancelledByCustomer()`), `Transaction` (`kind`, `channel`, `amount`,
+`receipt`, `accountNumber`, `chargeId`, `reversesTransactionId`,
+`isReversal()`), `PaymentReceived` (a `Transaction` plus
+`duplicateOfCharge`, `isDuplicate()`), and `Event` (`type`, `data`,
+`rawData`, typed accessors `charge()`, `stkPush()`, `paymentReceived()`,
+`transaction()`). `EventType::ALL` lists the event types.
+
+Generators fetch further pages lazily:
 
 ```php
-foreach ($client->paymentRequests(status: 'open', payer: 'cust-77') as $pr) { ... }
-foreach ($client->transactions(since: new DateTimeImmutable('-1 day')) as $txn) { ... }
+foreach ($client->charges(status: 'pending') as $charge) { ... }
+foreach ($client->transactions(chargeId: $charge->id) as $txn) { ... }
 ```
 
 ## Idempotency
 
-- `upsertPayer` (PUT) and `cancelPaymentRequest` are naturally idempotent.
-- `createPaymentRequest` always sends an `Idempotency-Key`. Pass your own,
-  derived from the invoice (`"invoice-{$id}-v1"`): then a retry after a
-  crash, timeout or deploy returns the original request (200) instead of
-  creating a second one. Without it a random UUIDv4 is used, which only
-  covers the client's automatic retries within that one call.
-- Same key + different body is `IdempotencyConflictException`. To bill a
-  changed amount: cancel the old request and create a new one with a new key
-  (`-v2`). Keys are kept forever.
-- Only one open/partially-paid request may exist per `reference`
-  (`DuplicateReferenceException`): look it up with
-  `listPaymentRequests(reference: ...)`.
-- After a `TransportException` on a create, retry with the **same** key.
-- `stkPush` always sends a key too (random unless you pass one), and its
-  automatic retries reuse it, so one call never sends two prompts. Only one
-  prompt per request can be live anyway (`StkInProgressException`). To try
+- `createCharge` and `stkPush` always send an `Idempotency-Key`, and the
+  client's automatic retries re-send the **same** key, so one call never
+  creates two charges or sends two prompts. Without `$idempotencyKey` a
+  random UUIDv4 is generated per call.
+- Pass your own key derived from your record (`"invoice-{$id}-charge"`) so a
+  retry after a crash, timeout or deploy returns the original charge (200)
+  instead of creating a second one. After a `TransportException` or a
+  `ServerException` with `$errorCode === 'timeout'`, retry with the same key.
+- Same key + different body is `IdempotencyConflictException`. Keys are
+  kept forever.
+- `reference` is unique among your charges (`DuplicateReferenceException`):
+  look the charge up with `listCharges(reference: ...)`. To charge the same
+  invoice again (e.g. a new amount after cancelling), use a new reference
+  such as `INV-1042-2`.
+- `cancelCharge` is idempotent (cancelling a cancelled charge returns it).
+- Only one prompt per charge can be live (`StkInProgressException`). To try
   again after a **failed** prompt, call `stkPush` again with a new (or no)
   key: the old key would just return the failed prompt.
 
 ## Errors
 
 Every exception implements `Talksasa\Pay\Exception\TalksasaPayException`.
+Every problem code in the spec maps to a class
+(`ApiException::CLASSES_BY_CODE`); unknown codes fall back by HTTP status.
 
 | Exception | When |
 |---|---|
 | `ApiException` (base) | any error response: `$status`, `$errorCode` (stable), `$title`, `$detail`, `$requestId`, `$fieldErrors`, `$retryAfter` |
 | `AuthenticationException` | 401 `unauthorized` |
-| `PermissionDeniedException` | 403 `ip_not_allowed`, `product_suspended` |
-| `NotFoundException` | 404 `not_found` |
-| `ValidationException` | `validation_failed` (see `$fieldErrors`), `invalid_json`, `idempotency_key_required`, `unsupported_media_type`, `payload_too_large` |
-| `ConflictException` | 409; subclasses `DuplicateReferenceException`, `IdempotencyConflictException`, `NotCancellableException`, `PayerClosedException`, and for `stkPush`: `StkInProgressException` (a prompt is already live; `liveStkPushId()`), `NotPayableException` (paid, cancelled or expired), `AmountTooLargeException` (above KES 250,000: use the paybill) |
-| `RateLimitedException` | 429 after retries (or a Retry-After too long to wait inline) |
-| `ServerException` | 5xx after retries; subclasses (never retried) `MpesaUnavailableException` (503 `mpesa_unavailable`: prompts are off) and `MpesaErrorException` (502 `mpesa_error`: Safaricom could not send the prompt; nothing charged) |
+| `PermissionDeniedException` | 403; subclasses `IpNotAllowedException` (`ip_not_allowed`) and `AppSuspendedException` (`app_suspended`) |
+| `NotFoundException` | 404 `not_found` (also another app's ids) |
+| `ValidationException` | `validation_failed` (see `$fieldErrors`), `invalid_json`, `idempotency_key_required`, `unsupported_media_type`, `payload_too_large`, `method_not_allowed` |
+| `ConflictException` | 409; subclasses `DuplicateReferenceException`, `IdempotencyConflictException`, `NotCancellableException` (the charge is not pending), and for `stkPush`: `StkInProgressException` (a prompt is already live; `liveStkPushId()`), `NotPayableException` (the charge is not pending), `AmountTooLargeException` (above the M-Pesa prompt limit: use the paybill) |
+| `RateLimitedException` | 429 `rate_limited` after retries (or a Retry-After too long to wait inline) |
+| `ServerException` | 5xx after retries (`internal_error`, `not_implemented`, `overloaded`, `busy`, `timeout`); subclasses (never retried) `MpesaUnavailableException` (503 `mpesa_unavailable`: prompts are off) and `MpesaErrorException` (502 `mpesa_error`: Safaricom could not send the prompt; nothing charged; `stkPushId()`) |
 | `TransportException` | no HTTP response (DNS, connect, TLS, timeout) after retries |
 | `UnexpectedResponseException` | 2xx with a body that breaks the contract (never silently zero) |
 
@@ -385,12 +389,9 @@ Quote `$e->requestId` when asking Talksasa for help.
 
 ```php
 try {
-    $pr = TalksasaPay::createPaymentRequest(...);
+    $charge = TalksasaPay::createCharge($invoice->total_kes, $invoice->number);
 } catch (DuplicateReferenceException) {
-    // The live (open or partially paid) request for this invoice already exists.
-    foreach (TalksasaPay::paymentRequests(reference: $invoice->number) as $candidate) {
-        if ($candidate->isPayable()) { $pr = $candidate; break; }
-    }
+    $charge = TalksasaPay::listCharges(reference: $invoice->number)->data[0];
 } catch (ValidationException $e) {
     foreach ($e->fieldErrors as $fe) { $errors[$fe->field] = $fe->message; }
 } catch (TalksasaPayException $e) {
@@ -400,13 +401,14 @@ try {
 
 ### Retries
 
-Every `/v1` call is idempotent, so the client retries network errors, 429,
-502, 503 and 504 (default 2 retries; never the M-Pesa answers
-`mpesa_unavailable` and `mpesa_error`, which are final) with exponential backoff (0.5 s, 1 s,
-... capped at 8 s, equal jitter). A `Retry-After` header is respected as a
-minimum; one longer than `max_retry_after` is not waited out inline (the
-exception carries `$retryAfter` so a job can `release()` itself). 500 and
-4xx are never retried. Tune with `new RetryPolicy(...)` or
+The client retries only safe requests: GETs, `createCharge` and `stkPush`
+(with the same Idempotency-Key) and `cancelCharge`, on network errors, 429,
+502, 503 and 504 (default 2 retries) with exponential backoff (0.5 s, 1 s,
+... capped at 8 s, equal jitter). The M-Pesa answers `mpesa_unavailable`
+and `mpesa_error` are final and **never** retried. A `Retry-After` header
+is respected as a minimum; one longer than `max_retry_after` is not waited
+out inline (the exception carries `$retryAfter` so a job can `release()`
+itself). 500 and 4xx are never retried. Tune with `new RetryPolicy(...)` or
 `RetryPolicy::none()`.
 
 ## Security notes

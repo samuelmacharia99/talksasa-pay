@@ -11,10 +11,11 @@ use Talksasa\Pay\Internal\Data;
 /**
  * An event, from a webhook body or GET /v1/events. $data is the state of
  * the subject at the time of the event:
- *   payment_request.* -> PaymentRequest
- *   transaction.*     -> Transaction
- *   payer.credit_changed -> CreditChange
- *   stk_push.*        -> StkPush
+ *   charge.*             -> Charge
+ *   stk_push.*           -> StkPush
+ *   payment.received     -> PaymentReceived
+ *   transaction.reversed -> Transaction (the reversal; reversesTransactionId
+ *                           names the payment, chargeId the reversed charge)
  * An event type this version does not know has $data = null; its raw JSON
  * is always in $rawData.
  *
@@ -23,6 +24,20 @@ use Talksasa\Pay\Internal\Data;
  */
 final readonly class Event
 {
+    /** Event type => class of $data. */
+    public const DATA_CLASSES = [
+        EventType::CHARGE_SUCCEEDED => Charge::class,
+        EventType::CHARGE_NEEDS_REVIEW => Charge::class,
+        EventType::CHARGE_EXPIRED => Charge::class,
+        EventType::CHARGE_CANCELLED => Charge::class,
+        EventType::STK_PUSH_SENT => StkPush::class,
+        EventType::STK_PUSH_FAILED => StkPush::class,
+        EventType::STK_PUSH_SUCCEEDED => StkPush::class,
+        EventType::STK_PUSH_NEEDS_REVIEW => StkPush::class,
+        EventType::PAYMENT_RECEIVED => PaymentReceived::class,
+        EventType::TRANSACTION_REVERSED => Transaction::class,
+    ];
+
     /**
      * @param array<string,mixed> $rawData
      */
@@ -31,7 +46,7 @@ final readonly class Event
         public string $type,
         public string $apiVersion,
         public DateTimeImmutable $createdAt,
-        public PaymentRequest|Transaction|CreditChange|StkPush|null $data,
+        public Charge|StkPush|Transaction|null $data,
         public array $rawData,
     ) {
     }
@@ -42,13 +57,8 @@ final readonly class Event
         $type = Data::str($a, 'type');
         $raw = Data::obj($a, 'data');
 
-        $data = match (true) {
-            str_starts_with($type, 'payment_request.') => PaymentRequest::fromArray($raw),
-            str_starts_with($type, 'transaction.') => Transaction::fromArray($raw),
-            $type === EventType::PAYER_CREDIT_CHANGED => CreditChange::fromArray($raw),
-            str_starts_with($type, 'stk_push.') => StkPush::fromArray($raw),
-            default => null,
-        };
+        $class = self::DATA_CLASSES[$type] ?? null;
+        $data = $class === null ? null : $class::fromArray($raw);
 
         return new self(
             Data::str($a, 'id'),
@@ -74,34 +84,44 @@ final readonly class Event
         return self::fromArray($a);
     }
 
-    public function paymentRequest(): PaymentRequest
+    /** True for a type this SDK version knows (and decodes into $data). */
+    public function isKnownType(): bool
     {
-        if (!$this->data instanceof PaymentRequest) {
-            throw new \LogicException("Event {$this->type} does not carry a payment request.");
+        return isset(self::DATA_CLASSES[$this->type]);
+    }
+
+    /** The charge of a charge.* event. */
+    public function charge(): Charge
+    {
+        if (!$this->data instanceof Charge) {
+            throw new \LogicException("Event {$this->type} does not carry a charge.");
         }
         return $this->data;
     }
 
-    public function transaction(): Transaction
-    {
-        if (!$this->data instanceof Transaction) {
-            throw new \LogicException("Event {$this->type} does not carry a transaction.");
-        }
-        return $this->data;
-    }
-
-    public function creditChange(): CreditChange
-    {
-        if (!$this->data instanceof CreditChange) {
-            throw new \LogicException("Event {$this->type} does not carry a credit change.");
-        }
-        return $this->data;
-    }
-
+    /** The prompt of a stk_push.* event. */
     public function stkPush(): StkPush
     {
         if (!$this->data instanceof StkPush) {
             throw new \LogicException("Event {$this->type} does not carry an STK push.");
+        }
+        return $this->data;
+    }
+
+    /** The payment of a payment.received event. */
+    public function paymentReceived(): PaymentReceived
+    {
+        if (!$this->data instanceof PaymentReceived) {
+            throw new \LogicException("Event {$this->type} does not carry a received payment.");
+        }
+        return $this->data;
+    }
+
+    /** The reversal transaction of transaction.reversed (also the payment of payment.received). */
+    public function transaction(): Transaction
+    {
+        if (!$this->data instanceof Transaction) {
+            throw new \LogicException("Event {$this->type} does not carry a transaction.");
         }
         return $this->data;
     }

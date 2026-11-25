@@ -6,14 +6,16 @@ namespace Talksasa\Pay\Model;
 
 use DateTimeImmutable;
 use Talksasa\Pay\Internal\Data;
-use Talksasa\Pay\Exception\UnexpectedResponseException;
 
-/** Money received (or reversed) for one of your payers. */
-final readonly class Transaction
+/**
+ * Money received (or reversed) for your app. A reversal is its own
+ * transaction (kind reversal) whose $reversesTransactionId names the payment.
+ */
+readonly class Transaction
 {
-    /**
-     * @param list<Allocation> $allocations
-     */
+    public const KIND_PAYMENT = 'payment';
+    public const KIND_REVERSAL = 'reversal';
+
     public function __construct(
         public string $id,
         /** payment | refund | reversal | adjustment */
@@ -24,16 +26,18 @@ final readonly class Transaction
         public string $channel,
         /** pending | succeeded | failed | cancelled | needs_review */
         public string $status,
+        /** Whole KES. */
         public int $amount,
         public string $currency,
         /** M-Pesa receipt number. */
         public ?string $receipt,
         /** Masked. */
         public ?string $phone,
-        public ?PayerRef $payer,
-        public ?string $paymentRequestId,
+        /** The account number as typed at the paybill, or as sent with the prompt. */
+        public ?string $accountNumber,
+        /** The charge this money was for, when known. */
+        public ?string $chargeId,
         public ?string $reversesTransactionId,
-        public array $allocations,
         public ?DateTimeImmutable $occurredAt,
         public DateTimeImmutable $createdAt,
         public ?DateTimeImmutable $completedAt,
@@ -43,32 +47,38 @@ final readonly class Transaction
     /** @param array<string,mixed> $a */
     public static function fromArray(array $a): self
     {
-        $payer = Data::nullableObj($a, 'payer');
-        $allocations = [];
-        foreach (Data::list($a, 'allocations') as $row) {
-            if (!is_array($row)) {
-                throw new UnexpectedResponseException('Expected allocation to be an object.');
-            }
-            $allocations[] = Allocation::fromArray($row);
-        }
+        return new self(...self::fields($a));
+    }
 
-        return new self(
-            Data::str($a, 'id'),
-            Data::str($a, 'kind'),
-            Data::str($a, 'direction'),
-            Data::str($a, 'channel'),
-            Data::str($a, 'status'),
-            Data::int($a, 'amount'),
-            Data::str($a, 'currency'),
-            Data::nullableStr($a, 'receipt'),
-            Data::nullableStr($a, 'phone'),
-            $payer === null ? null : PayerRef::fromArray($payer),
-            Data::nullableStr($a, 'payment_request_id'),
-            Data::nullableStr($a, 'reverses_transaction_id'),
-            $allocations,
-            Data::nullableDate($a, 'occurred_at'),
-            Data::date($a, 'created_at'),
-            Data::nullableDate($a, 'completed_at'),
-        );
+    /**
+     * Constructor arguments by name, for subclasses.
+     *
+     * @param array<string,mixed> $a
+     * @return array<string,mixed>
+     */
+    protected static function fields(array $a): array
+    {
+        return [
+            'id' => Data::str($a, 'id'),
+            'kind' => Data::str($a, 'kind'),
+            'direction' => Data::str($a, 'direction'),
+            'channel' => Data::str($a, 'channel'),
+            'status' => Data::str($a, 'status'),
+            'amount' => Data::int($a, 'amount'),
+            'currency' => Data::str($a, 'currency'),
+            'receipt' => Data::nullableStr($a, 'receipt'),
+            'phone' => Data::nullableStr($a, 'phone'),
+            'accountNumber' => Data::nullableStr($a, 'account_number'),
+            'chargeId' => Data::nullableStr($a, 'charge_id'),
+            'reversesTransactionId' => Data::nullableStr($a, 'reverses_transaction_id'),
+            'occurredAt' => Data::nullableDate($a, 'occurred_at'),
+            'createdAt' => Data::date($a, 'created_at'),
+            'completedAt' => Data::nullableDate($a, 'completed_at'),
+        ];
+    }
+
+    public function isReversal(): bool
+    {
+        return $this->kind === self::KIND_REVERSAL;
     }
 }

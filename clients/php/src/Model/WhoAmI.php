@@ -6,12 +6,13 @@ namespace Talksasa\Pay\Model;
 
 use Talksasa\Pay\Internal\Data;
 
-/** The product an API key belongs to (GET /v1/whoami). */
+/** The app an API key belongs to (GET /v1/whoami). */
 final readonly class WhoAmI
 {
     public function __construct(
-        public string $productId,
-        public string $productName,
+        public string $appId,
+        public string $appName,
+        /** Your paybill account-number prefix, e.g. HOST. */
         public string $accountPrefix,
         public string $keyId,
     ) {
@@ -21,8 +22,8 @@ final readonly class WhoAmI
     public static function fromArray(array $a): self
     {
         return new self(
-            Data::str($a, 'product_id'),
-            Data::str($a, 'product_name'),
+            Data::str($a, 'app_id'),
+            Data::str($a, 'app_name'),
             Data::str($a, 'account_prefix'),
             Data::str($a, 'key_id'),
         );

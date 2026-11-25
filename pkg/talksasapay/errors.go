@@ -10,32 +10,33 @@ import (
 	"unicode/utf8"
 )
 
-// Stable error codes (Problem.code). New codes may appear; treat unknown
-// codes by HTTP status.
+// Stable error codes (Problem.code), one per code in api/app.openapi.yaml.
+// New codes may appear; treat unknown codes by HTTP status.
 const (
-	CodeUnauthorized           = "unauthorized"
-	CodeIPNotAllowed           = "ip_not_allowed"
-	CodeProductSuspended       = "product_suspended"
-	CodeRateLimited            = "rate_limited"
-	CodeOverloaded             = "overloaded"
-	CodeNotFound               = "not_found"
-	CodeValidationFailed       = "validation_failed"
-	CodeInvalidJSON            = "invalid_json"
-	CodeUnsupportedMediaType   = "unsupported_media_type"
+	CodeUnauthorized           = "unauthorized"           // 401: key missing, malformed, revoked or expired
+	CodeIPNotAllowed           = "ip_not_allowed"         // 403: key restricted to an IP allow-list
+	CodeAppSuspended           = "app_suspended"          // 403: Talksasa suspended this app
+	CodeRateLimited            = "rate_limited"           // 429: retried automatically (Retry-After)
+	CodeOverloaded             = "overloaded"             // 503: nothing changed; retried automatically
+	CodeBusy                   = "busy"                   // 503: nothing changed; retried automatically
+	CodeTimeout                = "timeout"                // 503: outcome unknown; retried with the SAME key
+	CodeNotFound               = "not_found"              // 404 (another app's ids are 404 too)
+	CodeMethodNotAllowed       = "method_not_allowed"     // 405
+	CodeValidationFailed       = "validation_failed"      // 422: see APIError.FieldErrors
+	CodeInvalidJSON            = "invalid_json"           // 400
+	CodeUnsupportedMediaType   = "unsupported_media_type" // 415
+	CodePayloadTooLarge        = "payload_too_large"      // 413
 	CodeIdempotencyKeyRequired = "idempotency_key_required"
-	CodeIdempotencyConflict    = "idempotency_conflict"
-	CodeDuplicateReference     = "duplicate_reference"
-	CodePayerClosed            = "payer_closed"
-	CodeNotCancellable         = "not_cancellable"
-	CodeNotPayable             = "not_payable"       // STK push: the request is paid, cancelled or expired
-	CodeAmountTooLarge         = "amount_too_large"  // STK push: balance above KES 250,000; use the paybill
-	CodeSTKInProgress          = "stk_in_progress"   // STK push: a prompt for this request is already live
-	CodeMpesaUnavailable       = "mpesa_unavailable" // 503: M-Pesa prompts are off here; never retried
-	CodeMpesaError             = "mpesa_error"       // 502: Safaricom could not send the prompt; never retried
-	CodeTimeout                = "timeout"
-	CodeBusy                   = "busy"
-	CodePayloadTooLarge        = "payload_too_large"
-	CodeInternalError          = "internal_error"
+	CodeIdempotencyConflict    = "idempotency_conflict" // 409: key reused with a different body
+	CodeDuplicateReference     = "duplicate_reference"  // 409: you already have a charge with this reference
+	CodeNotCancellable         = "not_cancellable"      // 409: only pending charges can be cancelled
+	CodeNotPayable             = "not_payable"          // 409 STK push: the charge is not pending
+	CodeAmountTooLarge         = "amount_too_large"     // 409 STK push: above the M-Pesa prompt limit; use the paybill
+	CodeSTKInProgress          = "stk_in_progress"      // 409 STK push: a prompt for this charge is already live
+	CodeMpesaUnavailable       = "mpesa_unavailable"    // 503: M-Pesa prompts are off here; never retried
+	CodeMpesaError             = "mpesa_error"          // 502: Safaricom could not send the prompt; never retried
+	CodeNotImplemented         = "not_implemented"      // 501
+	CodeInternalError          = "internal_error"       // 500: not retried
 )
 
 // FieldError is one entry of a validation_failed problem.

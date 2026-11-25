@@ -39,7 +39,13 @@ final class VerifierTest extends TestCase
         try {
             $event = Verifier::verify($v['payload'], $v['header'], $v['secrets'], $v['now'], $v['tolerance']);
             self::assertSame('valid', $v['expected'], 'verified but expected ' . $v['expected']);
-            self::assertSame(EventType::PAYMENT_REQUEST_PAID, $event->type);
+            // The shared vectors are frozen bytes from before the charges
+            // API: their type is unknown to this version, so data is null and
+            // the raw JSON is kept. Signature checks never look at the type.
+            self::assertSame('0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b', $event->id);
+            self::assertNotContains($event->type, EventType::ALL);
+            self::assertNull($event->data);
+            self::assertNotSame([], $event->rawData);
         } catch (SignatureException $e) {
             self::assertSame($v['expected'], $e->reason);
         }
@@ -62,7 +68,8 @@ final class VerifierTest extends TestCase
         $body = self::body();
         $event = Verifier::verify($body, Verifier::sign($body, self::SECRET, self::T), self::SECRET, self::T);
         self::assertSame('0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b', $event->id);
-        self::assertSame(1500, $event->paymentRequest()->amountPaid);
+        self::assertSame(1500, $event->charge()->amount);
+        self::assertTrue($event->charge()->isSucceeded());
     }
 
     /** @return iterable<string,array{string,list<string>|string,int,string}> */
