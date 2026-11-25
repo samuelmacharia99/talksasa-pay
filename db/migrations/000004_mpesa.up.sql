@@ -1,19 +1,19 @@
--- Phase 2: M-Pesa via Daraja.
+-- M-Pesa via Daraja.
 --
 --   * stk_pushes: one row per STK push (Lipa na M-Pesa Online prompt) we ask
---     Safaricom to send. It owns the pending mpesa_stk transaction that the
---     callback (or staff, after a status check) later completes. At most one
---     push per payment request is live at a time, so a customer's phone
---     cannot be spammed.
+--     Safaricom to send for a charge. It owns the pending mpesa_stk
+--     transaction that the callback (or staff, after a status check) later
+--     completes. At most one push per charge is live at a time, so a
+--     customer's phone cannot be spammed.
 --   * mpesa_callbacks: inbox. Every callback Safaricom sends is stored here
 --     verbatim, together with its processing job, BEFORE we answer
 --     Safaricom. Processing failures can be retried; nothing sent is lost.
 --     Rows are never deleted; only the processing outcome columns change.
 --
--- Money rules (confirmed 2026-11-24): a request is paid only on Safaricom
--- success with an M-Pesa receipt. A status check (STK Query) that says
--- "success" carries no receipt, so the transaction goes to needs_review and
--- staff enter the receipt. STK always asks for the full outstanding balance.
+-- Money rules: a charge is paid only on Safaricom success with an M-Pesa
+-- receipt. A status check (STK Query) that says "success" carries no
+-- receipt, so the transaction goes to needs_review and staff enter the
+-- receipt. A prompt always asks for the charge's exact amount.
 
 SET lock_timeout = '10s';
 
@@ -27,14 +27,14 @@ CREATE TYPE stk_push_status AS ENUM (
 
 CREATE TABLE stk_pushes (
   id                  uuid PRIMARY KEY,
-  product_id          uuid NOT NULL REFERENCES products (id),
-  payment_request_id  uuid NOT NULL,
+  app_id              uuid NOT NULL REFERENCES apps (id),
+  charge_id           uuid NOT NULL,
   transaction_id      uuid NOT NULL UNIQUE REFERENCES transactions (id),
-  -- 'product' (via /v1) or 'pay_page' (hosted page).
-  source              text NOT NULL CHECK (source IN ('product', 'pay_page')),
+  -- 'app' (via /v1) or 'pay_page' (hosted checkout page).
+  source              text NOT NULL CHECK (source IN ('app', 'pay_page')),
   phone               text NOT NULL CHECK (phone ~ '^254[17][0-9]{8}$'),
   amount              bigint NOT NULL CHECK (amount > 0 AND amount <= 250000),
-  -- /v1 pushes are idempotent on (product_id, idempotency_key). Pay-page
+  -- /v1 pushes are idempotent on (app_id, idempotency_key). Pay-page
   -- pushes have no key.
   idempotency_key     text CHECK (idempotency_key IS NULL OR length(idempotency_key) BETWEEN 1 AND 255),
   request_hash        bytea,
@@ -48,25 +48,31 @@ CREATE TABLE stk_pushes (
   created_at          timestamptz NOT NULL DEFAULT now(),
   updated_at          timestamptz NOT NULL DEFAULT now(),
   completed_at        timestamptz,
-  UNIQUE (product_id, idempotency_key),
-  UNIQUE (product_id, id),
-  FOREIGN KEY (product_id, payment_request_id) REFERENCES payment_requests (product_id, id),
+  -- Set once when the payment was recorded on a different transaction than
+  -- transaction_id (late success after the push was failed).
+  paid_transaction_id uuid REFERENCES transactions (id),
+  -- Why staff may NOT confirm this push's transaction with a receipt, set
+  -- when a callback reported an anomaly. Set once.
+  confirm_blocked     text CHECK (confirm_blocked IS NULL OR confirm_blocked IN ('amount_mismatch', 'receipt_taken')),
+  UNIQUE (app_id, idempotency_key),
+  UNIQUE (app_id, id),
+  FOREIGN KEY (app_id, charge_id) REFERENCES charges (app_id, id),
   CHECK ((idempotency_key IS NULL) = (request_hash IS NULL)),
-  CHECK ((source = 'product') = (idempotency_key IS NOT NULL)),
+  CHECK ((source = 'app') = (idempotency_key IS NOT NULL)),
   CHECK (status = 'initiating' OR status = 'failed' OR checkout_request_id IS NOT NULL),
   CHECK ((status IN ('succeeded', 'failed', 'unknown')) = (completed_at IS NOT NULL))
 );
 COMMENT ON TABLE stk_pushes IS 'STK push prompts sent through Daraja. Owns the pending mpesa_stk transaction the callback completes.';
--- One live push per payment request.
-CREATE UNIQUE INDEX stk_pushes_one_live ON stk_pushes (payment_request_id) WHERE status IN ('initiating', 'sent');
+-- One live push per charge.
+CREATE UNIQUE INDEX stk_pushes_one_live ON stk_pushes (charge_id) WHERE status IN ('initiating', 'sent');
 -- Status-check sweeper: live pushes that are due.
 CREATE INDEX stk_pushes_due ON stk_pushes (next_query_at) WHERE status IN ('initiating', 'sent');
-CREATE INDEX stk_pushes_request ON stk_pushes (payment_request_id, created_at DESC);
-CREATE INDEX stk_pushes_product_created ON stk_pushes (product_id, created_at DESC);
+CREATE INDEX stk_pushes_charge ON stk_pushes (charge_id, created_at DESC);
+CREATE INDEX stk_pushes_app_created ON stk_pushes (app_id, created_at DESC);
 
 CREATE FUNCTION tsp_stk_pushes_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF NEW.id <> OLD.id OR NEW.product_id <> OLD.product_id OR NEW.payment_request_id <> OLD.payment_request_id
+  IF NEW.id <> OLD.id OR NEW.app_id <> OLD.app_id OR NEW.charge_id <> OLD.charge_id
      OR NEW.transaction_id <> OLD.transaction_id OR NEW.source <> OLD.source OR NEW.phone <> OLD.phone
      OR NEW.amount <> OLD.amount OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
      OR NEW.request_hash IS DISTINCT FROM OLD.request_hash OR NEW.created_at <> OLD.created_at THEN
@@ -148,11 +154,6 @@ END $$;
 CREATE TRIGGER mpesa_callbacks_guard BEFORE UPDATE ON mpesa_callbacks FOR EACH ROW EXECUTE FUNCTION tsp_mpesa_callbacks_guard();
 CREATE TRIGGER mpesa_callbacks_no_delete BEFORE DELETE ON mpesa_callbacks FOR EACH ROW EXECUTE FUNCTION tsp_forbid_delete();
 CREATE TRIGGER mpesa_callbacks_no_truncate BEFORE TRUNCATE ON mpesa_callbacks FOR EACH STATEMENT EXECUTE FUNCTION tsp_forbid_truncate();
-
--- Events can now be about STK pushes too.
-ALTER TABLE events DROP CONSTRAINT events_subject_type_check;
-ALTER TABLE events ADD CONSTRAINT events_subject_type_check
-  CHECK (subject_type IN ('payment_request', 'transaction', 'payer', 'stk_push'));
 
 -- ---------------------------------------------------------------------------
 -- Privileges

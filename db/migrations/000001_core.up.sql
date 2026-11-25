@@ -1,16 +1,19 @@
--- Talksasa Pay core schema: products, payers, payment requests, the
--- append-only transaction ledger, allocations and the audit log.
+-- Talksasa Pay core schema: a generic payment gateway.
+--
+-- Apps (any system holding an API key) create charges: "collect KES X from
+-- this phone for my reference Y". The gateway asks M-Pesa, and a charge is
+-- succeeded only when a succeeded transaction carrying an M-Pesa receipt is
+-- attached to it. The gateway knows nothing about an app's customers or
+-- invoices (decision 2026-11-25, ADR 0002).
 --
 -- Money is always bigint whole KES. Integrity rules live in the database as
--- well as in Go, so a bug in application code cannot silently corrupt the
--- ledger:
---   * transactions, allocation batches, allocations and audit rows are never
---     deleted; money columns are never updated (triggers below);
---   * payment_requests.amount_paid and payer_accounts.credit_balance are
---     caches maintained ONLY by the allocations trigger;
---   * every allocation batch must sum to its expected total (deferred check);
---   * composite foreign keys (product_id, id) make cross-product references
---     impossible: a row can only point at rows of the same product.
+-- well as in Go, so a bug in application code cannot silently corrupt them:
+--   * transactions and audit rows are never deleted; amounts never change;
+--   * a charge's amount, reference and account number never change, and it
+--     can only become succeeded by pointing at a succeeded transaction of
+--     the same app for exactly its amount (charges_guard below);
+--   * composite foreign keys (app_id, id) make cross-app references
+--     impossible.
 --
 -- The application connects as role talksasa_app, which has no DELETE or
 -- TRUNCATE privileges. Migrations run as the schema owner.
@@ -20,15 +23,13 @@ SET lock_timeout = '10s';
 -- ---------------------------------------------------------------------------
 -- Types
 -- ---------------------------------------------------------------------------
-CREATE TYPE product_status         AS ENUM ('active', 'suspended');
-CREATE TYPE payer_status           AS ENUM ('active', 'closed');
-CREATE TYPE payment_request_status AS ENUM ('open', 'partially_paid', 'paid', 'cancelled', 'expired');
-CREATE TYPE txn_direction          AS ENUM ('in', 'out');
-CREATE TYPE txn_kind               AS ENUM ('payment', 'refund', 'reversal', 'adjustment');
-CREATE TYPE txn_channel            AS ENUM ('mpesa_stk', 'mpesa_c2b', 'mpesa_b2c', 'manual');
-CREATE TYPE txn_status             AS ENUM ('pending', 'succeeded', 'failed', 'cancelled', 'needs_review');
-CREATE TYPE allocation_batch_kind  AS ENUM ('payment', 'credit_application', 'reversal');
-CREATE TYPE audit_actor_type       AS ENUM ('system', 'admin', 'cli', 'product');
+CREATE TYPE app_status       AS ENUM ('active', 'suspended');
+CREATE TYPE charge_status    AS ENUM ('pending', 'needs_review', 'succeeded', 'expired', 'cancelled', 'reversed');
+CREATE TYPE txn_direction    AS ENUM ('in', 'out');
+CREATE TYPE txn_kind         AS ENUM ('payment', 'refund', 'reversal', 'adjustment');
+CREATE TYPE txn_channel      AS ENUM ('mpesa_stk', 'mpesa_c2b', 'mpesa_b2c', 'manual');
+CREATE TYPE txn_status       AS ENUM ('pending', 'succeeded', 'failed', 'cancelled', 'needs_review');
+CREATE TYPE audit_actor_type AS ENUM ('system', 'admin', 'cli', 'app');
 
 -- ---------------------------------------------------------------------------
 -- Shared trigger functions
@@ -57,80 +58,64 @@ BEGIN
     USING ERRCODE = 'integrity_constraint_violation';
 END $$;
 
--- True only while the allocations trigger is updating cached balances. The
--- trigger-depth test cannot be faked by a client: a direct UPDATE from the
--- application runs guard triggers at depth 1, the allocations trigger's
--- nested UPDATE runs them at depth 2.
-CREATE FUNCTION tsp_allocating() RETURNS boolean LANGUAGE sql STABLE AS $$
-  SELECT pg_trigger_depth() > 1
-     AND coalesce(current_setting('talksasa.allocating', true), '') = 'on'
-$$;
-
 -- ---------------------------------------------------------------------------
--- Products
+-- Apps
 -- ---------------------------------------------------------------------------
-CREATE TABLE products (
-  id                         uuid PRIMARY KEY,
-  name                       text NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 100),
-  account_prefix             text NOT NULL UNIQUE CHECK (account_prefix ~ '^[A-Z]{2,6}$'),
-  webhook_url                text CHECK (webhook_url IS NULL OR (webhook_url ~ '^https?://' AND length(webhook_url) <= 2048)),
-  webhook_secret_ciphertext  bytea NOT NULL,
-  webhook_secret_key_version integer NOT NULL CHECK (webhook_secret_key_version > 0),
-  status                     product_status NOT NULL DEFAULT 'active',
-  created_at                 timestamptz NOT NULL DEFAULT now(),
-  updated_at                 timestamptz NOT NULL DEFAULT now()
+CREATE TABLE apps (
+  id                              uuid PRIMARY KEY,
+  name                            text NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 100),
+  -- Paybill account numbers starting with this prefix (then a digit) are
+  -- routed to this app, e.g. HOST-1042 -> the app with prefix HOST.
+  account_prefix                  text NOT NULL UNIQUE CHECK (account_prefix ~ '^[A-Z]{2,6}$'),
+  webhook_url                     text CHECK (webhook_url IS NULL OR (webhook_url ~ '^https?://' AND length(webhook_url) <= 2048)),
+  webhook_secret_ciphertext       bytea NOT NULL,
+  webhook_secret_key_version      integer NOT NULL CHECK (webhook_secret_key_version > 0),
+  -- The previous webhook secret keeps signing for 24 h after a rotation.
+  webhook_secret_prev_ciphertext  bytea,
+  webhook_secret_prev_key_version integer CHECK (webhook_secret_prev_key_version IS NULL OR webhook_secret_prev_key_version > 0),
+  webhook_secret_prev_expires_at  timestamptz,
+  status                          app_status NOT NULL DEFAULT 'active',
+  created_at                      timestamptz NOT NULL DEFAULT now(),
+  updated_at                      timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT apps_webhook_secret_prev_complete CHECK (
+    (webhook_secret_prev_ciphertext IS NULL) = (webhook_secret_prev_key_version IS NULL)
+    AND (webhook_secret_prev_ciphertext IS NULL) = (webhook_secret_prev_expires_at IS NULL))
 );
-COMMENT ON TABLE products IS 'Talksasa''s own products. There is deliberately no payout/settlement configuration: all money collected is Talksasa revenue.';
+COMMENT ON TABLE apps IS 'Systems that collect money through the gateway (API keys, webhook). The gateway holds no data about their customers.';
 
-CREATE FUNCTION tsp_products_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION tsp_apps_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF NEW.id <> OLD.id OR NEW.account_prefix <> OLD.account_prefix OR NEW.created_at <> OLD.created_at THEN
-    RAISE EXCEPTION 'products.id, account_prefix and created_at are immutable'
+    RAISE EXCEPTION 'apps.id, account_prefix and created_at are immutable'
       USING ERRCODE = 'integrity_constraint_violation';
   END IF;
   RETURN NEW;
 END $$;
-CREATE TRIGGER products_guard BEFORE UPDATE ON products FOR EACH ROW EXECUTE FUNCTION tsp_products_guard();
-CREATE TRIGGER products_updated_at BEFORE UPDATE ON products FOR EACH ROW EXECUTE FUNCTION tsp_set_updated_at();
-CREATE TRIGGER products_no_delete BEFORE DELETE ON products FOR EACH ROW EXECUTE FUNCTION tsp_forbid_delete();
+CREATE TRIGGER apps_guard BEFORE UPDATE ON apps FOR EACH ROW EXECUTE FUNCTION tsp_apps_guard();
+CREATE TRIGGER apps_updated_at BEFORE UPDATE ON apps FOR EACH ROW EXECUTE FUNCTION tsp_set_updated_at();
+CREATE TRIGGER apps_no_delete BEFORE DELETE ON apps FOR EACH ROW EXECUTE FUNCTION tsp_forbid_delete();
 
--- Per-product counter for account numbers. Values only ever increase, so an
--- account number is never reused.
-CREATE TABLE product_account_counters (
-  product_id uuid PRIMARY KEY REFERENCES products (id),
-  next_base  bigint NOT NULL CHECK (next_base >= 100)
-);
-
-CREATE FUNCTION tsp_counter_guard() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  IF NEW.product_id <> OLD.product_id OR NEW.next_base <= OLD.next_base THEN
-    RAISE EXCEPTION 'account counters can only move forward'
-      USING ERRCODE = 'integrity_constraint_violation';
-  END IF;
-  RETURN NEW;
-END $$;
-CREATE TRIGGER product_account_counters_guard BEFORE UPDATE ON product_account_counters FOR EACH ROW EXECUTE FUNCTION tsp_counter_guard();
-CREATE TRIGGER product_account_counters_no_delete BEFORE DELETE ON product_account_counters FOR EACH ROW EXECUTE FUNCTION tsp_forbid_delete();
-
-CREATE TABLE product_api_keys (
-  id           uuid PRIMARY KEY,
-  product_id   uuid NOT NULL REFERENCES products (id),
-  key_id       text NOT NULL UNIQUE CHECK (key_id ~ '^[a-z2-7]{16,32}$'),
-  secret_hash  bytea NOT NULL CHECK (octet_length(secret_hash) = 32),
-  label        text NOT NULL CHECK (length(btrim(label)) BETWEEN 1 AND 100),
-  created_by   text NOT NULL,
-  created_at   timestamptz NOT NULL DEFAULT now(),
-  expires_at   timestamptz,
-  revoked_at   timestamptz,
-  revoked_by   text,
-  last_used_at timestamptz,
+CREATE TABLE app_api_keys (
+  id            uuid PRIMARY KEY,
+  app_id        uuid NOT NULL REFERENCES apps (id),
+  key_id        text NOT NULL UNIQUE CHECK (key_id ~ '^[a-z2-7]{16,32}$'),
+  secret_hash   bytea NOT NULL CHECK (octet_length(secret_hash) = 32),
+  label         text NOT NULL CHECK (length(btrim(label)) BETWEEN 1 AND 100),
+  -- NULL = any address. Otherwise requests must come from one of these networks.
+  allowed_cidrs cidr[] CHECK (allowed_cidrs IS NULL OR cardinality(allowed_cidrs) BETWEEN 1 AND 50),
+  created_by    text NOT NULL,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  expires_at    timestamptz,
+  revoked_at    timestamptz,
+  revoked_by    text,
+  last_used_at  timestamptz,
   CHECK ((revoked_at IS NULL) = (revoked_by IS NULL))
 );
-CREATE INDEX product_api_keys_product_idx ON product_api_keys (product_id);
+CREATE INDEX app_api_keys_app_idx ON app_api_keys (app_id);
 
 CREATE FUNCTION tsp_api_keys_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF NEW.id <> OLD.id OR NEW.product_id <> OLD.product_id OR NEW.key_id <> OLD.key_id
+  IF NEW.id <> OLD.id OR NEW.app_id <> OLD.app_id OR NEW.key_id <> OLD.key_id
      OR NEW.secret_hash <> OLD.secret_hash OR NEW.created_at <> OLD.created_at THEN
     RAISE EXCEPTION 'API key identity and hash are immutable'
       USING ERRCODE = 'integrity_constraint_violation';
@@ -141,176 +126,104 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
-CREATE TRIGGER product_api_keys_guard BEFORE UPDATE ON product_api_keys FOR EACH ROW EXECUTE FUNCTION tsp_api_keys_guard();
-CREATE TRIGGER product_api_keys_no_delete BEFORE DELETE ON product_api_keys FOR EACH ROW EXECUTE FUNCTION tsp_forbid_delete();
+CREATE TRIGGER app_api_keys_guard BEFORE UPDATE ON app_api_keys FOR EACH ROW EXECUTE FUNCTION tsp_api_keys_guard();
+CREATE TRIGGER app_api_keys_no_delete BEFORE DELETE ON app_api_keys FOR EACH ROW EXECUTE FUNCTION tsp_forbid_delete();
 
 -- ---------------------------------------------------------------------------
--- Payer accounts
+-- Charges
 -- ---------------------------------------------------------------------------
-CREATE TABLE payer_accounts (
+-- One request by an app to collect an exact amount. Money rules (approved
+-- 2026-11-25):
+--   * amount, reference and account number never change;
+--   * succeeded only via a succeeded, receipted transaction of the same app
+--     for exactly the amount (checked below);
+--   * a failed prompt does not fail the charge: it stays pending;
+--   * late money still succeeds a pending, expired or cancelled charge;
+--   * money for an already-succeeded charge is its own transaction
+--     (transactions.charge_id = this charge, but not charges.transaction_id).
+CREATE TABLE charges (
   id                  uuid PRIMARY KEY,
-  product_id          uuid NOT NULL REFERENCES products (id),
-  external_ref        text NOT NULL CHECK (length(btrim(external_ref)) BETWEEN 1 AND 128),
-  account_number      text NOT NULL UNIQUE CHECK (account_number ~ '^[A-Z]{2,6}-[1-9][0-9]+$'),
-  account_number_norm text NOT NULL UNIQUE,
-  display_name        text NOT NULL CHECK (length(btrim(display_name)) BETWEEN 1 AND 200),
-  email               text CHECK (email IS NULL OR (length(email) <= 254 AND email ~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$')),
-  status              payer_status NOT NULL DEFAULT 'active',
-  credit_balance      bigint NOT NULL DEFAULT 0 CHECK (credit_balance >= 0),
+  app_id              uuid NOT NULL REFERENCES apps (id),
+  -- The app's own reference. Unique per app for ever (like Paystack), so a
+  -- late payment can never collide with a newer charge.
+  reference           text NOT NULL CHECK (length(btrim(reference)) BETWEEN 1 AND 128),
+  description         text CHECK (description IS NULL OR length(btrim(description)) BETWEEN 1 AND 500),
+  currency            char(3) NOT NULL DEFAULT 'KES' CHECK (currency = 'KES'),
+  amount              bigint NOT NULL CHECK (amount BETWEEN 1 AND 250000),
+  metadata            jsonb CHECK (metadata IS NULL OR (jsonb_typeof(metadata) = 'object' AND octet_length(metadata::text) <= 4096)),
+  -- What the customer types at the paybill, also sent as the STK
+  -- AccountReference (Daraja allows 12 characters). Either the app's own
+  -- (e.g. its customer number HOST-1042, may repeat across charges) or
+  -- generated (unique while live).
+  account_number      text NOT NULL CHECK (account_number ~ '^[A-Z]{2,6}-[0-9][A-Z0-9]*$' AND length(account_number) <= 12),
+  account_number_norm text NOT NULL CHECK (account_number_norm = replace(account_number, '-', '')),
+  account_generated   boolean NOT NULL,
+  -- Optional phone the app gave (the first prompt goes there).
+  phone               text CHECK (phone IS NULL OR phone ~ '^254[17][0-9]{8}$'),
+  status              charge_status NOT NULL DEFAULT 'pending',
+  hosted_token        text NOT NULL UNIQUE CHECK (length(hosted_token) >= 40),
+  idempotency_key     text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 255),
+  request_hash        bytea NOT NULL,
+  expires_at          timestamptz NOT NULL,
+  -- The transaction that paid this charge. Set once.
+  transaction_id      uuid,
+  succeeded_at        timestamptz,
+  closed_at           timestamptz, -- expired / cancelled
   created_at          timestamptz NOT NULL DEFAULT now(),
   updated_at          timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (product_id, external_ref),
-  UNIQUE (product_id, id),
-  CHECK (account_number_norm = replace(account_number, '-', ''))
+  UNIQUE (app_id, id),
+  UNIQUE (app_id, reference),
+  UNIQUE (app_id, idempotency_key),
+  CHECK (account_number LIKE '%-%'),
+  CHECK ((status IN ('succeeded', 'reversed')) = (transaction_id IS NOT NULL)),
+  CHECK ((status IN ('succeeded', 'reversed')) = (succeeded_at IS NOT NULL)),
+  CHECK (status NOT IN ('expired', 'cancelled') OR closed_at IS NOT NULL)
 );
-COMMENT ON COLUMN payer_accounts.credit_balance IS 'Cache of the sum of credit allocations. Maintained only by the allocations trigger.';
+COMMENT ON TABLE charges IS 'A request by an app to collect an exact amount. Paid only by a receipted transaction.';
+CREATE INDEX charges_app_created ON charges (app_id, created_at DESC, id DESC);
+-- Paybill matching: live charges by account number.
+CREATE INDEX charges_live_account ON charges (app_id, account_number_norm) WHERE status IN ('pending', 'needs_review');
+-- A generated account number identifies exactly one live charge.
+CREATE UNIQUE INDEX charges_generated_account_live ON charges (app_id, account_number_norm)
+  WHERE account_generated AND status IN ('pending', 'needs_review');
+CREATE INDEX charges_expiring ON charges (expires_at) WHERE status = 'pending';
 
-CREATE FUNCTION tsp_payer_accounts_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION tsp_charges_insert() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
   v_prefix text;
 BEGIN
-  SELECT account_prefix INTO v_prefix FROM products WHERE id = NEW.product_id;
+  IF NEW.status <> 'pending' OR NEW.transaction_id IS NOT NULL THEN
+    RAISE EXCEPTION 'charges are created pending and unpaid' USING ERRCODE = 'check_violation';
+  END IF;
+  SELECT account_prefix INTO v_prefix FROM apps WHERE id = NEW.app_id;
   IF NEW.account_number NOT LIKE v_prefix || '-%' THEN
-    RAISE EXCEPTION 'account number % does not carry product prefix %', NEW.account_number, v_prefix
-      USING ERRCODE = 'check_violation';
-  END IF;
-  IF NEW.credit_balance <> 0 THEN
-    RAISE EXCEPTION 'payer accounts must start with zero credit'
+    RAISE EXCEPTION 'account number % does not carry app prefix %', NEW.account_number, v_prefix
       USING ERRCODE = 'check_violation';
   END IF;
   RETURN NEW;
 END $$;
-CREATE TRIGGER payer_accounts_insert BEFORE INSERT ON payer_accounts FOR EACH ROW EXECUTE FUNCTION tsp_payer_accounts_insert();
+CREATE TRIGGER charges_insert BEFORE INSERT ON charges FOR EACH ROW EXECUTE FUNCTION tsp_charges_insert();
 
-CREATE FUNCTION tsp_payer_accounts_guard() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  IF NEW.id <> OLD.id OR NEW.product_id <> OLD.product_id OR NEW.external_ref <> OLD.external_ref
-     OR NEW.account_number <> OLD.account_number OR NEW.created_at <> OLD.created_at THEN
-    RAISE EXCEPTION 'payer account identity and account number are immutable'
-      USING ERRCODE = 'integrity_constraint_violation';
-  END IF;
-  IF NEW.credit_balance <> OLD.credit_balance AND NOT tsp_allocating() THEN
-    RAISE EXCEPTION 'credit_balance can only change through allocations'
-      USING ERRCODE = 'integrity_constraint_violation';
-  END IF;
-  RETURN NEW;
-END $$;
-CREATE TRIGGER payer_accounts_guard BEFORE UPDATE ON payer_accounts FOR EACH ROW EXECUTE FUNCTION tsp_payer_accounts_guard();
-CREATE TRIGGER payer_accounts_updated_at BEFORE UPDATE ON payer_accounts FOR EACH ROW EXECUTE FUNCTION tsp_set_updated_at();
-CREATE TRIGGER payer_accounts_no_delete BEFORE DELETE ON payer_accounts FOR EACH ROW EXECUTE FUNCTION tsp_forbid_delete();
-
-CREATE TABLE payer_phones (
-  product_id       uuid NOT NULL,
-  payer_account_id uuid NOT NULL,
-  phone            text NOT NULL CHECK (phone ~ '^254[17][0-9]{8}$'),
-  is_primary       boolean NOT NULL DEFAULT false,
-  created_at       timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (payer_account_id, phone),
-  FOREIGN KEY (product_id, payer_account_id) REFERENCES payer_accounts (product_id, id)
-);
-CREATE UNIQUE INDEX payer_phones_one_primary ON payer_phones (payer_account_id) WHERE is_primary;
-CREATE INDEX payer_phones_lookup ON payer_phones (product_id, phone);
--- Phones may be removed when a customer changes number (data minimisation);
--- historical phones remain on the transactions they paid with.
-
--- ---------------------------------------------------------------------------
--- Payment requests
--- ---------------------------------------------------------------------------
-CREATE TABLE payment_requests (
-  id                uuid PRIMARY KEY,
-  product_id        uuid NOT NULL REFERENCES products (id),
-  payer_account_id  uuid NOT NULL,
-  product_reference text NOT NULL CHECK (length(btrim(product_reference)) BETWEEN 1 AND 128),
-  description       text NOT NULL CHECK (length(btrim(description)) BETWEEN 1 AND 500),
-  currency          char(3) NOT NULL DEFAULT 'KES' CHECK (currency = 'KES'),
-  amount            bigint NOT NULL CHECK (amount > 0 AND amount <= 1000000000000),
-  amount_paid       bigint NOT NULL DEFAULT 0,
-  status            payment_request_status NOT NULL DEFAULT 'open',
-  expires_at        timestamptz,
-  hosted_token      text NOT NULL UNIQUE CHECK (length(hosted_token) >= 40),
-  idempotency_key   text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 255),
-  created_at        timestamptz NOT NULL DEFAULT now(),
-  updated_at        timestamptz NOT NULL DEFAULT now(),
-  paid_at           timestamptz,
-  closed_at         timestamptz,
-  FOREIGN KEY (product_id, payer_account_id) REFERENCES payer_accounts (product_id, id),
-  UNIQUE (product_id, idempotency_key),
-  UNIQUE (product_id, id),
-  CHECK (amount_paid >= 0 AND amount_paid <= amount),
-  -- Status must agree with what has been allocated. Cancelled/expired
-  -- requests can only ever have had nothing allocated to them.
-  CHECK (
-       (status = 'open'           AND amount_paid = 0)
-    OR (status = 'partially_paid' AND amount_paid > 0 AND amount_paid < amount)
-    OR (status = 'paid'           AND amount_paid = amount)
-    OR (status IN ('cancelled', 'expired') AND amount_paid = 0)
-  ),
-  CHECK ((status = 'paid') = (paid_at IS NOT NULL)),
-  CHECK ((status IN ('cancelled', 'expired')) = (closed_at IS NOT NULL))
-);
-COMMENT ON COLUMN payment_requests.amount_paid IS 'Cache of the sum of allocations to this request. Maintained only by the allocations trigger.';
--- A product reference can have only one live request at a time.
-CREATE UNIQUE INDEX payment_requests_live_reference ON payment_requests (product_id, product_reference)
-  WHERE status IN ('open', 'partially_paid');
--- Allocation reads: the payer's payable requests, oldest first.
-CREATE INDEX payment_requests_payable ON payment_requests (payer_account_id, created_at, id)
-  WHERE status IN ('open', 'partially_paid');
-CREATE INDEX payment_requests_expiry ON payment_requests (expires_at) WHERE status = 'open' AND expires_at IS NOT NULL;
-CREATE INDEX payment_requests_product_created ON payment_requests (product_id, created_at DESC);
-
-CREATE FUNCTION tsp_payment_requests_insert() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  IF NEW.amount_paid <> 0 OR NEW.status <> 'open' THEN
-    RAISE EXCEPTION 'payment requests are created open with nothing paid'
-      USING ERRCODE = 'check_violation';
-  END IF;
-  RETURN NEW;
-END $$;
-CREATE TRIGGER payment_requests_insert BEFORE INSERT ON payment_requests FOR EACH ROW EXECUTE FUNCTION tsp_payment_requests_insert();
-
-CREATE FUNCTION tsp_payment_requests_guard() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  IF NEW.id <> OLD.id OR NEW.product_id <> OLD.product_id OR NEW.payer_account_id <> OLD.payer_account_id
-     OR NEW.product_reference <> OLD.product_reference OR NEW.description <> OLD.description
-     OR NEW.currency <> OLD.currency OR NEW.amount <> OLD.amount OR NEW.hosted_token <> OLD.hosted_token
-     OR NEW.idempotency_key <> OLD.idempotency_key OR NEW.created_at <> OLD.created_at THEN
-    RAISE EXCEPTION 'payment request identity and amount are immutable'
-      USING ERRCODE = 'integrity_constraint_violation';
-  END IF;
-
-  IF tsp_allocating() THEN
-    RETURN NEW; -- the allocations trigger derives amount_paid/status itself
-  END IF;
-
-  IF NEW.amount_paid <> OLD.amount_paid THEN
-    RAISE EXCEPTION 'amount_paid can only change through allocations'
-      USING ERRCODE = 'integrity_constraint_violation';
-  END IF;
-  -- Outside allocation the only status changes allowed are closing an
-  -- untouched request: open -> cancelled | expired.
-  IF NEW.status <> OLD.status AND NOT (OLD.status = 'open' AND NEW.status IN ('cancelled', 'expired')) THEN
-    RAISE EXCEPTION 'payment request status % -> % is not allowed', OLD.status, NEW.status
-      USING ERRCODE = 'integrity_constraint_violation';
-  END IF;
-  RETURN NEW;
-END $$;
-CREATE TRIGGER payment_requests_guard BEFORE UPDATE ON payment_requests FOR EACH ROW EXECUTE FUNCTION tsp_payment_requests_guard();
-CREATE TRIGGER payment_requests_updated_at BEFORE UPDATE ON payment_requests FOR EACH ROW EXECUTE FUNCTION tsp_set_updated_at();
-CREATE TRIGGER payment_requests_no_delete BEFORE DELETE ON payment_requests FOR EACH ROW EXECUTE FUNCTION tsp_forbid_delete();
+CREATE TRIGGER charges_updated_at BEFORE UPDATE ON charges FOR EACH ROW EXECUTE FUNCTION tsp_set_updated_at();
+CREATE TRIGGER charges_no_delete BEFORE DELETE ON charges FOR EACH ROW EXECUTE FUNCTION tsp_forbid_delete();
+CREATE TRIGGER charges_no_truncate BEFORE TRUNCATE ON charges FOR EACH STATEMENT EXECUTE FUNCTION tsp_forbid_truncate();
 
 -- ---------------------------------------------------------------------------
 -- Transactions ledger (append-only)
 -- ---------------------------------------------------------------------------
 CREATE TABLE transactions (
   id                      uuid PRIMARY KEY,
-  -- NULL only while a payment cannot be routed to a product (suspense).
-  product_id              uuid REFERENCES products (id),
+  -- NULL only while a payment cannot be routed to an app (unmatched).
+  app_id                  uuid REFERENCES apps (id),
+  -- The charge this money was for, when known. Several transactions may
+  -- name the same charge (a customer who paid twice); the one that paid it
+  -- is charges.transaction_id.
+  charge_id               uuid,
   direction               txn_direction NOT NULL,
   kind                    txn_kind NOT NULL,
   channel                 txn_channel NOT NULL,
   -- Receipt namespace: all M-Pesa channels share one receipt space, so the
-  -- same receipt can never be recorded twice even via different channels
-  -- (e.g. STK callback and a later statement import).
+  -- same receipt can never be recorded twice even via different channels.
   provider                text NOT NULL CHECK (provider IN ('mpesa', 'manual')),
   status                  txn_status NOT NULL,
   amount                  bigint NOT NULL CHECK (amount > 0 AND amount <= 1000000000000),
@@ -318,9 +231,8 @@ CREATE TABLE transactions (
   provider_transaction_id text CHECK (provider_transaction_id IS NULL OR length(provider_transaction_id) BETWEEN 1 AND 64),
   provider_request_id     text CHECK (provider_request_id IS NULL OR length(provider_request_id) BETWEEN 1 AND 128),
   phone                   text CHECK (phone IS NULL OR phone ~ '^254[17][0-9]{8}$'),
-  bill_ref                text CHECK (bill_ref IS NULL OR length(bill_ref) <= 64),
-  payer_account_id        uuid,
-  payment_request_id      uuid,
+  -- The account number as the customer typed it / as sent with the prompt.
+  account_number          text CHECK (account_number IS NULL OR length(account_number) <= 64),
   reverses_transaction_id uuid REFERENCES transactions (id),
   failure_code            text CHECK (failure_code IS NULL OR length(failure_code) <= 32),
   failure_reason          text CHECK (failure_reason IS NULL OR length(failure_reason) <= 500),
@@ -333,12 +245,10 @@ CREATE TABLE transactions (
   completed_at            timestamptz,
   CONSTRAINT transactions_provider_receipt_uq UNIQUE (provider, provider_transaction_id),
   CONSTRAINT transactions_provider_request_uq UNIQUE (channel, provider_request_id),
-  UNIQUE (product_id, id),
-  FOREIGN KEY (product_id, payer_account_id)   REFERENCES payer_accounts (product_id, id),
-  FOREIGN KEY (product_id, payment_request_id) REFERENCES payment_requests (product_id, id),
-  -- With MATCH SIMPLE a NULL product_id would skip the composite FK checks.
-  CHECK (payer_account_id IS NULL OR product_id IS NOT NULL),
-  CHECK (payment_request_id IS NULL OR payer_account_id IS NOT NULL),
+  UNIQUE (app_id, id),
+  FOREIGN KEY (app_id, charge_id) REFERENCES charges (app_id, id),
+  -- With MATCH SIMPLE a NULL app_id would skip the composite FK check.
+  CHECK (charge_id IS NULL OR app_id IS NOT NULL),
   CHECK ((channel = 'manual') = (provider = 'manual')),
   CHECK (
        (kind = 'payment'  AND direction = 'in')
@@ -348,17 +258,74 @@ CREATE TABLE transactions (
   ),
   CHECK (kind = 'payment' OR (reason IS NOT NULL AND created_by IS NOT NULL)),
   CHECK ((kind = 'reversal') = (reverses_transaction_id IS NOT NULL)),
-  -- A successful M-Pesa transaction always carries its receipt.
-  CHECK (status <> 'succeeded' OR provider = 'manual' OR provider_transaction_id IS NOT NULL),
+  -- A successful M-Pesa payment always carries its receipt.
+  CHECK (status <> 'succeeded' OR provider = 'manual' OR kind <> 'payment' OR provider_transaction_id IS NOT NULL),
   CHECK ((status IN ('succeeded', 'failed', 'cancelled')) = (completed_at IS NOT NULL))
 );
-COMMENT ON TABLE transactions IS 'Append-only ledger of money movements. Amounts are never changed and rows are never deleted; corrections are new reversal/adjustment rows.';
+COMMENT ON TABLE transactions IS 'Append-only ledger of money movements. Amounts are never changed and rows are never deleted; corrections are new reversal rows.';
 CREATE UNIQUE INDEX transactions_one_reversal ON transactions (reverses_transaction_id) WHERE kind = 'reversal';
-CREATE INDEX transactions_product_created ON transactions (product_id, created_at DESC);
-CREATE INDEX transactions_payer ON transactions (payer_account_id, created_at DESC) WHERE payer_account_id IS NOT NULL;
-CREATE INDEX transactions_request ON transactions (payment_request_id) WHERE payment_request_id IS NOT NULL;
+CREATE INDEX transactions_app_created ON transactions (app_id, created_at DESC);
+CREATE INDEX transactions_charge ON transactions (charge_id) WHERE charge_id IS NOT NULL;
 CREATE INDEX transactions_pending ON transactions (channel, created_at) WHERE status = 'pending';
 CREATE INDEX transactions_phone ON transactions (phone) WHERE phone IS NOT NULL;
+
+-- The charge FK to its paying transaction (declared here, after both tables).
+ALTER TABLE charges ADD CONSTRAINT charges_transaction_fk
+  FOREIGN KEY (app_id, transaction_id) REFERENCES transactions (app_id, id);
+CREATE FUNCTION tsp_charges_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  t transactions%ROWTYPE;
+BEGIN
+  IF NEW.id <> OLD.id OR NEW.app_id <> OLD.app_id OR NEW.reference <> OLD.reference
+     OR NEW.description IS DISTINCT FROM OLD.description OR NEW.currency <> OLD.currency
+     OR NEW.amount <> OLD.amount OR NEW.metadata IS DISTINCT FROM OLD.metadata
+     OR NEW.account_number <> OLD.account_number OR NEW.account_number_norm <> OLD.account_number_norm
+     OR NEW.account_generated <> OLD.account_generated OR NEW.phone IS DISTINCT FROM OLD.phone
+     OR NEW.hosted_token <> OLD.hosted_token OR NEW.idempotency_key <> OLD.idempotency_key
+     OR NEW.request_hash <> OLD.request_hash OR NEW.expires_at <> OLD.expires_at
+     OR NEW.created_at <> OLD.created_at THEN
+    RAISE EXCEPTION 'charge % : identity, amount, reference and account number are immutable', OLD.id
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+  IF (OLD.transaction_id IS NOT NULL AND NEW.transaction_id IS DISTINCT FROM OLD.transaction_id)
+     OR (OLD.succeeded_at IS NOT NULL AND NEW.succeeded_at IS DISTINCT FROM OLD.succeeded_at) THEN
+    RAISE EXCEPTION 'charge % : the paying transaction is set once', OLD.id
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+
+  -- pending      -> needs_review | succeeded | expired | cancelled
+  -- needs_review -> pending (staff: not paid) | succeeded  (never expires
+  --                 while staff are checking)
+  -- expired, cancelled -> succeeded (late money is never dropped)
+  -- succeeded    -> reversed
+  IF NEW.status <> OLD.status AND NOT (
+       (OLD.status = 'pending'      AND NEW.status IN ('needs_review', 'succeeded', 'expired', 'cancelled'))
+    OR (OLD.status = 'needs_review' AND NEW.status IN ('pending', 'succeeded'))
+    OR (OLD.status IN ('expired', 'cancelled') AND NEW.status = 'succeeded')
+    OR (OLD.status = 'succeeded'    AND NEW.status = 'reversed')
+  ) THEN
+    RAISE EXCEPTION 'charge % : status % -> % is not allowed', OLD.id, OLD.status, NEW.status
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+
+  IF NEW.status = 'succeeded' AND OLD.status <> 'succeeded' THEN
+    SELECT * INTO t FROM transactions WHERE id = NEW.transaction_id;
+    IF NOT FOUND OR t.status <> 'succeeded' OR t.kind <> 'payment' OR t.direction <> 'in'
+       OR t.app_id IS DISTINCT FROM NEW.app_id OR t.charge_id IS DISTINCT FROM NEW.id
+       OR t.amount <> NEW.amount
+       OR (t.provider = 'mpesa' AND t.provider_transaction_id IS NULL) THEN
+      RAISE EXCEPTION 'charge % : can only be paid by a succeeded, receipted payment of this app and charge for exactly KES %', OLD.id, OLD.amount
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+  IF NEW.status = 'reversed' AND NOT EXISTS (
+       SELECT 1 FROM transactions r WHERE r.kind = 'reversal' AND r.reverses_transaction_id = NEW.transaction_id) THEN
+    RAISE EXCEPTION 'charge % : reversed only after its payment has a reversal transaction', OLD.id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER charges_guard BEFORE UPDATE ON charges FOR EACH ROW EXECUTE FUNCTION tsp_charges_guard();
 
 CREATE FUNCTION tsp_transactions_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -374,18 +341,18 @@ BEGIN
   END IF;
 
   -- Set-once columns: may go from NULL to a value, never change afterwards.
+  -- (app_id: staff assigning unmatched money to an app.)
   IF (OLD.provider_transaction_id IS NOT NULL AND NEW.provider_transaction_id IS DISTINCT FROM OLD.provider_transaction_id)
      OR (OLD.provider_request_id IS NOT NULL AND NEW.provider_request_id IS DISTINCT FROM OLD.provider_request_id)
      OR (OLD.phone IS NOT NULL AND NEW.phone IS DISTINCT FROM OLD.phone)
-     OR (OLD.product_id IS NOT NULL AND NEW.product_id IS DISTINCT FROM OLD.product_id)
-     OR (OLD.payer_account_id IS NOT NULL AND NEW.payer_account_id IS DISTINCT FROM OLD.payer_account_id)
-     OR (OLD.payment_request_id IS NOT NULL AND NEW.payment_request_id IS DISTINCT FROM OLD.payment_request_id)
+     OR (OLD.app_id IS NOT NULL AND NEW.app_id IS DISTINCT FROM OLD.app_id)
+     OR (OLD.charge_id IS NOT NULL AND NEW.charge_id IS DISTINCT FROM OLD.charge_id)
      OR (OLD.raw_payload IS NOT NULL AND NEW.raw_payload IS DISTINCT FROM OLD.raw_payload)
      OR (OLD.occurred_at IS NOT NULL AND NEW.occurred_at IS DISTINCT FROM OLD.occurred_at)
      OR (OLD.completed_at IS NOT NULL AND NEW.completed_at IS DISTINCT FROM OLD.completed_at)
      OR (OLD.failure_code IS NOT NULL AND NEW.failure_code IS DISTINCT FROM OLD.failure_code)
      OR (OLD.failure_reason IS NOT NULL AND NEW.failure_reason IS DISTINCT FROM OLD.failure_reason)
-     OR (OLD.bill_ref IS NOT NULL AND NEW.bill_ref IS DISTINCT FROM OLD.bill_ref) THEN
+     OR (OLD.account_number IS NOT NULL AND NEW.account_number IS DISTINCT FROM OLD.account_number) THEN
     RAISE EXCEPTION 'transaction % : recorded provider details cannot be changed', OLD.id
       USING ERRCODE = 'integrity_constraint_violation';
   END IF;
@@ -404,6 +371,24 @@ CREATE TRIGGER transactions_guard BEFORE UPDATE ON transactions FOR EACH ROW EXE
 CREATE TRIGGER transactions_updated_at BEFORE UPDATE ON transactions FOR EACH ROW EXECUTE FUNCTION tsp_set_updated_at();
 CREATE TRIGGER transactions_no_delete BEFORE DELETE ON transactions FOR EACH ROW EXECUTE FUNCTION tsp_forbid_delete();
 CREATE TRIGGER transactions_no_truncate BEFORE TRUNCATE ON transactions FOR EACH STATEMENT EXECUTE FUNCTION tsp_forbid_truncate();
+
+-- A reversal undoes exactly one succeeded payment of the same app, for its
+-- full amount.
+CREATE FUNCTION tsp_transactions_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  o transactions%ROWTYPE;
+BEGIN
+  IF NEW.kind = 'reversal' THEN
+    SELECT * INTO o FROM transactions WHERE id = NEW.reverses_transaction_id;
+    IF NOT FOUND OR o.kind <> 'payment' OR o.status <> 'succeeded' OR o.amount <> NEW.amount
+       OR o.app_id IS DISTINCT FROM NEW.app_id OR o.charge_id IS DISTINCT FROM NEW.charge_id THEN
+      RAISE EXCEPTION 'a reversal must undo a succeeded payment of the same app and charge for its full amount'
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER transactions_insert BEFORE INSERT ON transactions FOR EACH ROW EXECUTE FUNCTION tsp_transactions_insert();
 
 -- Every status a transaction passes through, with who/what caused it.
 CREATE TABLE transaction_events (
@@ -431,177 +416,6 @@ CREATE TRIGGER transaction_events_no_delete BEFORE DELETE ON transaction_events 
 CREATE TRIGGER transaction_events_no_truncate BEFORE TRUNCATE ON transaction_events FOR EACH STATEMENT EXECUTE FUNCTION tsp_forbid_truncate();
 
 -- ---------------------------------------------------------------------------
--- Allocations (append-only)
--- ---------------------------------------------------------------------------
--- A batch groups the allocation lines produced by one decision of the
--- allocation engine. Its lines must sum to expected_total:
---   payment:            +transaction amount (money in, spread over requests/credit)
---   credit_application:  0 (+x to a request, -x from credit)
---   reversal:           -original amount (undo a payment batch)
-CREATE TABLE allocation_batches (
-  id                 uuid PRIMARY KEY,
-  product_id         uuid NOT NULL REFERENCES products (id),
-  payer_account_id   uuid NOT NULL,
-  kind               allocation_batch_kind NOT NULL,
-  transaction_id     uuid,
-  payment_request_id uuid,
-  reverses_batch_id  uuid REFERENCES allocation_batches (id),
-  expected_total     bigint NOT NULL,
-  created_by         text NOT NULL,
-  reason             text,
-  created_at         timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (product_id, id),
-  FOREIGN KEY (product_id, payer_account_id)   REFERENCES payer_accounts (product_id, id),
-  FOREIGN KEY (product_id, transaction_id)     REFERENCES transactions (product_id, id),
-  FOREIGN KEY (product_id, payment_request_id) REFERENCES payment_requests (product_id, id),
-  CHECK (
-       (kind = 'payment'            AND transaction_id IS NOT NULL AND reverses_batch_id IS NULL AND payment_request_id IS NULL AND expected_total > 0)
-    OR (kind = 'credit_application' AND transaction_id IS NULL     AND reverses_batch_id IS NULL AND payment_request_id IS NOT NULL AND expected_total = 0)
-    OR (kind = 'reversal'           AND transaction_id IS NOT NULL AND reverses_batch_id IS NOT NULL AND payment_request_id IS NULL AND expected_total < 0 AND reason IS NOT NULL)
-  )
-);
--- Idempotency guard: a transaction is allocated at most once, and a payment
--- batch is reversed at most once.
-CREATE UNIQUE INDEX allocation_batches_one_payment ON allocation_batches (transaction_id) WHERE kind = 'payment';
-CREATE UNIQUE INDEX allocation_batches_one_reversal ON allocation_batches (reverses_batch_id) WHERE kind = 'reversal';
-CREATE INDEX allocation_batches_payer ON allocation_batches (payer_account_id, created_at);
-
-CREATE FUNCTION tsp_allocation_batches_insert() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE
-  t transactions%ROWTYPE;
-  orig allocation_batches%ROWTYPE;
-BEGIN
-  IF NEW.kind IN ('payment', 'reversal') THEN
-    SELECT * INTO t FROM transactions WHERE id = NEW.transaction_id;
-    IF t.status <> 'succeeded' THEN
-      RAISE EXCEPTION 'only succeeded transactions can be allocated (transaction % is %)', t.id, t.status
-        USING ERRCODE = 'check_violation';
-    END IF;
-    IF t.payer_account_id IS DISTINCT FROM NEW.payer_account_id THEN
-      RAISE EXCEPTION 'allocation payer does not match transaction payer'
-        USING ERRCODE = 'check_violation';
-    END IF;
-  END IF;
-
-  IF NEW.kind = 'payment' THEN
-    IF t.kind <> 'payment' OR t.direction <> 'in' OR t.amount <> NEW.expected_total THEN
-      RAISE EXCEPTION 'payment batch must allocate exactly the incoming payment amount'
-        USING ERRCODE = 'check_violation';
-    END IF;
-  ELSIF NEW.kind = 'reversal' THEN
-    SELECT * INTO orig FROM allocation_batches WHERE id = NEW.reverses_batch_id;
-    IF orig.kind <> 'payment' OR t.kind <> 'reversal' OR t.reverses_transaction_id <> orig.transaction_id
-       OR NEW.expected_total <> -orig.expected_total OR orig.payer_account_id <> NEW.payer_account_id THEN
-      RAISE EXCEPTION 'reversal batch must exactly undo the original payment batch'
-        USING ERRCODE = 'check_violation';
-    END IF;
-  END IF;
-  RETURN NEW;
-END $$;
-CREATE TRIGGER allocation_batches_insert BEFORE INSERT ON allocation_batches FOR EACH ROW EXECUTE FUNCTION tsp_allocation_batches_insert();
-CREATE TRIGGER allocation_batches_no_update BEFORE UPDATE ON allocation_batches FOR EACH ROW EXECUTE FUNCTION tsp_forbid_update();
-CREATE TRIGGER allocation_batches_no_delete BEFORE DELETE ON allocation_batches FOR EACH ROW EXECUTE FUNCTION tsp_forbid_delete();
-CREATE TRIGGER allocation_batches_no_truncate BEFORE TRUNCATE ON allocation_batches FOR EACH STATEMENT EXECUTE FUNCTION tsp_forbid_truncate();
-
-CREATE TABLE allocations (
-  id                 bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  batch_id           uuid NOT NULL,
-  line_no            integer NOT NULL CHECK (line_no >= 1),
-  product_id         uuid NOT NULL,
-  payer_account_id   uuid NOT NULL,
-  payment_request_id uuid, -- NULL = the payer's credit balance
-  amount             bigint NOT NULL CHECK (amount <> 0),
-  created_at         timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (batch_id, line_no),
-  FOREIGN KEY (product_id, batch_id)           REFERENCES allocation_batches (product_id, id),
-  FOREIGN KEY (product_id, payer_account_id)   REFERENCES payer_accounts (product_id, id),
-  FOREIGN KEY (product_id, payment_request_id) REFERENCES payment_requests (product_id, id)
-);
-CREATE INDEX allocations_request ON allocations (payment_request_id) WHERE payment_request_id IS NOT NULL;
-CREATE INDEX allocations_payer_credit ON allocations (payer_account_id) WHERE payment_request_id IS NULL;
-
--- Applies one allocation line to the cached balances. Over-allocation and
--- negative credit are rejected by the CHECK constraints on the target rows.
-CREATE FUNCTION tsp_allocations_apply() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE
-  b allocation_batches%ROWTYPE;
-  r payment_requests%ROWTYPE;
-  v_paid bigint;
-  v_status payment_request_status;
-BEGIN
-  SELECT * INTO b FROM allocation_batches WHERE id = NEW.batch_id;
-  IF b.payer_account_id <> NEW.payer_account_id THEN
-    RAISE EXCEPTION 'allocation line payer does not match its batch'
-      USING ERRCODE = 'check_violation';
-  END IF;
-
-  PERFORM set_config('talksasa.allocating', 'on', true);
-
-  IF NEW.payment_request_id IS NULL THEN
-    UPDATE payer_accounts SET credit_balance = credit_balance + NEW.amount WHERE id = NEW.payer_account_id;
-  ELSE
-    SELECT * INTO r FROM payment_requests WHERE id = NEW.payment_request_id FOR NO KEY UPDATE;
-    IF r.payer_account_id <> NEW.payer_account_id THEN
-      RAISE EXCEPTION 'payment request % does not belong to payer %', r.id, NEW.payer_account_id
-        USING ERRCODE = 'check_violation';
-    END IF;
-    IF NEW.amount > 0 AND r.status NOT IN ('open', 'partially_paid') THEN
-      RAISE EXCEPTION 'cannot allocate to % payment request %', r.status, r.id
-        USING ERRCODE = 'check_violation';
-    END IF;
-    v_paid := r.amount_paid + NEW.amount;
-    v_status := CASE
-      WHEN v_paid <= 0 THEN 'open'
-      WHEN v_paid < r.amount THEN 'partially_paid'
-      ELSE 'paid' END;
-    UPDATE payment_requests
-       SET amount_paid = v_paid,
-           status      = v_status,
-           paid_at     = CASE WHEN v_status = 'paid' THEN coalesce(paid_at, now()) ELSE NULL END
-     WHERE id = r.id;
-  END IF;
-
-  PERFORM set_config('talksasa.allocating', 'off', true);
-  RETURN NEW;
-END $$;
-CREATE TRIGGER allocations_apply BEFORE INSERT ON allocations FOR EACH ROW EXECUTE FUNCTION tsp_allocations_apply();
-CREATE TRIGGER allocations_no_update BEFORE UPDATE ON allocations FOR EACH ROW EXECUTE FUNCTION tsp_forbid_update();
-CREATE TRIGGER allocations_no_delete BEFORE DELETE ON allocations FOR EACH ROW EXECUTE FUNCTION tsp_forbid_delete();
-CREATE TRIGGER allocations_no_truncate BEFORE TRUNCATE ON allocations FOR EACH STATEMENT EXECUTE FUNCTION tsp_forbid_truncate();
-
--- At commit, every batch touched in the transaction must balance. Firing on
--- both tables catches empty batches and lines added to an old batch.
-CREATE FUNCTION tsp_check_batch_balanced(p_batch uuid) RETURNS void LANGUAGE plpgsql AS $$
-DECLARE
-  v_expected bigint;
-  v_sum bigint;
-BEGIN
-  SELECT expected_total INTO v_expected FROM allocation_batches WHERE id = p_batch;
-  SELECT coalesce(sum(amount), 0) INTO v_sum FROM allocations WHERE batch_id = p_batch;
-  IF v_sum <> v_expected THEN
-    RAISE EXCEPTION 'allocation batch % is unbalanced: lines sum to %, expected %', p_batch, v_sum, v_expected
-      USING ERRCODE = 'check_violation';
-  END IF;
-END $$;
-
-CREATE FUNCTION tsp_allocation_batches_balanced() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  PERFORM tsp_check_batch_balanced(NEW.id);
-  RETURN NULL;
-END $$;
-
-CREATE FUNCTION tsp_allocations_balanced() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  PERFORM tsp_check_batch_balanced(NEW.batch_id);
-  RETURN NULL;
-END $$;
-
-CREATE CONSTRAINT TRIGGER allocation_batches_balanced AFTER INSERT ON allocation_batches
-  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION tsp_allocation_batches_balanced();
-CREATE CONSTRAINT TRIGGER allocations_balanced AFTER INSERT ON allocations
-  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION tsp_allocations_balanced();
-
--- ---------------------------------------------------------------------------
 -- Audit log (append-only, hash-chained)
 -- ---------------------------------------------------------------------------
 -- Each row stores the SHA-256 of (previous row hash || this row's content)
@@ -616,29 +430,31 @@ CREATE TABLE audit_log (
   action      text NOT NULL CHECK (action ~ '^[a-z_]+(\.[a-z_]+)+$'),
   entity_type text NOT NULL,
   entity_id   text,
-  product_id  uuid REFERENCES products (id),
+  app_id      uuid REFERENCES apps (id),
   details     jsonb NOT NULL DEFAULT '{}'::jsonb,
   prev_id     bigint UNIQUE REFERENCES audit_log (id),
   prev_hash   bytea,
   hash        bytea NOT NULL
 );
 CREATE INDEX audit_log_entity ON audit_log (entity_type, entity_id);
-CREATE INDEX audit_log_product ON audit_log (product_id, occurred_at DESC);
+CREATE INDEX audit_log_app ON audit_log (app_id, occurred_at DESC);
 
 CREATE FUNCTION tsp_audit_row_digest(a audit_log, prev bytea) RETURNS bytea LANGUAGE sql STABLE AS $$
   SELECT sha256(coalesce(prev, ''::bytea) || convert_to(concat_ws('|',
     a.id::text, to_char(a.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US'),
     a.actor_type::text, a.actor_id, a.action, a.entity_type, coalesce(a.entity_id, ''),
-    coalesce(a.product_id::text, ''), a.details::text), 'UTF8'))
+    coalesce(a.app_id::text, ''), a.details::text), 'UTF8'))
 $$;
 
+-- The id is drawn while holding the lock, so id order equals chain order and
+-- the highest id is always the head (concurrent writers otherwise commit in
+-- the opposite order to their ids and collide on prev_id).
 CREATE FUNCTION tsp_audit_chain() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
   last audit_log%ROWTYPE;
 BEGIN
-  -- Serialise appends so the chain stays linear. Under READ COMMITTED the
-  -- SELECT below sees the row committed by whoever held the lock before us.
   PERFORM pg_advisory_xact_lock(hashtext('talksasa.audit_log'));
+  NEW.id := nextval(pg_get_serial_sequence('audit_log', 'id'));
   SELECT * INTO last FROM audit_log ORDER BY id DESC LIMIT 1;
   IF FOUND THEN
     NEW.prev_id := last.id;
@@ -664,14 +480,13 @@ DECLARE
   expected_prev_hash bytea := NULL;
   n bigint := 0;
 BEGIN
-  -- Walk the chain from its head following prev_id links.
   FOR a IN
     WITH RECURSIVE chain AS (
       SELECT al.*, 1 AS depth FROM audit_log al WHERE al.prev_id IS NULL
       UNION ALL
       SELECT al.*, c.depth + 1 FROM audit_log al JOIN chain c ON al.prev_id = c.id
     )
-    SELECT id, occurred_at, actor_type, actor_id, action, entity_type, entity_id, product_id, details, prev_id, prev_hash, hash
+    SELECT id, occurred_at, actor_type, actor_id, action, entity_type, entity_id, app_id, details, prev_id, prev_hash, hash
       FROM chain ORDER BY depth
   LOOP
     n := n + 1;
@@ -682,7 +497,6 @@ BEGIN
     expected_prev := a.id;
     expected_prev_hash := a.hash;
   END LOOP;
-  -- Rows not reachable from the head (chain was cut) are also a failure.
   IF n <> (SELECT count(*) FROM audit_log) THEN
     RETURN (SELECT min(id) FROM audit_log al WHERE al.id NOT IN (
       WITH RECURSIVE chain AS (
@@ -703,11 +517,11 @@ DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'talksasa_app') THEN
     GRANT USAGE ON SCHEMA public TO talksasa_app;
-    GRANT SELECT, INSERT, UPDATE ON products, product_account_counters, product_api_keys,
-                                    payer_accounts, payment_requests, transactions TO talksasa_app;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON payer_phones TO talksasa_app;
-    GRANT SELECT, INSERT ON transaction_events, allocation_batches, allocations, audit_log TO talksasa_app;
+    GRANT SELECT, INSERT, UPDATE ON apps, app_api_keys, charges, transactions TO talksasa_app;
+    GRANT SELECT, INSERT ON transaction_events, audit_log TO talksasa_app;
     GRANT EXECUTE ON FUNCTION tsp_audit_verify() TO talksasa_app;
+    -- The audit trigger runs as the inserting role and calls nextval itself.
+    EXECUTE format('GRANT USAGE ON SEQUENCE %s TO talksasa_app', pg_get_serial_sequence('audit_log', 'id'));
   ELSE
     RAISE WARNING 'role talksasa_app does not exist; skipping grants (create it, then re-run grants from this migration)';
   END IF;

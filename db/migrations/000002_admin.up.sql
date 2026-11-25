@@ -192,14 +192,13 @@ CREATE TRIGGER admin_recovery_codes_no_truncate BEFORE TRUNCATE ON admin_recover
 -- Indexes for the admin panel's list and search screens
 -- ---------------------------------------------------------------------------
 CREATE INDEX transactions_created ON transactions (created_at DESC, id DESC);
-CREATE INDEX transactions_suspense ON transactions (created_at DESC, id DESC)
-  WHERE payer_account_id IS NULL AND direction = 'in' AND status = 'succeeded';
+-- Unmatched: money that could not be routed to an app (unknown prefix).
+CREATE INDEX transactions_unmatched ON transactions (created_at DESC, id DESC)
+  WHERE app_id IS NULL AND direction = 'in' AND status = 'succeeded';
 CREATE INDEX transactions_needs_review ON transactions (created_at DESC) WHERE status = 'needs_review';
-CREATE INDEX payment_requests_created ON payment_requests (created_at DESC, id DESC);
-CREATE INDEX payment_requests_status ON payment_requests (status, created_at DESC);
-CREATE INDEX payer_accounts_created ON payer_accounts (created_at DESC, id DESC);
-CREATE INDEX payer_accounts_name_trgm ON payer_accounts USING gin (lower(display_name) gin_trgm_ops);
-CREATE INDEX payer_accounts_ext_ref_trgm ON payer_accounts USING gin (lower(external_ref) gin_trgm_ops);
+CREATE INDEX charges_created ON charges (created_at DESC, id DESC);
+CREATE INDEX charges_status ON charges (status, created_at DESC);
+CREATE INDEX charges_reference_trgm ON charges USING gin (lower(reference) gin_trgm_ops);
 CREATE INDEX audit_log_occurred ON audit_log (occurred_at DESC, id DESC);
 
 -- ---------------------------------------------------------------------------
