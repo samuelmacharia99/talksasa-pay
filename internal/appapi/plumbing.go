@@ -45,6 +45,10 @@ func fieldErr(field, msg string) httpx.FieldError {
 	return httpx.FieldError{Field: field, Message: msg}
 }
 
+// errCrossApp: a service returned a row of another app. Never rendered;
+// answered as a generic 500.
+var errCrossApp = errors.New("appapi: service returned another app's resource")
+
 // fail maps service errors to problems. Anything unexpected is logged and
 // returned as a generic 500, so no internal detail leaks.
 func (h *handlers) fail(w http.ResponseWriter, r *http.Request, err error) {
@@ -78,8 +82,14 @@ func (h *handlers) fail(w http.ResponseWriter, r *http.Request, err error) {
 		unprocessable("expires_in", "must be from 900 to 604800 seconds")
 	case errors.Is(err, charge.ErrInvalidPhone), errors.Is(err, phone.ErrInvalid):
 		unprocessable("phone", phoneMessage)
+	case errors.Is(err, charge.ErrAccountNumberInUse):
+		unprocessable("account_number", "is already used by another pending charge")
 	case errors.Is(err, charge.ErrInvalidIdempotency):
 		invalid(w, r, http.StatusBadRequest, fieldErr("Idempotency-Key", "must be 1-255 printable characters"))
+	case errors.Is(err, charge.ErrInvalidCursor):
+		invalid(w, r, http.StatusBadRequest, fieldErr("cursor", "is not a cursor returned by this endpoint"))
+	case errors.Is(err, charge.ErrInvalidStatus):
+		invalid(w, r, http.StatusBadRequest, fieldErr("status", "must be one of pending, needs_review, succeeded, expired, cancelled, reversed"))
 	case db.IsBusy(err):
 		// Lock/statement timeout or retries exhausted: nothing was committed.
 		httpx.Busy(w, r, time.Second)
@@ -157,8 +167,6 @@ func cleanText(s string) bool {
 }
 
 // cleanMultiline is cleanText that also allows line breaks and tabs.
-//
-//nolint:unused // TODO(gateway-core): createCharge validates description with it.
 func cleanMultiline(s string) bool {
 	if !utf8.ValidString(s) {
 		return false

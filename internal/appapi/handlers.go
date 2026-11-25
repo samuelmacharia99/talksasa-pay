@@ -3,9 +3,7 @@ package appapi
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 	"time"
-	"unicode"
 
 	"github.com/google/uuid"
 
@@ -33,51 +31,6 @@ func (h *handlers) whoami(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, whoAmIJSON{
 		AppID: p.AppID, AppName: p.AppName, AccountPrefix: p.AccountPrefix, KeyID: p.KeyID,
 	})
-}
-
-// ---------------------------------------------------------------------------
-// Charges
-// ---------------------------------------------------------------------------
-
-func validIdempotencyKey(k string) bool {
-	return len(k) <= 255 && utf8Printable(k)
-}
-
-func utf8Printable(s string) bool {
-	return cleanText(s) && strings.IndexFunc(s, func(r rune) bool { return !unicode.IsPrint(r) }) < 0
-}
-
-// notImplemented answers routes whose behaviour has not landed yet.
-// TODO(gateway-core): remove once every route is implemented.
-func notImplemented(w http.ResponseWriter, r *http.Request) {
-	problem(w, r, http.StatusNotImplemented, "not_implemented", "This endpoint is not implemented yet.")
-}
-
-// createCharge: POST /charges (Idempotency-Key required; 201, or 200 with
-// Idempotent-Replayed on a replay). With a phone, the first prompt is sent
-// and embedded as latest_stk_push.
-func (h *handlers) createCharge(w http.ResponseWriter, r *http.Request) {
-	// TODO(gateway-core): validate body, h.d.Charges.Create, render
-	// h.d.View.Charge(created.Charge, created.Push).
-	notImplemented(w, r)
-}
-
-// listCharges: GET /charges?status=&reference=&limit=&cursor= (cursorCharges).
-func (h *handlers) listCharges(w http.ResponseWriter, r *http.Request) {
-	// TODO(gateway-core): h.d.Charges.List + store.ListLatestSTKPushesForCharges.
-	notImplemented(w, r)
-}
-
-// getCharge: GET /charges/{id}.
-func (h *handlers) getCharge(w http.ResponseWriter, r *http.Request) {
-	// TODO(gateway-core): h.d.Charges.Get + GetLatestSTKPushForCharge.
-	notImplemented(w, r)
-}
-
-// cancelCharge: POST /charges/{id}/cancel (an idempotent retry is also 200).
-func (h *handlers) cancelCharge(w http.ResponseWriter, r *http.Request) {
-	// TODO(gateway-core): h.d.Charges.Cancel.
-	notImplemented(w, r)
 }
 
 type listJSON[T any] struct {

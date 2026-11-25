@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,14 +41,8 @@ func mpesaUnavailable(w http.ResponseWriter, r *http.Request) {
 // charge's exact amount (decided by the service); the app id comes only
 // from the API key.
 func (h *handlers) sendSTKPush(w http.ResponseWriter, r *http.Request) {
-	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if key == "" {
-		problem(w, r, http.StatusBadRequest, "idempotency_key_required",
-			"Send an Idempotency-Key header (unique per logical request) so retries are safe.")
-		return
-	}
-	if !validIdempotencyKey(key) {
-		invalid(w, r, http.StatusBadRequest, fieldErr("Idempotency-Key", "must be 1-255 printable characters"))
+	key, ok := idempotencyKey(w, r)
+	if !ok {
 		return
 	}
 	chargeID, ok := pathUUID(w, r)
@@ -117,7 +110,7 @@ func (h *handlers) failSTK(w http.ResponseWriter, r *http.Request, push stk.Push
 		problem(w, r, http.StatusConflict, "idempotency_conflict",
 			"This Idempotency-Key was already used with a different phone or charge. Use a new key for a new prompt.")
 	case errors.Is(err, stk.ErrInvalidIdempotency):
-		invalid(w, r, http.StatusUnprocessableEntity, fieldErr("Idempotency-Key", "must be 1-255 printable characters"))
+		invalid(w, r, http.StatusBadRequest, fieldErr("Idempotency-Key", "must be 1-255 printable characters"))
 	case errors.Is(err, phone.ErrInvalid):
 		invalid(w, r, http.StatusUnprocessableEntity, fieldErr("phone", phoneMessage))
 	case errors.Is(err, stk.ErrDaraja):
