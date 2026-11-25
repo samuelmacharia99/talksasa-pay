@@ -78,6 +78,8 @@ stk_cancel_token=$(charge stk-cancel 120 | json 'd["checkout_url"]' | token_of)
 # A fresh unmatched paybill payment (no app has prefix XQZ) for the admin
 # "assign to app" test, so every run has one to assign.
 FAKE=http://127.0.0.1:8090
+# The fake Daraja only sends paybill confirmations once C2B URLs are registered.
+docker compose exec -T api /talksasa-pay admin mpesa register-urls --actor e2e >/dev/null
 unmatched_receipt=$(curl -fsS -X POST "$FAKE/fake/c2b" -d '{"bill_ref":"XQZ-90001","amount":75,"phone":"254712345678"}' |
   python3 -c "import sys,json; print(json.load(sys.stdin)['receipt'])")
 n=0

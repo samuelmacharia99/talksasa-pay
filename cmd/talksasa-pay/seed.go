@@ -280,4 +280,3 @@ func seedReceipt() string {
 	_, _ = rand.Read(b)
 	return "SD" + base32.StdEncoding.EncodeToString(b)
 }
-
