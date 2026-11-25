@@ -56,7 +56,7 @@ export function docHref(href: string): string | null {
   const frag = hash ? `#${hash}` : "";
   // product.openapi.yaml is the contract's old name, still linked from older guides.
   if (target.endsWith("app.openapi.yaml") || target.endsWith("product.openapi.yaml")) return "/developers/reference";
-  if (target.endsWith("clients/php")) return "/developers/laravel";
+  if (target.endsWith("clients/php") || target.endsWith("clients/php/README.md")) return "/developers/laravel";
   const page = FILE_TO_HREF.get(target.replace(/^\.\//, ""));
   return page ? page + frag : null;
 }
