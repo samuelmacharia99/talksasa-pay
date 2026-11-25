@@ -69,11 +69,14 @@ the old ones after the move.
 
 | Status | `code` | Meaning | What to do |
 |---|---|---|---|
-| `401` | `unauthorized` | The key is missing, malformed, unknown, revoked, expired, or for the other environment. The response doesn't say which, on purpose. | Check the `Authorization` header and the environment. If the key is right, ask staff whether it was revoked or has expired. Don't retry automatically. |
+| `401` | `unauthorized` | The key is missing, malformed, unknown, revoked, expired, for the other environment, or belongs to a product Talksasa has suspended. The response doesn't say which, on purpose. | Check the `Authorization` header and the environment. If the key is right, ask staff whether it was revoked or expired, or the product suspended. Don't retry automatically. |
 | `403` | `ip_not_allowed` | The key is valid but this request came from an address that is not on its allow-list. | Check the outbound address your server really uses (proxies and NAT gateways change it). Ask staff to add it. |
-| `403` | `product_suspended` | Talksasa has suspended your product. | Contact Talksasa. Money customers send while suspended is still recorded. |
+| `403` | `product_suspended` | Talksasa suspended your product while this request was in flight (rare). | Contact Talksasa. |
 
-> For the lead to verify: whether a suspended product's key gets `401
-> unauthorized` (the key check in `internal/product` rejects keys of
-> inactive products) or `403 product_suspended`, or each in different
-> situations.
+A suspended product's keys get `401 unauthorized`, the same answer as a
+revoked key: the key check turns away keys of any product that is not
+active, before the request reaches your data. You only see
+`403 product_suspended` if the suspension lands between that check and the
+write, for example during a `PUT /payers/{external_ref}`. Either way, contact
+Talksasa. Money your customers send while the product is suspended is still
+recorded and applied to their bills.
