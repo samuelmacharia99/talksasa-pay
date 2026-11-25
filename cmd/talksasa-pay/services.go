@@ -67,7 +67,7 @@ func newApp(ctx context.Context, logw io.Writer, component string) (*services, e
 	adminCfg.AbsoluteTimeout = cfg.Admin.AbsoluteTimeout
 	adminCfg.SetupBaseURL = cfg.Admin.SetupBaseURL
 	pepper := []byte(cfg.Crypto.APIKeyPepper.Reveal())
-	ledgerSvc := ledger.NewService(pool, logger)
+	ledgerSvc := ledger.NewService(pool, logger).WithEvents(emitter)
 	mc, err := newMpesaClient(cfg, logger, component)
 	if err != nil {
 		pool.Close()
@@ -77,6 +77,9 @@ func newApp(ctx context.Context, logw io.Writer, component string) (*services, e
 		Pool: pool, Ledger: ledgerSvc, Events: emitter,
 		Callbacks: queue.NewEnqueuer(riverClient), Logger: logger,
 		QueryAfter: cfg.Mpesa.QueryAfter, GiveUpAfter: cfg.Mpesa.GiveUpAfter,
+		// C2B confirmations for any other paybill than the one whose URLs we
+		// register are not recorded (alarm; the inbox keeps them).
+		ShortCode: cfg.Public.Paybill,
 	}
 	if mc != nil {
 		// Only a non-nil client: a typed nil would make Available() true.

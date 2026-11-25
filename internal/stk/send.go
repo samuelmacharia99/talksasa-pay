@@ -164,8 +164,10 @@ type darajaArgs struct {
 }
 
 func (s *Service) startTx(ctx context.Context, q *store.Queries, p SendParams, ph string, key *string, hash []byte) (Push, darajaArgs, error) {
-	// TODO(gateway-core): review payability rules (rule 4: re-prompt after a
-	// failed prompt, one live prompt; needs_review/expired/cancelled not payable).
+	// Rule 4: a pending charge may be prompted again after a prompt failed,
+	// one live prompt at a time. needs_review (staff are checking a
+	// payment), succeeded, expired, cancelled and reversed charges are not
+	// prompted.
 	c, err := q.LockCharge(ctx, store.LockChargeParams{AppID: p.AppID, ID: p.ChargeID})
 	if db.IsNotFound(err) {
 		return Push{}, darajaArgs{}, ErrNotFound
@@ -317,10 +319,60 @@ func (s *Service) failPushTx(ctx context.Context, q *store.Queries, cur Push, re
 			return Push{}, err
 		}
 	}
+	// A failed prompt never fails the charge (rule 4); a charge that was in
+	// review because of this prompt goes back to pending.
+	if err := s.releaseReview(ctx, q, cur.ChargeID); err != nil {
+		return Push{}, err
+	}
 	if err := s.o.Events.EmitSTKPush(ctx, q, out.AppID, out.ID, events.STKPushFailed); err != nil {
 		return Push{}, err
 	}
 	return out, nil
+}
+
+// holdForReview moves a pending charge to needs_review (a payment for it is
+// being checked by staff; it is neither prompted nor expired meanwhile) and
+// emits charge.needs_review. Other states are left alone: a charge that
+// expired, was cancelled or succeeded is still settled by the review
+// (late money is never dropped). Called with the push and its transaction
+// locked (lock order push -> transaction -> charge).
+func (s *Service) holdForReview(ctx context.Context, q *store.Queries, chargeID uuid.UUID) error {
+	c, err := q.LockChargeInternal(ctx, chargeID)
+	if err != nil {
+		return err
+	}
+	if c.Status != store.ChargeStatusPending {
+		return nil
+	}
+	if _, err := q.MarkChargeNeedsReview(ctx, c.ID); err != nil {
+		return fmt.Errorf("stk: charge to needs_review: %w", err)
+	}
+	return s.o.Events.EmitCharge(ctx, q, c.AppID, c.ID, events.ChargeNeedsReview)
+}
+
+// releaseReview: the payment under review turned out not to have arrived.
+// A needs_review charge with no other payment in review goes back to
+// pending (the expiry job expires it later if it is past due). No event:
+// the app hears stk_push.failed.
+func (s *Service) releaseReview(ctx context.Context, q *store.Queries, chargeID uuid.UUID) error {
+	c, err := q.LockChargeInternal(ctx, chargeID)
+	if err != nil {
+		return err
+	}
+	if c.Status != store.ChargeStatusNeedsReview {
+		return nil
+	}
+	n, err := q.CountReviewTransactionsForCharge(ctx, &c.ID)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	if _, err := q.MarkChargePending(ctx, c.ID); err != nil {
+		return fmt.Errorf("stk: charge back to pending: %w", err)
+	}
+	return nil
 }
 
 // reviewPushTx: Safaricom says (or may have said) paid but we have no usable
@@ -351,14 +403,22 @@ func (s *Service) reviewPushTx(ctx context.Context, q *store.Queries, cur Push, 
 		return Push{}, err
 	}
 	changed := out.Status != cur.Status
+	inReview := txn.Status == store.TxnStatusNeedsReview
 	if txn.Status == store.TxnStatusPending {
 		if _, err := ledger.MarkNeedsReview(ctx, q, txn.ID, txnCode, txnReason); err != nil {
 			return Push{}, err
 		}
-		changed = true
+		changed, inReview = true, true
 	}
 	if changed {
 		if err := s.o.Events.EmitSTKPush(ctx, q, out.AppID, out.ID, events.STKPushNeedsReview); err != nil {
+			return Push{}, err
+		}
+	}
+	// The charge waits for staff too, but only while a payment of it is
+	// actually in review (otherwise nothing would ever release it).
+	if inReview {
+		if err := s.holdForReview(ctx, q, cur.ChargeID); err != nil {
 			return Push{}, err
 		}
 	}

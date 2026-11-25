@@ -125,7 +125,7 @@ func newEnv(t *testing.T) *env {
 	}
 	enq := queue.NewEnqueuer(rc)
 	ev := events.NewEmitter(apiview.View{PayBaseURL: "https://pay.test/", Paybill: testShortCode}, enq)
-	led := ledger.NewService(d.App, logger)
+	led := ledger.NewService(d.App, logger).WithEvents(ev)
 	e := &env{
 		t: t, ctx: context.Background(), db: d, logs: logs, fake: newFake(),
 		apps: app.NewService(app.Options{
@@ -163,6 +163,13 @@ func (e *env) app(prefix string) uuid.UUID {
 func (e *env) charge(appID uuid.UUID, amount int64) store.Charge {
 	e.t.Helper()
 	return seed.Charge(e.t, e.ctx, e.db.App, appID, e.prefixes[appID], amount, seed.ChargeOpts{})
+}
+
+// chargeWithAccount seeds a pending charge with an app-supplied account
+// number (which may repeat across charges).
+func (e *env) chargeWithAccount(appID uuid.UUID, amount int64, account string) store.Charge {
+	e.t.Helper()
+	return seed.Charge(e.t, e.ctx, e.db.App, appID, e.prefixes[appID], amount, seed.ChargeOpts{AccountNumber: account})
 }
 
 // chargeState reloads a charge.
@@ -271,11 +278,14 @@ func (e *env) events(subject uuid.UUID, typ string) int64 {
 	return e.count(`SELECT count(*) FROM events WHERE subject_id = $1 AND type = $2`, subject, typ)
 }
 
-// checkInvariants proves the money rules hold after a test.
-// TODO(gateway-core): extend with the charge invariants of the plan
-// (each succeeded charge has exactly one succeeded transaction for its
-// exact amount; every app-routed succeeded transaction has a
-// charge.succeeded or payment.received event).
+// checkInvariants proves the money rules hold after a test:
+//   - each receipt is recorded once; no succeeded M-Pesa payment lacks one;
+//   - every succeeded/reversed charge points at a succeeded payment naming
+//     it, of its app, for exactly its amount;
+//   - every app-routed succeeded payment has exactly one charge.succeeded
+//     (it paid its charge) or payment.received event naming it;
+//   - push, transaction and charge states agree;
+//   - the audit chain verifies; every event and callback has its job.
 func (e *env) checkInvariants() {
 	e.t.Helper()
 	bad, err := store.New(e.db.App).VerifyAuditChain(e.ctx)
@@ -286,14 +296,30 @@ func (e *env) checkInvariants() {
 		e.t.Fatalf("audit chain broken at %d", bad)
 	}
 	e.zero("succeeded M-Pesa transaction without a receipt", `
-		SELECT count(*) FROM transactions WHERE status = 'succeeded' AND provider = 'mpesa' AND provider_transaction_id IS NULL`)
+		SELECT count(*) FROM transactions WHERE status = 'succeeded' AND provider = 'mpesa' AND kind = 'payment'
+		   AND provider_transaction_id IS NULL`)
 	e.zero("succeeded charge whose paying transaction is not a succeeded payment for exactly its amount", `
 		SELECT count(*) FROM charges c LEFT JOIN transactions t ON t.id = c.transaction_id
 		 WHERE c.status IN ('succeeded', 'reversed')
-		   AND (t.id IS NULL OR t.status <> 'succeeded' OR t.kind <> 'payment' OR t.amount <> c.amount OR t.charge_id <> c.id)`)
+		   AND (t.id IS NULL OR t.status <> 'succeeded' OR t.kind <> 'payment' OR t.amount <> c.amount
+		        OR t.charge_id <> c.id OR t.app_id <> c.app_id)`)
+	e.zero("charge paid by a transaction although it is not succeeded/reversed", `
+		SELECT count(*) FROM charges WHERE status NOT IN ('succeeded', 'reversed') AND transaction_id IS NOT NULL`)
 	e.zero("receipt recorded twice", `
 		SELECT count(*) FROM (SELECT provider_transaction_id FROM transactions WHERE provider_transaction_id IS NOT NULL
 		                       GROUP BY provider, provider_transaction_id HAVING count(*) > 1) x`)
+	e.zero("app-routed succeeded payment without exactly one charge.succeeded or payment.received event", `
+		SELECT count(*) FROM transactions t
+		 WHERE t.kind = 'payment' AND t.status = 'succeeded' AND t.app_id IS NOT NULL
+		   AND (SELECT count(*) FROM events ev WHERE ev.app_id = t.app_id
+		          AND ((ev.type = 'payment.received' AND ev.subject_id = t.id)
+		            OR (ev.type = 'charge.succeeded' AND ev.subject_id = t.charge_id AND ev.data->>'transaction_id' = t.id::text))) <> 1`)
+	e.zero("charge.succeeded event for a charge not paid by the transaction it names", `
+		SELECT count(*) FROM events ev JOIN charges c ON c.id = ev.subject_id
+		 WHERE ev.type = 'charge.succeeded' AND c.transaction_id::text IS DISTINCT FROM ev.data->>'transaction_id'`)
+	e.zero("unmatched payment with an event", `
+		SELECT count(*) FROM transactions t WHERE t.app_id IS NULL
+		   AND EXISTS (SELECT 1 FROM events ev WHERE ev.subject_id = t.id)`)
 	e.zero("succeeded push whose money is not recorded", `
 		SELECT count(*) FROM stk_pushes p WHERE p.status = 'succeeded'
 		   AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.status = 'succeeded'
@@ -302,6 +328,15 @@ func (e *env) checkInvariants() {
 	e.zero("live push whose transaction is not pending", `
 		SELECT count(*) FROM stk_pushes p JOIN transactions t ON t.id = p.transaction_id
 		 WHERE p.status IN ('initiating', 'sent') AND t.status <> 'pending'`)
+	e.zero("push in review whose transaction is not", `
+		SELECT count(*) FROM stk_pushes p JOIN transactions t ON t.id = p.transaction_id
+		 WHERE p.status = 'unknown' AND t.status NOT IN ('needs_review', 'succeeded', 'failed')`)
+	e.zero("needs_review charge without a payment in review", `
+		SELECT count(*) FROM charges c WHERE c.status = 'needs_review'
+		   AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.charge_id = c.id AND t.status = 'needs_review')`)
+	e.zero("pending charge with a payment in review", `
+		SELECT count(*) FROM charges c WHERE c.status = 'pending'
+		   AND EXISTS (SELECT 1 FROM transactions t WHERE t.charge_id = c.id AND t.status = 'needs_review')`)
 	e.zero("events whose webhook job is missing", `
 		SELECT count(*) FROM events ev WHERE NOT EXISTS (
 		  SELECT 1 FROM river_job j WHERE j.kind = 'webhook_delivery' AND j.args->>'event_id' = ev.id::text)`)
@@ -341,12 +376,4 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
-}
-
-// TODO(gateway-core): these helpers serve stk_test.go, which compiles only
-// with -tags gatewaycore until it is ported to charges. Referenced here so
-// the linter keeps them; delete this block once the port lands.
-var _ = []any{
-	(*env).advance, (*env).app, (*env).charge, (*fakeDaraja).setQuery, (*fakeDaraja).setPushErr, (*fakeDaraja).lastPush, (*env).chargeState, newReceipt, (*env).send, (*env).push, (*env).txn,
-	(*env).deliver, stkSuccess, stkFailure, c2b, (*env).events, (*env).assertNoLeak, mustErr,
 }

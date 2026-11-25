@@ -56,8 +56,12 @@ func (s *Service) Resolve(ctx context.Context, actor audit.Actor, p ResolveParam
 	if !p.Confirm {
 		receipt = ""
 	}
-	var out store.Transaction
+	var (
+		out store.Transaction
+		lb  *logbuf
+	)
 	err := db.WithTx(ctx, s.o.Pool, actor.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
+		lb = &logbuf{}
 		// Lock order: push, then transaction (as the callback path).
 		var push *Push
 		if pr, err := q.GetSTKPushByTransaction(ctx, p.TransactionID); err == nil {
@@ -102,11 +106,9 @@ func (s *Service) Resolve(ctx context.Context, actor audit.Actor, p ResolveParam
 				}
 				return err
 			}
-			// TODO(gateway-core): staff confirm pays the charge (rule 5);
-			// on fail, a needs_review charge goes back to pending.
-			if err := s.payCharge(ctx, q, out); err != nil {
-				return err
-			}
+			// Rule 5: staff confirm with the receipt; the push succeeds and
+			// the payment pays its charge (charge.succeeded, or
+			// payment.received if the charge was paid meanwhile).
 			if push != nil {
 				switch push.Status {
 				case store.StkPushStatusSent, store.StkPushStatusUnknown, store.StkPushStatusFailed:
@@ -114,6 +116,9 @@ func (s *Service) Resolve(ctx context.Context, actor audit.Actor, p ResolveParam
 						return err
 					}
 				}
+			}
+			if err := s.payCharge(ctx, q, out, lb, []any{slog.String("actor", actor.String())}); err != nil {
+				return err
 			}
 		} else {
 			if out, err = ledger.FailSTK(ctx, q, txn.ID, failStaff, reason, nil); err != nil {
@@ -132,6 +137,13 @@ func (s *Service) Resolve(ctx context.Context, actor audit.Actor, p ResolveParam
 					if err := s.o.Events.EmitSTKPush(ctx, q, pushed.AppID, pushed.ID, events.STKPushFailed); err != nil {
 						return err
 					}
+				}
+			}
+			// No money: a charge held for this review goes back to pending
+			// (the expiry job expires it later if it is past due).
+			if txn.ChargeID != nil {
+				if err := s.releaseReview(ctx, q, *txn.ChargeID); err != nil {
+					return err
 				}
 			}
 		}
@@ -154,6 +166,7 @@ func (s *Service) Resolve(ctx context.Context, actor audit.Actor, p ResolveParam
 		}
 		return store.Transaction{}, err
 	}
+	s.flush(ctx, lb)
 	s.o.Logger.WarnContext(ctx, "needs_review transaction resolved by staff", slog.String("transaction_id", out.ID.String()),
 		slog.String("status", string(out.Status)), slog.String("actor", actor.String()))
 	return out, nil
