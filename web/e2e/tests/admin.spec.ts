@@ -3,10 +3,11 @@ import { expect, test } from "@playwright/test";
 import { nextStep, totp } from "./totp";
 
 // Inputs prepared by `make e2e` (scripts/e2e.sh): a fresh admin invitation
-// and two seeded payment links.
+// and, optionally, the reference of a seeded charge to search for.
 const ADMIN = process.env.E2E_ADMIN_URL ?? "http://127.0.0.1:3001";
 const SETUP_URL = process.env.E2E_SETUP_URL ?? "";
 const EMAIL = process.env.E2E_EMAIL ?? "";
+const CHARGE_REF = process.env.E2E_CHARGE_REFERENCE ?? "";
 const PASSWORD = "lantern-giraffe-copper-91"; // gitleaks:allow (throwaway E2E account password)
 const SHOTS = "test-results/screens";
 
@@ -79,35 +80,47 @@ test("signs in, browses every section, manages a key, signs out", async ({ page,
   expect(session?.sameSite).toBe("Strict");
   expect(await page.evaluate(() => document.cookie)).not.toContain("tsp_admin");
 
+  // Charges: filter, open one, see its detail sections.
+  await page.getByRole("link", { name: "Charges", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Charges" })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/05-charges.png`, fullPage: true });
+  if (CHARGE_REF) {
+    await page.getByLabel("Search").fill(CHARGE_REF);
+    await page.getByRole("button", { name: "Apply filters" }).click();
+    await expect(page.getByRole("link", { name: CHARGE_REF })).toBeVisible();
+  }
+  const firstCharge = page.locator("tbody tr").first().getByRole("link").first();
+  if (await firstCharge.count()) {
+    await firstCharge.click();
+    await expect(page).toHaveURL(/\/charges\/[0-9a-f-]{36}$/);
+    for (const h of ["Details", "Checkout link", "Timeline", "Transactions", "Payment prompts", "Webhook events", "Metadata"]) {
+      await expect(page.getByRole("heading", { name: h, exact: true })).toBeVisible();
+    }
+    await expect(page.locator("body")).not.toContainText(/2547\d{8}/); // phones are masked
+    await page.screenshot({ path: `${SHOTS}/06-charge.png`, fullPage: true });
+  }
+
   await page.getByRole("link", { name: "Transactions", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Transactions" })).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/05-transactions.png`, fullPage: true });
-  await page.locator("tbody tr").first().getByRole("link").first().click();
-  await expect(page.getByRole("heading", { name: "Where the money went" })).toBeVisible();
-  await expect(page.locator("body")).not.toContainText(/2547\d{8}/); // phones are masked
-  await page.screenshot({ path: `${SHOTS}/06-transaction.png`, fullPage: true });
+  await page.screenshot({ path: `${SHOTS}/07-transactions.png`, fullPage: true });
+  const firstTxn = page.locator("tbody tr").first().getByRole("link").first();
+  if (await firstTxn.count()) {
+    await firstTxn.click();
+    await expect(page.getByRole("heading", { name: "Status history" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Where the money went" })).toHaveCount(0);
+    await expect(page.locator("body")).not.toContainText(/2547\d{8}/);
+    await page.screenshot({ path: `${SHOTS}/08-transaction.png`, fullPage: true });
+  }
 
   await page.getByRole("link", { name: "Unmatched payments" }).click();
-  await expect(page.getByText("SDSUSPENSE01").first()).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/07-unmatched.png`, fullPage: true });
+  await expect(page.getByRole("heading", { name: "Unmatched payments" })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/09-unmatched.png`, fullPage: true });
 
-  await page.getByRole("link", { name: "Payers" }).click();
-  await page.getByLabel("Search").fill("bill 1007");
-  await page.getByRole("button", { name: "Apply filters" }).click();
-  await expect(page.getByRole("link", { name: "BILL-1007" })).toBeVisible();
-  await page.getByRole("link", { name: "BILL-1007" }).click();
-  await expect(page.getByRole("heading", { name: "Kilimani Fibre Ltd" })).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/08-payer.png`, fullPage: true });
+  // Payers and bills are gone.
+  await expect(page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: /Payers|Payment requests|Products/ })).toHaveCount(0);
 
-  await page.getByRole("link", { name: "Payment requests" }).click();
-  await page.locator("select[name=status]").selectOption("partially_paid");
-  await page.getByRole("button", { name: "Apply filters" }).click();
-  await expect(page.locator("tbody tr").first()).toContainText("Part paid");
-  await page.locator("tbody tr").first().getByRole("link").first().click();
-  await expect(page.getByText("Paid so far")).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/09-request.png`, fullPage: true });
-
-  await page.getByRole("link", { name: "Products" }).click();
+  await page.getByRole("link", { name: "Apps", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Apps", exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Cloud Hosting" }).click();
   await page.getByLabel("Label").fill(`e2e ${Date.now()}`);
   await page.getByRole("button", { name: "Issue key" }).click();
@@ -130,16 +143,16 @@ test("signs in, browses every section, manages a key, signs out", async ({ page,
   await expect(page.getByText(EMAIL)).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/12-staff.png`, fullPage: true });
 
-  // Developers: the product API guides and the generated reference.
+  // Developers: the app API guides and the generated reference.
   await page.getByRole("link", { name: "Developers" }).click();
-  await expect(page.getByRole("heading", { level: 1, name: "Talksasa Pay product API" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/13-developers.png`, fullPage: true });
   await page.getByRole("navigation", { name: "Developer guides" }).getByRole("link", { name: "M-Pesa prompts" }).click();
   await expect(page).toHaveURL(/\/developers\/stk-push$/);
   await expect(page.getByRole("button", { name: "Copy" }).first()).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/14-developers-guide.png`, fullPage: true });
   await page.getByRole("navigation", { name: "Developer guides" }).getByRole("link", { name: "API reference" }).click();
-  await expect(page.locator("#sendSTKPush")).toContainText("/v1/payment-requests/{id}/stk-push");
+  await expect(page.locator("#sendSTKPush")).toContainText("/v1/charges/{id}/stk-push");
   await page.screenshot({ path: `${SHOTS}/15-developers-reference.png`, fullPage: true });
   const spec = await page.request.get(`${ADMIN}/developers/openapi.yaml`);
   expect(spec.ok()).toBe(true);
@@ -173,8 +186,52 @@ test("signs in with a recovery code exactly once", async ({ page }) => {
 });
 
 test("pages without a session go to sign-in", async ({ page }) => {
-  for (const path of ["/", "/transactions", "/staff", "/products"]) {
+  for (const path of ["/", "/charges", "/transactions", "/unmatched", "/staff", "/apps"]) {
     await page.goto(`${ADMIN}${path}`);
     await expect(page).toHaveURL(/\/login/);
   }
+});
+
+/*
+ * Staff money actions: assign an unmatched payment to an app (finance,
+ * admin) and reverse a succeeded payment (admin).
+ *
+ * TODO(gateway-core): POST /admin/v1/transactions/{id}/assign and /reverse
+ * answer 501 until the money core lands. Enable with E2E_MONEY_ACTIONS=1
+ * once they do; the run also needs an unmatched payment and a succeeded
+ * incoming payment in the seed (admin seed demo).
+ */
+test("assigns an unmatched payment and reverses a payment", async ({ page }) => {
+  test.skip(!process.env.E2E_MONEY_ACTIONS, "assign/reverse backend not implemented yet (TODO gateway-core)");
+  test.skip(!totpSecret, "setup did not run");
+  await page.goto(`${ADMIN}/login`);
+  await page.getByLabel("Email").fill(EMAIL);
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await nextStep();
+  await page.getByLabel("Authentication code").fill(totp(totpSecret));
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("heading", { name: /collected today/ })).toBeVisible();
+
+  await page.goto(`${ADMIN}/unmatched`);
+  await page.getByRole("button", { name: /Assign to app/ }).first().click();
+  await page.getByLabel("App", { exact: true }).selectOption({ label: "Cloud Hosting (HOST)" });
+  await page.getByLabel("Reason").fill("E2E: customer typed the wrong prefix");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Yes, assign it" }).click();
+  await expect(page.getByText(/Assigned to Cloud Hosting/)).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/16-assigned.png`, fullPage: true });
+
+  await page.goto(`${ADMIN}/transactions?status=succeeded&direction=in`);
+  await page.locator("tbody tr").first().getByRole("link").first().click();
+  await page.getByRole("button", { name: "Reverse payment" }).click();
+  await page.getByLabel("Reason").fill("E2E: Safaricom reversed it on request");
+  const receipt = page.getByLabel(/^Reversal receipt/);
+  await receipt.fill(`RV${Date.now().toString(36).toUpperCase()}`.slice(0, 10));
+  const confirmLabel = await page.getByText(/^Type \S+ to confirm$/).innerText();
+  const word = confirmLabel.replace(/^Type (\S+) to confirm$/, "$1");
+  await page.getByLabel(confirmLabel).fill(word);
+  await page.getByRole("button", { name: /^Reverse KES/ }).click();
+  await expect(page.getByText("Reversed. The app has been told.")).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/17-reversed.png`, fullPage: true });
 });

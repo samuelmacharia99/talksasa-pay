@@ -30,6 +30,7 @@ const GUIDES = [
   // charges.md replaces money-rules.md in the gateway redesign; use whichever
   // docs/api has so the generator works before and after that lands.
   { slug: "charges", file: "charges.md", nav: "Charges", fallback: { slug: "money-rules", file: "money-rules.md", nav: "Money rules" } },
+  { slug: "paybill", file: "paybill.md", nav: "Paybill payments", optional: true },
   { slug: "errors", file: "errors.md", nav: "Errors" },
   { slug: "laravel", file: "laravel.md", nav: "Laravel (PHP SDK)" },
 ];
@@ -179,7 +180,8 @@ function title(markdown, fallback) {
 
 /** The generated module's source text. */
 export function build(root = REPO_ROOT) {
-  const guides = GUIDES.map((entry) => {
+  const present = GUIDES.filter((g) => !g.optional || existsSync(path.join(root, "docs/api", g.file)));
+  const guides = present.map((entry) => {
     const g = entry.fallback && !existsSync(path.join(root, "docs/api", entry.file)) ? entry.fallback : entry;
     const markdown = readFileSync(path.join(root, "docs/api", g.file), "utf8");
     const notes = reviewerNotes(markdown);
