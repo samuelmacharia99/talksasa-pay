@@ -27,10 +27,10 @@ import (
 
 	"github.com/talksasa/talksasa-pay/internal/apiview"
 	"github.com/talksasa/talksasa-pay/internal/app"
-	"github.com/talksasa/talksasa-pay/internal/charge"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 	tlog "github.com/talksasa/talksasa-pay/internal/platform/log"
+	"github.com/talksasa/talksasa-pay/internal/store"
 )
 
 // MaxBodyBytes bounds every /v1 request body.
@@ -45,11 +45,15 @@ const (
 
 // Deps are the services the app API needs.
 type Deps struct {
-	Logger  *slog.Logger
-	Pool    *db.Pool
-	Apps    *app.Service
-	Charges *charge.Service
-	View    apiview.View
+	Logger *slog.Logger
+	Pool   *db.Pool
+	Apps   *app.Service
+	// Charges is the charge service (*charge.Service). nil: the charge
+	// routes answer 501 not_implemented.
+	Charges ChargeService
+	// Pushes reads charges' latest prompts. nil = store queries on Pool.
+	Pushes PushReader
+	View   apiview.View
 	// STK sends M-Pesa prompts. nil (M-Pesa off): sending is 503
 	// mpesa_unavailable and GET /stk-pushes/{id} is 404.
 	STK STKService
@@ -95,6 +99,9 @@ func NewRouter(d Deps) http.Handler {
 	}
 	if d.RequestTimeout <= 0 {
 		d.RequestTimeout = DefaultRequestTimeout
+	}
+	if d.Pushes == nil && d.Pool != nil {
+		d.Pushes = store.New(d.Pool)
 	}
 	h := &handlers{d: d}
 	r := chi.NewRouter()

@@ -17,7 +17,6 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/apiview"
 	"github.com/talksasa/talksasa-pay/internal/app"
 	"github.com/talksasa/talksasa-pay/internal/appapi"
-	"github.com/talksasa/talksasa-pay/internal/charge"
 	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
@@ -60,8 +59,9 @@ type Deps struct {
 	// nil = DefaultCallbackPerMinute / DefaultCallbackBurst.
 	MpesaCallbackLimiter *httpx.RateLimiter
 
-	// App API (/v1).
-	Charges           *charge.Service
+	// App API (/v1). Charges is the charge service (*charge.Service); a
+	// nil interface makes the /v1 charge routes answer 501.
+	Charges           appapi.ChargeService
 	View              apiview.View
 	KeyLimiter        *httpx.RateLimiter // per API key; nil = appapi default
 	APIRequestTimeout time.Duration      // 0 = appapi default

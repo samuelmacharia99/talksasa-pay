@@ -6,7 +6,40 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/talksasa/talksasa-pay/internal/apiview"
+	"github.com/talksasa/talksasa-pay/internal/store"
+	"github.com/talksasa/talksasa-pay/internal/testutil/specshape"
 )
+
+// The JSON resources the handlers render have exactly the fields the spec
+// documents (no undocumented field can reach an app).
+func TestResponseShapesMatchSpec(t *testing.T) {
+	const spec = "../../api/app.openapi.yaml"
+	now := time.Now()
+	desc := "Hosting"
+	c := store.Charge{
+		ID: uuid.New(), AppID: uuid.New(), Reference: "INV-1", Description: &desc, Currency: "KES", Amount: 100,
+		Metadata: []byte(`{"a":1}`), AccountNumber: "HOST-1042", Status: store.ChargeStatusPending,
+		HostedToken: "tok", IdempotencyKey: "secret-key", ExpiresAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	push := store.StkPush{ID: uuid.New(), ChargeID: c.ID, Phone: "254712345678", Status: store.StkPushStatusSent, CreatedAt: now, UpdatedAt: now}
+	v := apiview.View{PayBaseURL: "https://pay.test/", Paybill: "174379"}
+	ch := v.Charge(c, &push)
+	specshape.Match(t, spec, "Charge", ch)
+	specshape.Match(t, spec, "Paybill", ch.Paybill)
+	specshape.Match(t, spec, "STKPush", ch.LatestSTKPush)
+	specshape.Match(t, spec, "Transaction", v.Transaction(apiview.TransactionRow{ID: uuid.New()}))
+	specshape.Match(t, spec, "WhoAmI", whoAmIJSON{})
+	specshape.Match(t, spec, "Event", apiview.Event{})
+	// A charge that is no longer payable: paybill and latest_stk_push are
+	// still present (null).
+	c.Status = store.ChargeStatusCancelled
+	specshape.Match(t, spec, "Charge", v.Charge(c, nil))
+}
 
 // api/app.openapi.yaml is the app contract. This test fails when a
 // route exists in Go but not in the spec, or vice versa.

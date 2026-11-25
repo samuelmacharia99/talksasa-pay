@@ -209,7 +209,7 @@ func TestSTKPushErrorMapping(t *testing.T) {
 		{"too large", stk.Push{}, stk.ErrAmountTooLarge, 409, "amount_too_large", "250,000", ""},
 		{"in progress", stk.Push{}, fmt.Errorf("wrapped: %w", &stk.InProgressError{LiveID: live}), 409, "stk_in_progress", live.String(), ""},
 		{"idem conflict", stk.Push{}, stk.ErrIdempotencyConflict, 409, "idempotency_conflict", "", ""},
-		{"idem invalid", stk.Push{}, stk.ErrInvalidIdempotency, 422, "validation_failed", "", "Idempotency-Key"},
+		{"idem invalid", stk.Push{}, stk.ErrInvalidIdempotency, 400, "validation_failed", "", "Idempotency-Key"},
 		{"phone", stk.Push{}, phone.ErrInvalid, 422, "validation_failed", "", "phone"},
 		{"daraja", failedPush, stk.ErrDaraja, 502, "mpesa_error", failedPush.ID.String(), ""},
 		{"daraja no push", stk.Push{}, stk.ErrDaraja, 502, "mpesa_error", "nothing was charged", ""},
