@@ -29,8 +29,8 @@ Required:
 |---|---|
 | `TSP_ENV` | `production` (or `staging`). |
 | `TSP_SECRETS_FROM_ENV` | `true`. Staging and production otherwise accept secrets only as `*_FILE` paths; this host has no secret files. The service logs a warning at startup while it is on. |
-| `TSP_DATABASE_URL` | Database URL the API and worker use, e.g. `postgres://USER:PASSWORD@HOST:5432/DB?sslmode=require`. Production requires TLS: `sslmode=require`, `verify-ca` or `verify-full`. |
-| `TSP_MIGRATE_DATABASE_URL` | Database URL for `migrate up`. Needs rights to create tables. With a single database user, the same value as `TSP_DATABASE_URL`. |
+| `DATABASE_URL` | Usually provided and rotated by the host (platform-managed). Used for both the API/worker and `migrate up` unless `TSP_DATABASE_URL` / `TSP_MIGRATE_DATABASE_URL` are set; those override it. The user must be able to create tables. |
+| `TSP_DB_SSLMODE` | TLS to the database without editing the URL. Unset: production uses `require`. Set `disable` only when the database is on the same private network and does not offer TLS (e.g. a sidecar); the service then logs a warning at startup. A failed connection says when the server does not offer TLS. |
 | `TSP_MASTER_KEYS` | Master keyring that encrypts stored secrets (app webhook secrets, M-Pesa credentials). One line `1:<base64 of 32 random bytes>`; generate with `talksasa-pay keygen --version 1`. **Back it up**: without it, stored secrets cannot be decrypted. Never change or drop a version that has been used. |
 | `TSP_API_KEY_PEPPER` | Random string of at least 32 characters (e.g. `openssl rand -base64 48`) mixed into API key hashes. Changing it invalidates every issued API key. |
 | `TSP_PAY_BASE_URL` | Public `https://` base of the checkout page, ending in `/` (each charge's `checkout_url` is this plus a token). |
@@ -48,8 +48,9 @@ saved on the admin Settings page):
 | `TSP_MPESA_CALLBACK_BASE_URL` | Public `https://` base Safaricom calls back, ending in `/` (this service's public URL). |
 | `TSP_MPESA_CALLBACK_CIDRS` | Safaricom's callback source networks, comma separated. Required for production M-Pesa. |
 
-Optional: `TSP_LOG_LEVEL` (`info`), `TSP_DB_MAX_CONNS` (20; `serve` opens
-two pools, so allow 2x in the database's connection limit).
+Optional: `TSP_DATABASE_URL` / `TSP_MIGRATE_DATABASE_URL` (override
+`DATABASE_URL`), `TSP_LOG_LEVEL` (`info`), `TSP_DB_MAX_CONNS` (20; `serve`
+opens two pools, so allow 2x in the database's connection limit).
 
 ## Not covered by this single service
 

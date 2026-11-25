@@ -40,15 +40,17 @@ type Config struct {
 	// SecretsFromEnv: secrets were allowed straight from environment
 	// variables in staging/production (TSP_SECRETS_FROM_ENV).
 	SecretsFromEnv bool
-	HTTP           HTTPConfig
-	Metrics        MetricsConfig
-	Database       DatabaseConfig
-	Crypto         CryptoConfig
-	Admin          AdminConfig
-	Public         PublicConfig
-	API            APIConfig
-	Worker         WorkerConfig
-	Mpesa          MpesaConfig
+	// DBPlaintext: TSP_DB_SSLMODE=disable in staging/production.
+	DBPlaintext bool
+	HTTP        HTTPConfig
+	Metrics     MetricsConfig
+	Database    DatabaseConfig
+	Crypto      CryptoConfig
+	Admin       AdminConfig
+	Public      PublicConfig
+	API         APIConfig
+	Worker      WorkerConfig
+	Mpesa       MpesaConfig
 	// TrustedProxies are peers (the Next.js servers, the reverse proxy)
 	// whose X-Talksasa-Client-IP header is believed. Anyone else's is ignored.
 	TrustedProxies []netip.Prefix
@@ -305,7 +307,7 @@ func Load(src Source) (*Config, error) {
 	}
 
 	cfg.Database = DatabaseConfig{
-		URL:              l.secret("TSP_DATABASE_URL", cfg.Env, true),
+		URL:              l.dbURL("TSP_DATABASE_URL", cfg.Env),
 		MaxConns:         int32(l.int64("TSP_DB_MAX_CONNS", 20)),
 		MinConns:         int32(l.int64("TSP_DB_MIN_CONNS", 2)),
 		MaxConnLifetime:  l.duration("TSP_DB_MAX_CONN_LIFETIME", time.Hour),
@@ -319,6 +321,8 @@ func Load(src Source) (*Config, error) {
 		APIKeyPepper:     l.secret("TSP_API_KEY_PEPPER", cfg.Env, true),
 	}
 
+	cfg.DBPlaintext = l.dbPlaintext && cfg.Env.IsProductionLike()
+
 	// Report parse and validation problems together so operators can fix
 	// everything in one pass.
 	if err := errors.Join(l.err(), cfg.validate()); err != nil {
@@ -331,11 +335,11 @@ func Load(src Source) (*Config, error) {
 func LoadMigrate(src Source) (env Environment, dsn Secret, err error) {
 	l := newLoader(src)
 	env = Environment(l.str("TSP_ENV", string(EnvDevelopment)))
-	dsn = l.secret("TSP_MIGRATE_DATABASE_URL", env, true)
+	dsn = l.dbURL("TSP_MIGRATE_DATABASE_URL", env)
 	if err := l.err(); err != nil {
 		return "", Secret{}, err
 	}
-	if err := validateDSN("TSP_MIGRATE_DATABASE_URL", dsn, env); err != nil {
+	if err := validateDSN("TSP_MIGRATE_DATABASE_URL", dsn, env, l.dbPlaintext); err != nil {
 		return "", Secret{}, err
 	}
 	return env, dsn, nil
@@ -343,7 +347,7 @@ func LoadMigrate(src Source) (env Environment, dsn Secret, err error) {
 
 func (c *Config) validate() error {
 	var errs []error
-	if err := validateDSN("TSP_DATABASE_URL", c.Database.URL, c.Env); err != nil {
+	if err := validateDSN("TSP_DATABASE_URL", c.Database.URL, c.Env, c.DBPlaintext); err != nil {
 		errs = append(errs, err)
 	}
 	if c.Database.MaxConns < 1 || c.Database.MinConns < 0 || c.Database.MinConns > c.Database.MaxConns {
@@ -483,7 +487,7 @@ var (
 
 var paybillRe = regexp.MustCompile(`^[0-9]{5,7}$`)
 
-func validateDSN(name string, dsn Secret, env Environment) error {
+func validateDSN(name string, dsn Secret, env Environment, plaintextOK bool) error {
 	u, err := url.Parse(dsn.Reveal())
 	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
 		// Do not include err: url.Parse errors echo the input, which holds the password.
@@ -491,11 +495,53 @@ func validateDSN(name string, dsn Secret, env Environment) error {
 	}
 	if env.IsProductionLike() {
 		mode := u.Query().Get("sslmode")
-		if mode != "require" && mode != "verify-ca" && mode != "verify-full" {
-			return fmt.Errorf("%s: sslmode must be require, verify-ca or verify-full in %s", name, env)
+		// disable only reaches here when TSP_DB_SSLMODE=disable was set
+		// explicitly (a database on the same private network).
+		if mode != "require" && mode != "verify-ca" && mode != "verify-full" && (mode != "disable" || !plaintextOK) {
+			return fmt.Errorf("%s: sslmode must be require, verify-ca or verify-full in %s (TSP_DB_SSLMODE=disable only for a database on the same private network)", name, env)
 		}
 	}
 	return nil
+}
+
+// dbURL reads a database URL: NAME / NAME_FILE, else the platform's
+// DATABASE_URL (hosts that manage the database and rotate its password).
+// TSP_DB_SSLMODE, if set, replaces the URL's sslmode; in staging/production
+// a URL without sslmode gets sslmode=require.
+func (l *loader) dbURL(name string, env Environment) Secret {
+	v := l.secret(name, env, false)
+	if v.IsZero() {
+		direct := strings.TrimSpace(l.src.Getenv("DATABASE_URL"))
+		switch {
+		case direct == "":
+			l.fail(name, fmt.Errorf("required (set %s_FILE, or DATABASE_URL on hosts that provide one)", name))
+			return Secret{}
+		case env.IsProductionLike() && !l.envSecrets:
+			l.fail(name, fmt.Errorf("DATABASE_URL is a secret in an environment variable; set %s_FILE, or TSP_SECRETS_FROM_ENV=true", name))
+			return Secret{}
+		}
+		v = NewSecret(direct)
+	}
+	u, err := url.Parse(v.Reveal())
+	if err != nil {
+		return v // validateDSN reports it without echoing the value
+	}
+	q := u.Query()
+	mode := strings.TrimSpace(l.src.Getenv("TSP_DB_SSLMODE"))
+	switch mode {
+	case "":
+		if env.IsProductionLike() && q.Get("sslmode") == "" {
+			q.Set("sslmode", "require")
+		}
+	case "disable", "require", "verify-ca", "verify-full":
+		q.Set("sslmode", mode)
+		l.dbPlaintext = mode == "disable"
+	default:
+		l.fail("TSP_DB_SSLMODE", errors.New("must be disable, require, verify-ca or verify-full"))
+		return v
+	}
+	u.RawQuery = q.Encode()
+	return NewSecret(u.String())
 }
 
 // loader accumulates errors so operators see every problem at once.
@@ -506,6 +552,8 @@ type loader struct {
 	// secrets straight from environment variables, for hosts that cannot
 	// mount secret files. Off by default: *_FILE stays the rule.
 	envSecrets bool
+	// dbPlaintext: TSP_DB_SSLMODE=disable was chosen explicitly.
+	dbPlaintext bool
 }
 
 func newLoader(src Source) loader {

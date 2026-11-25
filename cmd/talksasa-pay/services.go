@@ -52,6 +52,9 @@ func newApp(ctx context.Context, logw io.Writer, component string) (*services, e
 	if cfg.SecretsFromEnv {
 		logger.Warn("secrets are read from environment variables (TSP_SECRETS_FROM_ENV); prefer *_FILE where the host can mount files")
 	}
+	if cfg.DBPlaintext {
+		logger.Warn("database connection is not encrypted (TSP_DB_SSLMODE=disable); only for a database on the same private network")
+	}
 
 	keys, err := crypto.ParseKeyring(cfg.Crypto.MasterKeys.Reveal(), cfg.Crypto.ActiveKeyVersion)
 	if err != nil {

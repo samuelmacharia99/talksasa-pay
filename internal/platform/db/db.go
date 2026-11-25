@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -272,9 +273,28 @@ func IsCheckViolation(err error, constraint string) bool {
 func sanitize(err error) error {
 	var ce *pgconn.ConnectError
 	if errors.As(err, &ce) {
-		return errors.New("cannot connect to database")
+		return errors.New("cannot connect to database" + ConnectHint(err))
 	}
 	return err
+}
+
+// ConnectHint names a likely cause of a connection failure without echoing
+// anything from the URL (host, user and password stay out of logs).
+func ConnectHint(err error) string {
+	if err == nil {
+		return ""
+	}
+	m := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(m, "server refused tls") || strings.Contains(m, "ssl is not enabled") ||
+		strings.Contains(m, "does not support ssl"):
+		return " (the server does not offer TLS: on the same private network set TSP_DB_SSLMODE=disable)"
+	case strings.Contains(m, "password authentication failed"):
+		return " (password authentication failed)"
+	case strings.Contains(m, "no such host") || strings.Contains(m, "connection refused"):
+		return " (host unreachable or not accepting connections)"
+	}
+	return ""
 }
 
 // slowQueryTracer logs slow statements. It logs the SQL text only (never the

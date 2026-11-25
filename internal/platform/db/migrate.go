@@ -36,7 +36,7 @@ func NewMigrator(dsn config.Secret, env config.Environment, logger *slog.Logger)
 	u.Scheme = "pgx5"
 	m, err := migrate.NewWithSourceInstance("iofs", src, u.String())
 	if err != nil {
-		return nil, errors.New("migrate: cannot connect to database")
+		return nil, errors.New("migrate: cannot connect to database" + ConnectHint(err))
 	}
 	m.Log = migrateLogger{logger}
 	return &Migrator{m: m, env: env, logger: logger}, nil

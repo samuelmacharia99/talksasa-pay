@@ -217,3 +217,52 @@ func TestPortAndSecretsFromEnv(t *testing.T) {
 		t.Fatalf("the opt-in must not relax database TLS: %v", err)
 	}
 }
+
+// Hosts that manage the database (Talksasa Cloud) provide DATABASE_URL and
+// rotate its password; the app follows it unless TSP_DATABASE_URL is set.
+func TestPlatformDatabaseURL(t *testing.T) {
+	prod := map[string]string{"TSP_ENV": "production", "TSP_SECRETS_FROM_ENV": "true",
+		"DATABASE_URL":    "postgresql://u:p@db-sidecar:5432/s_db",
+		"TSP_MASTER_KEYS": "1:x", "TSP_API_KEY_PEPPER": pepper,
+		"TSP_PAY_BASE_URL": "https://pay.example/", "TSP_ADMIN_SETUP_BASE_URL": "https://a.example/setup/"}
+	cfg, err := Load(src(prod, nil, 0o600))
+	if err != nil || cfg.Database.URL.Reveal() != "postgresql://u:p@db-sidecar:5432/s_db?sslmode=require" || cfg.DBPlaintext {
+		t.Fatalf("DATABASE_URL fallback defaults to sslmode=require: %v %q", err, cfg.Database.URL.Reveal())
+	}
+	if _, dsn, err := LoadMigrate(src(prod, nil, 0o600)); err != nil || dsn.Reveal() != "postgresql://u:p@db-sidecar:5432/s_db?sslmode=require" {
+		t.Fatalf("migrate uses DATABASE_URL too: %v", err)
+	}
+
+	prod["TSP_DB_SSLMODE"] = "disable"
+	cfg, err = Load(src(prod, nil, 0o600))
+	if err != nil || !cfg.DBPlaintext || !strings.HasSuffix(cfg.Database.URL.Reveal(), "sslmode=disable") {
+		t.Fatalf("explicit TSP_DB_SSLMODE=disable on a private network: %v %+v", err, cfg)
+	}
+	if _, _, err := LoadMigrate(src(prod, nil, 0o600)); err != nil {
+		t.Fatalf("migrate with explicit disable: %v", err)
+	}
+
+	// sslmode=disable inside the URL alone is still refused in production.
+	delete(prod, "TSP_DB_SSLMODE")
+	prod["DATABASE_URL"] = "postgresql://u:p@db-sidecar:5432/s_db?sslmode=disable"
+	if _, err := Load(src(prod, nil, 0o600)); err == nil || !strings.Contains(err.Error(), "sslmode") {
+		t.Fatalf("a disable hidden in the URL must still be refused: %v", err)
+	}
+	prod["TSP_DB_SSLMODE"] = "off"
+	if _, err := Load(src(prod, nil, 0o600)); err == nil || !strings.Contains(err.Error(), "TSP_DB_SSLMODE") {
+		t.Fatalf("bad TSP_DB_SSLMODE accepted: %v", err)
+	}
+
+	// Without the env-secrets opt-in, DATABASE_URL is refused in production.
+	delete(prod, "TSP_SECRETS_FROM_ENV")
+	prod["TSP_DB_SSLMODE"] = "require"
+	if _, err := Load(src(prod, nil, 0o600)); err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
+		t.Fatalf("DATABASE_URL without TSP_SECRETS_FROM_ENV: %v", err)
+	}
+	// An explicit TSP_DATABASE_URL wins over DATABASE_URL.
+	dev := map[string]string{"DATABASE_URL": "postgres://a:b@one/db", "TSP_DATABASE_URL": "postgres://a:b@two/db",
+		"TSP_MASTER_KEYS": "1:x", "TSP_API_KEY_PEPPER": pepper}
+	if cfg, err := Load(src(dev, nil, 0o600)); err != nil || !strings.Contains(cfg.Database.URL.Reveal(), "@two/") {
+		t.Fatalf("TSP_DATABASE_URL must win: %v", err)
+	}
+}
