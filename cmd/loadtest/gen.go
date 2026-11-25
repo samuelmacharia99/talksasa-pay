@@ -16,8 +16,6 @@ import (
 	"sync/atomic"
 	"text/tabwriter"
 	"time"
-
-	"github.com/talksasa/talksasa-pay/pkg/talksasapay"
 )
 
 // tokenBucket limits the aggregate request rate. Callers reserve a token
@@ -99,7 +97,7 @@ func (s *stats) record(op string, d time.Duration, err error) {
 
 // errorCode classifies an error for the report.
 func errorCode(err error) string {
-	if ae, ok := talksasapay.AsAPIError(err); ok {
+	if ae, ok := asAPIError(err); ok {
 		if ae.Code != "" {
 			return fmt.Sprintf("%d %s", ae.Status, ae.Code)
 		}
@@ -114,10 +112,10 @@ func errorCode(err error) string {
 	return "network"
 }
 
-// errSkipped marks an op that could not run (e.g. get with nothing created yet).
+// errSkipped marks an op that could not run (e.g. cancel with nothing live).
 var errSkipped = errors.New("skipped")
 
-// idPool remembers recently created payment request ids.
+// idPool remembers recently created charge ids.
 type idPool struct {
 	mu  sync.Mutex
 	ids []string
@@ -146,26 +144,68 @@ func (p *idPool) pick(r *mrand.Rand) (string, bool) {
 	return p.ids[r.IntN(len(p.ids))], true
 }
 
+// runCharges records every charge the run created (for the invariant
+// checks) and the status some of them must reach.
+type runCharges struct {
+	mu   sync.Mutex
+	all  map[string]bool
+	want map[string]string // id -> status it must end in
+}
+
+func (rc *runCharges) init() {
+	rc.all = map[string]bool{}
+	rc.want = map[string]string{}
+}
+
+func (rc *runCharges) created(id string) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	rc.all[id] = true
+}
+
+func (rc *runCharges) add(id, status string) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	rc.want[id] = status
+}
+
+func (rc *runCharges) snapshot() (all []string, want map[string]string) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	for id := range rc.all {
+		all = append(all, id)
+	}
+	sort.Strings(all)
+	want = make(map[string]string, len(rc.want))
+	for k, v := range rc.want {
+		want[k] = v
+	}
+	return all, want
+}
+
 // generator runs the load.
 type generator struct {
-	client      *talksasapay.Client
+	client      *apiClient
 	mix         Mix
-	payers      int
 	runID       string
+	prefix      string // the app's account prefix
 	seq         atomic.Int64
 	created     idPool
+	expect      *runCharges
 	cursorMu    sync.Mutex
 	eventCursor string
 	st          *stats
 
 	// M-Pesa ops.
-	fakeDaraja  string       // fake Daraja base URL ending in "/" ("" = no c2b)
-	fakeHTTP    *http.Client // for the fake Daraja
-	accounts    sync.Map     // payer index -> account number
-	waiting     promptPool
-	stkSent     atomic.Int64
-	c2bSent     atomic.Int64
-	c2bMatching atomic.Int64
+	fakeDaraja    string       // fake Daraja base URL ending in "/" ("" = no c2b)
+	fakeHTTP      *http.Client // for the fake Daraja
+	unknownPrefix string       // a prefix no app has (unmatched payments)
+	live          livePool
+	stkSent       atomic.Int64
+	c2bSent       atomic.Int64
+	c2bMatching   atomic.Int64
+	c2bNoMatch    atomic.Int64
+	c2bUnknown    atomic.Int64
 }
 
 func newRunID() string {
@@ -174,46 +214,10 @@ func newRunID() string {
 	return hex.EncodeToString(b[:])
 }
 
-func (g *generator) payerRef(i int) string { return fmt.Sprintf("lt-%s-%d", g.runID, i) }
-
-// setup upserts every payer once so create can target them.
-func (g *generator) setup(ctx context.Context, concurrency int) error {
-	var wg sync.WaitGroup
-	idx := make(chan int)
-	var firstErr error
-	var mu sync.Mutex
-	for range max(concurrency, 1) {
-		wg.Go(func() {
-			for i := range idx {
-				p, _, err := g.client.UpsertPayer(ctx, g.payerRef(i), talksasapay.PayerInput{DisplayName: fmt.Sprintf("Load test payer %d", i)})
-				if err == nil {
-					g.accounts.Store(i, p.AccountNumber)
-				}
-				if err != nil {
-					mu.Lock()
-					if firstErr == nil {
-						firstErr = fmt.Errorf("upsert payer %d: %w", i, err)
-					}
-					mu.Unlock()
-				}
-			}
-		})
-	}
-	for i := range g.payers {
-		mu.Lock()
-		failed := firstErr != nil
-		mu.Unlock()
-		if failed || ctx.Err() != nil {
-			break
-		}
-		idx <- i
-	}
-	close(idx)
-	wg.Wait()
-	if firstErr == nil {
-		firstErr = ctx.Err()
-	}
-	return firstErr
+// track remembers a created charge.
+func (g *generator) track(ch *Charge) {
+	g.created.add(ch.ID)
+	g.expect.created(ch.ID)
 }
 
 // exec runs one operation. Calls use ctx (not the run deadline) so in-flight
@@ -221,46 +225,48 @@ func (g *generator) setup(ctx context.Context, concurrency int) error {
 func (g *generator) exec(ctx context.Context, op string, r *mrand.Rand) error {
 	c := g.client
 	switch op {
-	case opUpsert:
-		i := r.IntN(g.payers)
-		_, _, err := c.UpsertPayer(ctx, g.payerRef(i), talksasapay.PayerInput{
-			DisplayName: fmt.Sprintf("Load test payer %d", i), Phones: []string{fmt.Sprintf("07%08d", r.IntN(100_000_000))},
-		})
-		return err
 	case opCreate:
 		n := g.seq.Add(1)
-		pr, _, err := c.CreatePaymentRequest(ctx, talksasapay.PaymentRequestInput{
-			Payer: g.payerRef(r.IntN(g.payers)), Reference: fmt.Sprintf("LT-%s-%d", g.runID, n),
-			Description: "Load test", Amount: int64(1 + r.IntN(5000)),
-			IdempotencyKey: fmt.Sprintf("lt-%s-%d", g.runID, n),
+		ch, err := c.createCharge(ctx, fmt.Sprintf("lt-%s-%d", g.runID, n), ChargeInput{
+			Reference: fmt.Sprintf("LT-%s-%d", g.runID, n), Amount: int64(1 + r.IntN(5000)), Description: "Load test",
 		})
 		if err == nil {
-			g.created.add(pr.ID)
+			g.track(ch)
+			g.live.add(liveCharge{id: ch.ID, account: ch.AccountNumber, amount: ch.Amount})
 		}
 		return err
 	case opGet:
 		id, ok := g.created.pick(r)
 		if !ok {
-			_, err := c.GetPayer(ctx, g.payerRef(r.IntN(g.payers)))
+			_, err := c.whoami(ctx)
 			return err
 		}
-		_, err := c.GetPaymentRequest(ctx, id)
+		_, err := c.getCharge(ctx, id)
 		return err
 	case opCancel:
-		id, ok := g.created.pick(r)
+		// Only charges nobody is about to pay, so a c2b aimed at a charge
+		// never races with its cancellation.
+		lc, ok := g.live.take(r)
 		if !ok {
 			return errSkipped
 		}
-		_, err := c.CancelPaymentRequest(ctx, id)
+		_, err := c.cancelCharge(ctx, lc.id)
+		if err == nil {
+			g.expect.add(lc.id, "cancelled")
+		}
 		return err
 	case opList:
-		_, err := c.ListPaymentRequestsPage(ctx, talksasapay.ListPaymentRequestsParams{Payer: g.payerRef(r.IntN(g.payers)), Limit: 20})
+		status := ""
+		if r.IntN(2) == 0 {
+			status = "pending"
+		}
+		_, err := c.listCharges(ctx, status, 20)
 		return err
 	case opTxns:
-		_, err := c.ListTransactionsPage(ctx, talksasapay.ListTransactionsParams{Limit: 20})
+		_, err := c.listTransactions(ctx, time.Time{}, "", 20)
 		return err
 	case opWhoami:
-		_, err := c.Whoami(ctx)
+		_, err := c.whoami(ctx)
 		return err
 	case opSTK:
 		return g.stk(ctx, r)
@@ -270,7 +276,7 @@ func (g *generator) exec(ctx context.Context, op string, r *mrand.Rand) error {
 		g.cursorMu.Lock()
 		after := g.eventCursor
 		g.cursorMu.Unlock()
-		page, err := c.ListEvents(ctx, talksasapay.ListEventsParams{After: after, Limit: 100})
+		page, err := c.listEvents(ctx, after, 100)
 		if err == nil && page.NextCursor != nil {
 			g.cursorMu.Lock()
 			if g.eventCursor == after {
@@ -369,15 +375,13 @@ func (s *stats) report(w io.Writer, elapsed time.Duration, order []string) resul
 
 func ms(d time.Duration) string { return fmt.Sprintf("%.1fms", float64(d)/float64(time.Millisecond)) }
 
-// attemptLogger counts every 5xx/network attempt, including retried ones,
-// so a server error hidden by a successful retry still fails the run.
-func (s *stats) attemptLogger() talksasapay.Logger {
-	return func(e talksasapay.LogEvent) {
-		switch {
-		case e.Status >= http.StatusInternalServerError:
-			s.http.Add(1)
-		case e.Status == 0 && e.Err != nil && !errors.Is(e.Err, context.Canceled):
-			s.net.Add(1)
-		}
+// onAttempt counts every 5xx/network attempt, including retried ones, so a
+// server error hidden by a successful retry still fails the run.
+func (s *stats) onAttempt(status int, err error) {
+	switch {
+	case status >= http.StatusInternalServerError:
+		s.http.Add(1)
+	case status == 0 && err != nil && !errors.Is(err, context.Canceled):
+		s.net.Add(1)
 	}
 }

@@ -14,9 +14,9 @@ Every staff member signs in with **email + password + authenticator app**
 | Role | Can |
 |---|---|
 | Viewer | See every screen. Change nothing. |
-| Finance | Viewer access today. Prepares refunds once refunds launch. |
+| Finance | Viewer access, plus resolving payments in needs review and assigning unmatched payments to an app. Prepares refunds once refunds launch. |
 | Approver | Viewer access today. Approves refunds once refunds launch. |
-| Admin | Everything above, plus products, API keys and staff accounts. |
+| Admin | Everything above, plus apps, API keys, reversals and staff accounts. |
 
 Role changes apply on the person's next click; they don't need to sign in
 again. Nobody can change their own role, disable themselves, or remove the
@@ -83,5 +83,5 @@ Accounts are never deleted, so the audit trail keeps its names.
 
 Invitations, activations, sign-ins (with IP and whether a recovery code was
 used), sign-outs, password changes, resets, role changes, disables, and every
-product and API key change. See Audit log in the panel; the hash chain is
+app and API key change, needs-review resolution, unmatched-payment assignment and reversal. See Audit log in the panel; the hash chain is
 verified every time that page opens.

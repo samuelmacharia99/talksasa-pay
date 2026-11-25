@@ -1,14 +1,14 @@
 # Authentication
 
-Every request carries a product API key as a bearer token:
+Every request carries an app API key as a bearer token:
 
 ```
 Authorization: Bearer tsp_live_<key id>_<secret>
 ```
 
-The key decides which product you are. There is no way to name another
-product in a request, so a key can only reach its own product's payers,
-bills, transactions and events.
+The key decides which app you are. There is no way to name another app in
+a request, so a key can only reach its own app's charges, prompts,
+transactions and events. Another app's ids simply answer `404`.
 
 ## Key format
 
@@ -40,11 +40,11 @@ one and have the old one revoked.
 
 ## Rotating a key without downtime
 
-A product can have several active keys at once, so rotation never needs an
+An app can have several active keys at once, so rotation never needs an
 outage:
 
 1. Ask Talksasa staff to issue a second key.
-2. Deploy your product with the new key.
+2. Deploy your app with the new key.
 3. Check that the new key is in use: `GET /whoami` returns the new `key_id`,
    and staff can see each key's "last used" time.
 4. Ask staff to revoke the old key. Revocation takes effect on its next
@@ -69,14 +69,15 @@ the old ones after the move.
 
 | Status | `code` | Meaning | What to do |
 |---|---|---|---|
-| `401` | `unauthorized` | The key is missing, malformed, unknown, revoked, expired, for the other environment, or belongs to a product Talksasa has suspended. The response doesn't say which, on purpose. | Check the `Authorization` header and the environment. If the key is right, ask staff whether it was revoked or expired, or the product suspended. Don't retry automatically. |
+| `401` | `unauthorized` | The key is missing, malformed, unknown, revoked, expired, for the other environment, or belongs to an app Talksasa has suspended. The response doesn't say which, on purpose. | Check the `Authorization` header and the environment. If the key is right, ask staff whether it was revoked or expired, or the app suspended. Don't retry automatically. |
 | `403` | `ip_not_allowed` | The key is valid but this request came from an address that is not on its allow-list. | Check the outbound address your server really uses (proxies and NAT gateways change it). Ask staff to add it. |
-| `403` | `product_suspended` | Talksasa suspended your product while this request was in flight (rare). | Contact Talksasa. |
+| `403` | `app_suspended` | Talksasa suspended your app while this request was in flight (rare). | Contact Talksasa. |
 
-A suspended product's keys get `401 unauthorized`, the same answer as a
-revoked key: the key check turns away keys of any product that is not
-active, before the request reaches your data. You only see
-`403 product_suspended` if the suspension lands between that check and the
-write, for example during a `PUT /payers/{external_ref}`. Either way, contact
-Talksasa. Money your customers send while the product is suspended is still
-recorded and applied to their bills.
+A suspended app's keys get `401 unauthorized`, the same answer as a
+revoked key: the key check turns away keys of any app that is not active,
+before the request reaches your data. You only see `403 app_suspended` if
+the suspension lands between that check and the write, for example during a
+`POST /charges`. Either way, contact Talksasa. Money your customers send
+while the app is suspended is still recorded, still succeeds your charges
+and is still delivered to your webhook and events feed (see
+[charges](charges.md#8-suspended-apps-still-receive-their-money)).

@@ -9,46 +9,44 @@ so that you can simply send it again.
 | Call | Safe to retry? | Why |
 |---|---|---|
 | Any `GET` | Yes | Reads change nothing. |
-| `PUT /payers/{external_ref}` | Yes | An upsert: the payer ends up with the details you sent, however many times you send them. |
-| `POST /payment-requests` | Yes, **with the same `Idempotency-Key` and the same body** | The key identifies the request. A repeat returns the original instead of creating a second bill. |
-| `POST /payment-requests/{id}/cancel` | Yes | Cancelling a request that is already cancelled returns it with `200`. |
-| `POST /payment-requests/{id}/stk-push` | Yes, **with the same `Idempotency-Key` and the same phone** | A repeat returns the same prompt instead of sending a second one to the customer's phone. Use a new key only to try again after a prompt failed. Never retry `502 mpesa_error` or `503 mpesa_unavailable` automatically. See [M-Pesa payment prompts](stk-push.md). |
+| `POST /charges` | Yes, **with the same `Idempotency-Key` and the same body** | The key identifies the charge. A repeat returns the original instead of creating a second charge (and, with `phone`, instead of sending a second prompt). |
+| `POST /charges/{id}/cancel` | Yes | Cancelling a charge that is already cancelled returns it with `200`. |
+| `POST /charges/{id}/stk-push` | Yes, **with the same `Idempotency-Key` and the same phone** | A repeat returns the same prompt instead of sending a second one to the customer's phone. Use a new key only to try again after a prompt failed. Never retry `502 mpesa_error` or `503 mpesa_unavailable` automatically. See [M-Pesa payment prompts](stk-push.md). |
 
 ## The `Idempotency-Key` header
 
-`POST /payment-requests` and `POST /payment-requests/{id}/stk-push` require
-an `Idempotency-Key` header (1-255 printable characters). Without it you get `400 idempotency_key_required`.
+`POST /charges` and `POST /charges/{id}/stk-push` require an
+`Idempotency-Key` header (1-255 printable characters). Without it you get
+`400 idempotency_key_required`.
 
 Rules:
 
-- **One key per bill you mean to create.** Derive it from something stable on
-  your side, such as `invoice-INV-2026-0042` or a UUID you store with the
-  invoice before you call. Don't generate a fresh random key on each retry:
-  that defeats the purpose.
+- **One key per charge you mean to create.** Derive it from something
+  stable on your side, such as `invoice-INV-2026-0042` or a UUID you store
+  with the invoice before you call. Don't generate a fresh random key on
+  each retry: that defeats the purpose.
 - **Same key, same body: you get the original back.** The response is `200`
-  (not `201`) with the header `Idempotent-Replayed: true` and the request as
+  (not `201`) with the header `Idempotent-Replayed: true` and the charge as
   it is now, which may already be paid.
 - **Same key, different body: `409 idempotency_conflict`.** Talksasa Pay
   refuses to guess which one you meant. This is a bug in your code: you
-  reused a key for a different bill.
-- **Keys are kept forever.** You can't reuse a key later for a new bill, even
-  years later. To bill the same invoice again after cancelling, use a new key
-  such as `invoice-INV-2026-0042-v2`.
+  reused a key for a different charge.
+- **Keys are kept forever.** You can't reuse a key later for a new charge,
+  even years later.
 
 ## What `409` means
 
 | `code` | Meaning | What to do |
 |---|---|---|
 | `idempotency_conflict` | This `Idempotency-Key` was used before with a different body. | Fix the code that builds keys. Don't retry with the same key. |
-| `duplicate_reference` | You already have an open or partially paid request with this `reference`. | Look it up with `GET /payment-requests?reference=...` and use it. If you really mean to replace it, cancel it first (only possible if nothing has been paid). |
-| `not_cancellable` | You tried to cancel a request that has money on it, or that is paid or expired. | Don't retry. Talk to Talksasa finance if the bill is wrong. |
-| `payer_closed` | The payer's account has been closed by Talksasa staff. | Don't retry. Contact Talksasa. |
-| `stk_in_progress` | A payment prompt for this request is already on the customer's phone. | Don't send another; wait for its `stk_push.*` event. |
-| `not_payable` / `amount_too_large` | The request can't be prompted (paid, closed, or above KES 250,000). | Don't retry. Show the request's status or the paybill steps. |
+| `duplicate_reference` | You already have a charge with this `reference` (in any status: references are unique for ever). | Look it up with `GET /charges?reference=...` and use it. To charge the invoice again, use a new reference such as `INV-2026-0042-2` and a new key. |
+| `not_cancellable` | You tried to cancel a charge that is not `pending`. | Don't retry. Re-read the charge and show its status. |
+| `stk_in_progress` | A payment prompt for this charge is already on the customer's phone. | Don't send another; wait for its `stk_push.*` event. |
+| `not_payable` | The charge can't be prompted (succeeded, in review, cancelled or expired). | Don't retry. Show the charge's status. |
 
 `duplicate_reference` also protects you if your first `POST` succeeded, the
 response was lost, and your retry used a different key: you get a `409`
-instead of a second bill. Handle it by fetching the existing request.
+instead of a second charge. Handle it by fetching the existing charge.
 
 ## Timeouts
 
@@ -56,7 +54,7 @@ instead of a second bill. Handle it by fetching the existing request.
   connect works well. The server stops working on a request after about 15
   seconds and answers `503 overloaded`.
 - After a timeout, retry the same call (same `Idempotency-Key` for `POST
-  /payment-requests`). Don't assume it failed.
+  /charges`). Don't assume it failed.
 
 ## When to retry and how fast
 
@@ -96,5 +94,5 @@ The PHP SDK does this for you; see [Laravel](laravel.md).
 
 Each key has a generous per-key request budget that refills continuously.
 Normal integrations never reach it. If you do, you get `429 rate_limited`
-with `Retry-After`. Batch jobs (for example monthly renewals) should send
-requests one after another, not all at once.
+with `Retry-After`. Batch jobs (for example monthly renewals) should create
+charges one after another, not all at once.

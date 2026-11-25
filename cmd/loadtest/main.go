@@ -1,27 +1,43 @@
-// Command loadtest drives the Talksasa Pay product API (/v1) through the Go
-// client (pkg/talksasapay) and reports per-operation latency and errors.
+// Command loadtest drives the Talksasa Pay app API (/v1 charges), reports
+// per-operation latency and errors, and then checks the money invariants.
 //
 //	go run ./cmd/loadtest -base-url http://127.0.0.1:8088 -key-file ./key.txt \
 //	    -duration 60s -concurrency 16 -rps 200 \
-//	    -mix upsert=20,create=30,get=30,list=10,events=10 -payers 100 -max-p99 500ms
+//	    -mix create=40,get=30,list=15,events=15 -max-p99 500ms
+//
+// Operations (-mix op=weight,...):
+//
+//	create  POST /charges (no phone)
+//	stk     POST /charges with a phone: the first prompt goes out at once and
+//	        the fake Daraja decides the outcome by the phone's last digit
+//	c2b     a paybill payment posted to the fake Daraja's /fake/c2b: half
+//	        pay a live charge of this run (its account number and exact
+//	        amount), a quarter use the app's prefix but match nothing
+//	        (payment.received), a quarter use -unknown-prefix (unmatched)
+//	get, list, events, cancel, txns, whoami
+//
+// stk and c2b are for the local stack with the fake Daraja ONLY (prompts
+// against a real Daraja would go to real phones); c2b needs -fake-daraja.
+//
+// After the load it waits up to -settle for callbacks and paybill notices to
+// land, then checks through /v1 that every charge reached the status it must
+// (paid prompt or matched paybill payment -> succeeded), every succeeded
+// charge is paid by a succeeded, receipted payment for exactly its amount,
+// each receipt is recorded once, every succeeded payment has its
+// charge.succeeded or payment.received event and the feed has no event
+// twice. With -db-url-file it also runs invariants.sql against the database
+// (all apps, unmatched money, webhook deliveries, the audit chain).
 //
 // With -webhook-listen it also runs a webhook receiver that verifies every
-// delivery (secret from -webhook-secret-file) and, at the end, compares the
-// deliveries with the events feed: duplicates (expected occasionally:
-// delivery is at least once), missing events and rejected signatures.
-// Point the product's webhook URL at the listener before starting.
+// delivery (secret from -webhook-secret-file) and compares the deliveries
+// with the events feed: duplicates, missing events and rejected signatures
+// all fail the run. Point the app's webhook URL at the listener first.
 //
-// M-Pesa mix (local stack with the fake Daraja ONLY — prompts against a real
-// Daraja would go to real phones): add stk=N (bill + STK push, outcome by
-// the phone's last digit, see mpesa.go) and c2b=N (paybill payments posted
-// to the fake Daraja's /fake/c2b for the run's payers, half of them
-// matching a waiting prompt) with -fake-daraja http://127.0.0.1:8090/.
+// Exit status: 0 ok; 1 a threshold or invariant failed (any 5xx, p99 above
+// -max-p99, an invariant violation, missing or duplicate webhook deliveries,
+// rejected webhooks) or the run could not start; 2 bad flags.
 //
-// Exit status: 0 ok; 1 a threshold failed (any 5xx, p99 above -max-p99,
-// missing webhook deliveries, rejected webhooks) or the run could not start;
-// 2 bad flags.
-//
-// Never run it against production: it creates payers and payment requests.
+// Never run it against production: it creates charges and fake payments.
 package main
 
 import (
@@ -34,11 +50,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/talksasa/talksasa-pay/pkg/talksasapay"
 )
 
 func main() {
@@ -54,7 +69,6 @@ type config struct {
 	concurrency              int
 	rps                      float64
 	mix                      Mix
-	payers                   int
 	maxP99, timeout          time.Duration
 	retries                  int
 	webhookListen            string
@@ -62,7 +76,14 @@ type config struct {
 	webhookGrace             time.Duration
 	webhookSecret, keySecret []byte
 	fakeDaraja               string
+	unknownPrefix            string
+	check                    bool
+	settle                   time.Duration
+	dbURLFile                string
+	dbURL                    []byte
 }
+
+var prefixRe = regexp.MustCompile(`^[A-Z]{2,6}$`)
 
 func parseFlags(args []string, stderr io.Writer) (*config, error) {
 	fs := flag.NewFlagSet("loadtest", flag.ContinueOnError)
@@ -70,18 +91,21 @@ func parseFlags(args []string, stderr io.Writer) (*config, error) {
 	c := &config{}
 	mix := fs.String("mix", defaultMix, "operation weights: op=weight,... ops: "+strings.Join(knownOps, ", "))
 	fs.StringVar(&c.baseURL, "base-url", "", "API origin, e.g. http://127.0.0.1:8088 (required)")
-	fs.StringVar(&c.keyFile, "key-file", "", "file holding the product API key (required; the key is never a flag value)")
+	fs.StringVar(&c.keyFile, "key-file", "", "file holding the app API key (required; the key is never a flag value)")
 	fs.DurationVar(&c.duration, "duration", 30*time.Second, "how long to generate load")
 	fs.IntVar(&c.concurrency, "concurrency", 8, "concurrent workers (0 = only run the webhook receiver)")
 	fs.Float64Var(&c.rps, "rps", 0, "aggregate request rate limit, token bucket (0 = unlimited)")
-	fs.IntVar(&c.payers, "payers", 50, "distinct payers to spread load over (upserted before the run)")
 	fs.DurationVar(&c.maxP99, "max-p99", 2*time.Second, "fail if overall p99 latency exceeds this (0 = no limit)")
 	fs.DurationVar(&c.timeout, "timeout", 10*time.Second, "per-attempt HTTP timeout")
-	fs.IntVar(&c.retries, "retries", 0, "client retries for safe requests (0 measures raw server behaviour)")
+	fs.IntVar(&c.retries, "retries", 0, "retries for retryable failures (0 measures raw server behaviour)")
 	fs.StringVar(&c.webhookListen, "webhook-listen", "", "address for a webhook receiver, e.g. :9099 (optional)")
 	fs.StringVar(&c.webhookSecretFile, "webhook-secret-file", "", "file holding the webhook signing secret (required with -webhook-listen)")
 	fs.StringVar(&c.fakeDaraja, "fake-daraja", "", "fake Daraja base URL for the c2b op, e.g. http://127.0.0.1:8090/ (local stack only)")
-	fs.DurationVar(&c.webhookGrace, "webhook-grace", 30*time.Second, "how long to wait for outstanding webhook deliveries after the load")
+	fs.StringVar(&c.unknownPrefix, "unknown-prefix", "QZLT", "account prefix that belongs to no app (c2b unmatched payments)")
+	fs.DurationVar(&c.webhookGrace, "webhook-grace", 30*time.Second, "how long to wait for in-flight webhook deliveries after the load")
+	fs.BoolVar(&c.check, "check", true, "check the money invariants after the load")
+	fs.DurationVar(&c.settle, "settle", 30*time.Second, "how long to wait for prompts and paybill payments to land before checking")
+	fs.StringVar(&c.dbURLFile, "db-url-file", "", "file holding a database URL: also run invariants.sql (optional, read-only)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -105,15 +129,18 @@ func parseFlags(args []string, stderr io.Writer) (*config, error) {
 		return nil, errors.New("-concurrency 0 only makes sense with -webhook-listen")
 	case c.rps < 0:
 		return nil, errors.New("-rps must be >= 0")
-	case c.payers < 1:
-		return nil, errors.New("-payers must be >= 1")
 	case c.retries < 0:
 		return nil, errors.New("-retries must be >= 0")
+	case c.settle < 0:
+		return nil, errors.New("-settle must be >= 0")
 	case c.mix.Weight(opC2B) > 0 && c.fakeDaraja == "":
 		return nil, errors.New("the c2b op needs -fake-daraja")
+	case !prefixRe.MatchString(c.unknownPrefix):
+		return nil, errors.New("-unknown-prefix must be 2-6 capital letters")
 	case c.webhookListen != "" && c.webhookSecretFile == "":
 		return nil, errors.New("-webhook-listen needs -webhook-secret-file")
 	}
+	c.baseURL = strings.TrimSuffix(c.baseURL, "/")
 	if c.fakeDaraja != "" && !strings.HasSuffix(c.fakeDaraja, "/") {
 		c.fakeDaraja += "/"
 	}
@@ -123,6 +150,11 @@ func parseFlags(args []string, stderr io.Writer) (*config, error) {
 	if c.webhookSecretFile != "" {
 		if c.webhookSecret, err = readSecretFile(c.webhookSecretFile); err != nil {
 			return nil, fmt.Errorf("-webhook-secret-file: %w", err)
+		}
+	}
+	if c.dbURLFile != "" {
+		if c.dbURL, err = readSecretFile(c.dbURLFile); err != nil {
+			return nil, fmt.Errorf("-db-url-file: %w", err)
 		}
 	}
 	return c, nil
@@ -150,31 +182,35 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	st := newStats()
-	client, err := talksasapay.New(cfg.baseURL, string(cfg.keySecret),
-		talksasapay.WithMaxRetries(cfg.retries), talksasapay.WithTimeout(cfg.timeout),
-		talksasapay.WithUserAgent("talksasa-pay-loadtest"), talksasapay.WithLogger(st.attemptLogger()),
-		talksasapay.WithHTTPClient(&http.Client{Transport: &http.Transport{
+	client := &apiClient{
+		base: cfg.baseURL, key: string(cfg.keySecret), timeout: cfg.timeout, retries: cfg.retries, onAttempt: st.onAttempt,
+		hc: &http.Client{Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment, MaxIdleConns: cfg.concurrency + 16,
 			MaxIdleConnsPerHost: cfg.concurrency + 16, IdleConnTimeout: 90 * time.Second,
-		}}))
-	if err != nil {
-		fmt.Fprintln(stderr, "loadtest:", err)
-		return 2
+		}},
 	}
-	who, err := client.Whoami(ctx)
+	who, err := client.whoami(ctx)
 	if err != nil {
 		fmt.Fprintln(stderr, "loadtest: whoami:", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "product %s (%s), key %s\n", who.ProductName, who.AccountPrefix, who.KeyID)
+	fmt.Fprintf(stdout, "app %s (%s), key %s\n", who.AppName, who.AccountPrefix, who.KeyID)
+	if who.AccountPrefix == cfg.unknownPrefix {
+		fmt.Fprintln(stderr, "loadtest: -unknown-prefix is this app's own prefix")
+		return 2
+	}
+
+	// The feed position before the run: the invariant checks and the
+	// webhook reconciliation look only at this run's events.
+	feedStart, err := feedTail(ctx, client)
+	if err != nil {
+		fmt.Fprintln(stderr, "loadtest: read events feed:", err)
+		return 1
+	}
+	runStart := time.Now()
 
 	var rc *receiver
-	var feedStart string
 	if cfg.webhookListen != "" {
-		if feedStart, err = feedTail(ctx, client); err != nil {
-			fmt.Fprintln(stderr, "loadtest: read events feed:", err)
-			return 1
-		}
 		rc = newReceiver()
 		var lc net.ListenConfig
 		ln, err := lc.Listen(ctx, "tcp", cfg.webhookListen)
@@ -192,28 +228,22 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "webhook receiver on %s\n", ln.Addr())
 	}
 
-	g := &generator{client: client, mix: cfg.mix, payers: cfg.payers, runID: newRunID(), st: st,
-		fakeDaraja: cfg.fakeDaraja, fakeHTTP: newFakeHTTP()}
+	expect := &runCharges{}
+	expect.init()
+	g := &generator{client: client, mix: cfg.mix, runID: newRunID(), prefix: who.AccountPrefix, st: st, expect: expect,
+		fakeDaraja: cfg.fakeDaraja, fakeHTTP: newFakeHTTP(), unknownPrefix: cfg.unknownPrefix}
 	var elapsed time.Duration
 	if cfg.concurrency > 0 {
-		fmt.Fprintf(stdout, "run %s: upserting %d payers...\n", g.runID, cfg.payers)
-		if err := g.setup(ctx, cfg.concurrency); err != nil {
-			fmt.Fprintln(stderr, "loadtest: setup:", err)
-			return 1
-		}
-		fmt.Fprintf(stdout, "load: %s, %d workers, rps limit %v, mix %v\n", cfg.duration, cfg.concurrency, rpsLabel(cfg.rps), cfg.mix.Ops())
+		fmt.Fprintf(stdout, "run %s: %s, %d workers, rps limit %v, mix %v\n", g.runID, cfg.duration, cfg.concurrency, rpsLabel(cfg.rps), cfg.mix.Ops())
 		stopCtx, cancel := context.WithTimeout(ctx, cfg.duration)
 		limiter := newTokenBucket(cfg.rps, max(1, int(cfg.rps/10)))
 		elapsed = g.run(ctx, stopCtx, cfg.concurrency, limiter)
 		cancel()
 	} else {
 		fmt.Fprintf(stdout, "listening for webhooks for %s\n", cfg.duration)
-		t := time.NewTimer(cfg.duration)
-		select {
-		case <-ctx.Done():
-		case <-t.C:
+		if err := sleepCtx(ctx, cfg.duration); err != nil && ctx.Err() == nil {
+			return 1
 		}
-		t.Stop()
 	}
 	if ctx.Err() != nil {
 		fmt.Fprintln(stderr, "loadtest: interrupted; partial results follow")
@@ -222,8 +252,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout)
 	res := st.report(stdout, elapsed, cfg.mix.Ops())
 	if cfg.mix.Weight(opSTK)+cfg.mix.Weight(opC2B) > 0 {
-		fmt.Fprintf(stdout, "m-pesa: %d prompts sent, %d paybill payments (%d aimed at a waiting prompt)\n",
-			g.stkSent.Load(), g.c2bSent.Load(), g.c2bMatching.Load())
+		fmt.Fprintf(stdout, "m-pesa: %d prompts sent; %d paybill payments: %d aimed at a live charge, %d own prefix without a match, %d unknown prefix\n",
+			g.stkSent.Load(), g.c2bSent.Load(), g.c2bMatching.Load(), g.c2bNoMatch.Load(), g.c2bUnknown.Load())
 	}
 	failed := false
 	if res.fiveXX > 0 {
@@ -234,7 +264,40 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "FAIL: p99 %s above -max-p99 %s\n", ms(res.p99), ms(cfg.maxP99))
 		failed = true
 	}
-	if rc != nil && ctx.Err() == nil {
+	if ctx.Err() != nil {
+		return 1
+	}
+
+	if cfg.check && cfg.concurrency > 0 {
+		fmt.Fprintln(stdout, "\ninvariants (this run, via /v1):")
+		v, err := apiInvariants(ctx, client, expect, feedStart, runStart, cfg.settle)
+		if err != nil {
+			fmt.Fprintln(stdout, "FAIL: invariant checks:", err)
+			failed = true
+		} else {
+			v.report(stdout)
+			if n := v.total(); n > 0 {
+				fmt.Fprintf(stdout, "FAIL: %d invariant violations\n", n)
+				failed = true
+			}
+		}
+	}
+	if cfg.check && cfg.dbURL != nil {
+		fmt.Fprintln(stdout, "\ninvariants (whole database, invariants.sql):")
+		v, err := dbInvariants(ctx, string(cfg.dbURL))
+		if err != nil {
+			fmt.Fprintln(stdout, "FAIL: database invariants:", err)
+			failed = true
+		} else {
+			v.report(stdout)
+			if n := v.total(); n > 0 {
+				fmt.Fprintf(stdout, "FAIL: %d database invariant violations\n", n)
+				failed = true
+			}
+		}
+	}
+
+	if rc != nil {
 		wres, err := rc.reconcile(ctx, stdout, func(ctx context.Context) ([]string, error) {
 			return feedSince(ctx, client, feedStart)
 		}, cfg.webhookGrace)
@@ -244,6 +307,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		if wres.missing > 0 {
 			fmt.Fprintf(stdout, "FAIL: %d events never delivered\n", wres.missing)
+			failed = true
+		}
+		if wres.duplicates > 0 {
+			fmt.Fprintf(stdout, "FAIL: %d duplicate webhook deliveries (an event delivered twice)\n", wres.duplicates)
 			failed = true
 		}
 		if wres.rejected > 0 {

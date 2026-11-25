@@ -10,23 +10,22 @@ import (
 
 // Operations the generator knows.
 const (
-	opUpsert = "upsert" // PUT /payers/{ref}
-	opCreate = "create" // POST /payment-requests
-	opGet    = "get"    // GET /payment-requests/{id} (a request created in this run)
-	opList   = "list"   // GET /payment-requests (one page)
+	opCreate = "create" // POST /charges (no phone)
+	opGet    = "get"    // GET /charges/{id} (a charge created in this run)
+	opList   = "list"   // GET /charges (one page)
 	opEvents = "events" // GET /events (follows the feed)
-	opCancel = "cancel" // POST /payment-requests/{id}/cancel
+	opCancel = "cancel" // POST /charges/{id}/cancel
 	opTxns   = "txns"   // GET /transactions (one page)
 	opWhoami = "whoami" // GET /whoami
 	// M-Pesa (needs M-Pesa on; c2b needs -fake-daraja). Never against a
 	// real Daraja: prompts would go to real phones.
-	opSTK = "stk" // POST /payment-requests (bill) + POST /payment-requests/{id}/stk-push
-	opC2B = "c2b" // a paybill payment injected into the fake Daraja (same payers)
+	opSTK = "stk" // POST /charges with a phone: the first prompt goes out at once
+	opC2B = "c2b" // a paybill payment injected into the fake Daraja
 )
 
-var knownOps = []string{opUpsert, opCreate, opGet, opList, opEvents, opCancel, opTxns, opWhoami, opSTK, opC2B}
+var knownOps = []string{opCreate, opGet, opList, opEvents, opCancel, opTxns, opWhoami, opSTK, opC2B}
 
-const defaultMix = "upsert=20,create=30,get=30,list=10,events=10"
+const defaultMix = "create=40,get=30,list=15,events=15"
 
 // Mix picks operations in proportion to integer weights.
 type Mix struct {

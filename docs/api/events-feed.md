@@ -1,6 +1,6 @@
 # Events feed
 
-`GET /v1/events` returns every event for your product, oldest first, in pages.
+`GET /v1/events` returns every event for your app, oldest first, in pages.
 It holds exactly the same events as the webhooks, with the same ids and
 bodies. Webhooks get news to you within seconds; the feed makes sure nothing
 is ever missed.
@@ -33,7 +33,7 @@ curl -sS "$TSP_API/events?limit=200" -H "Authorization: Bearer $TSP_KEY"
 
 ```json
 {
-  "data": [ { "object": "event", "id": "0193...", "type": "payment_request.created", "...": "..." } ],
+  "data": [ { "object": "event", "id": "0193...", "type": "charge.succeeded", "...": "..." } ],
   "next_cursor": "eyJ0...",
   "has_more": true
 }
@@ -55,7 +55,7 @@ build or edit it.
 
 ## Storing the cursor
 
-Keep one cursor per product per environment in your database, for example a
+Keep one cursor per app per environment in your database, for example a
 row in a `settings` or `talksasa_pay_cursors` table.
 
 Save the new cursor **after** the page's events are processed, in the same
@@ -91,10 +91,9 @@ Notes:
   endpoint.** An event processed from a webhook is skipped by the poll and
   the other way round. This is what makes the two safe to run together.
 - **Re-read before acting on money**, exactly as for webhooks: on a
-  `payment_request.*` event, fetch `GET /payment-requests/{id}` and use its
-  current `status` and `amount_paid`.
-- **First run on a product with history**: starting with no cursor replays
-  every event since the product was created. That is safe with
+  `charge.*` event, fetch `GET /charges/{id}` and use its current `status`.
+- **First run on an app with history**: starting with no cursor replays
+  every event since the app was created. That is safe with
   de-duplication but may take a few pages. If you only care about new events,
   read to the end once without handling, save the cursor, then switch on
   handling.
