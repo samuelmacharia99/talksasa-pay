@@ -29,13 +29,12 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
         <nav aria-label="Main" className="flex gap-1 overflow-x-auto px-3 pb-3 lg:flex-1 lg:flex-col lg:overflow-y-auto lg:pb-4">
           <NavLink href="/">Overview</NavLink>
           <NavGroup label="Money">
+            <NavLink href="/charges">Charges</NavLink>
             <NavLink href="/transactions">Transactions</NavLink>
-            <NavLink href="/suspense">Unmatched payments</NavLink>
-            <NavLink href="/requests">Payment requests</NavLink>
-            <NavLink href="/payers">Payers</NavLink>
+            <NavLink href="/unmatched">Unmatched payments</NavLink>
           </NavGroup>
           <NavGroup label="Integrations">
-            <NavLink href="/products">Products</NavLink>
+            <NavLink href="/apps">Apps</NavLink>
             <NavLink href="/webhooks">Webhooks</NavLink>
             <NavLink href="/mpesa/callbacks">M-Pesa callbacks</NavLink>
             <NavLink href="/developers">Developers</NavLink>

@@ -5,28 +5,28 @@ import Link from "next/link";
 import { PageHeader, Panel } from "@/components/PageHeader";
 import { getMe, load } from "@/lib/api";
 
-import { CreateProductForm } from "./forms";
+import { CreateAppForm } from "./forms";
 
-export const metadata: Metadata = { title: "Products" };
+export const metadata: Metadata = { title: "Apps" };
 
-export default async function Products() {
-  const [{ items }, me] = await Promise.all([load((c) => c.GET("/products")), getMe()]);
-  const canManage = me.permissions.includes("products.manage");
+export default async function Apps() {
+  const [{ items }, me] = await Promise.all([load((c) => c.GET("/apps")), getMe()]);
+  const canManage = me.permissions.includes("apps.manage");
   return (
     <>
       <PageHeader
-        title="Products"
-        lead="Talksasa's own products that collect through the shared paybill. Each one has an account prefix customers type before their number."
+        title="Apps"
+        lead="Systems that collect money through the gateway. Each app has its own API keys and webhook, and an account prefix that routes paybill payments to it."
       />
       <div className="grid gap-6">
         <Panel flush>
           {items.length === 0 ? (
-            <Empty title="No products yet">{canManage ? "Create the first one below." : "An admin creates products."}</Empty>
+            <Empty title="No apps yet">{canManage ? "Create the first one below." : "An admin creates apps."}</Empty>
           ) : (
-            <Table label="Products">
+            <Table label="Apps">
               <thead>
                 <tr>
-                  <Th>Product</Th>
+                  <Th>App</Th>
                   <Th>Prefix</Th>
                   <Th>Status</Th>
                   <Th>Events sent to</Th>
@@ -37,7 +37,7 @@ export default async function Products() {
                 {items.map((p) => (
                   <tr key={p.id} className="hover:bg-wash/60">
                     <Td>
-                      <Link href={`/products/${p.id}`} className="font-medium text-ink hover:text-violet hover:underline">
+                      <Link href={`/apps/${p.id}`} className="font-medium text-ink hover:text-violet hover:underline">
                         {p.name}
                       </Link>
                     </Td>
@@ -56,12 +56,12 @@ export default async function Products() {
           )}
         </Panel>
         {canManage ? (
-          <Panel title="Add a product">
+          <Panel title="Add an app">
             <p className="mb-5 max-w-2xl text-sm text-ink-2">
-              Only for Talksasa’s own business lines. Money collected for a product is Talksasa revenue; this system never pays
-              out to a product or collects for third parties.
+              The app creates charges with its API key and hears about payments by webhook. Its account prefix is permanent:
+              paybill payments whose account number starts with it are routed to the app.
             </p>
-            <CreateProductForm />
+            <CreateAppForm />
           </Panel>
         ) : null}
       </div>

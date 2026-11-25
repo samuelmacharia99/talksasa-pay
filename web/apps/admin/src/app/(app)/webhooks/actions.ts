@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 
 import { act, type ActionResult } from "@/lib/api";
 
-// The Go service checks products.manage on every call; the UI only hides
+// The Go service checks apps.manage on every call; the UI only hides
 // the button from roles that cannot use it.
 
 export type RedeliverResult = ActionResult<{ status: string }> | undefined;

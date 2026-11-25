@@ -3,18 +3,15 @@ import { cx } from "./cx";
 type Tone = "ok" | "warn" | "bad" | "info" | "neutral" | "violet";
 
 const STATUSES: Record<string, { label: string; tone: Tone }> = {
-  // payment requests
-  open: { label: "Open", tone: "info" },
-  partially_paid: { label: "Part paid", tone: "warn" },
-  paid: { label: "Paid", tone: "ok" },
-  cancelled: { label: "Cancelled", tone: "neutral" },
-  expired: { label: "Expired", tone: "neutral" },
-  // transactions
+  // charges and transactions
   pending: { label: "Pending", tone: "info" },
   succeeded: { label: "Succeeded", tone: "ok" },
   failed: { label: "Failed", tone: "bad" },
   needs_review: { label: "Needs review", tone: "bad" },
-  // products, payers, staff
+  cancelled: { label: "Cancelled", tone: "neutral" },
+  expired: { label: "Expired", tone: "neutral" },
+  reversed: { label: "Reversed", tone: "warn" },
+  // apps, staff, API keys
   active: { label: "Active", tone: "ok" },
   suspended: { label: "Suspended", tone: "bad" },
   closed: { label: "Closed", tone: "neutral" },

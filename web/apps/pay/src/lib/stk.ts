@@ -61,7 +61,7 @@ export function stkView(stk: StkSnapshot | null): StkView {
       return {
         kind: "received",
         title: "Payment received",
-        body: "Thank you. Updating your bill…",
+        body: "Thank you. Updating this page…",
       };
     default:
       return { kind: "form" };
@@ -85,9 +85,9 @@ export interface SendOutcome {
   error?: string;
   /** The error is about the phone field. */
   fieldError?: boolean;
-  /** Prompts can't be used for this bill now; point to the paybill steps. */
+  /** Prompts can't be used for this charge now; point to the paybill steps. */
   fallback?: boolean;
-  /** The bill changed (e.g. paid or closed): reload the page. */
+  /** The charge changed (e.g. paid or closed): reload the page. */
   refresh?: boolean;
 }
 
@@ -103,7 +103,7 @@ export function sendErrorOutcome(status: number, code: string | undefined): Send
         error: "This amount is too large for an M-Pesa prompt. Pay with the paybill steps below.",
       };
     case code === "not_payable":
-      return { waiting: false, refresh: true, error: "This bill can’t be paid any more." };
+      return { waiting: false, refresh: true, error: "This payment can’t be made any more." };
     case status === 422 || code === "validation_failed" || code === "invalid_phone":
       return { waiting: false, fieldError: true, error: PHONE_ERROR };
     case status === 429:

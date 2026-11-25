@@ -5,30 +5,30 @@ import Link from "next/link";
 import { FilterBar, FilterField, filterInput } from "@/components/FilterBar";
 import { PageHeader, Panel } from "@/components/PageHeader";
 import { Pager } from "@/components/Pager";
-import { ProductSelect } from "@/components/ProductSelect";
+import { AppSelect } from "@/components/AppSelect";
 import { load, type QueryOf } from "@/lib/api";
 import { anySet, pick } from "@/lib/params";
 import { DELIVERY_STATUS, SUBJECT_LABEL, subjectHref } from "@/lib/webhooks";
 
 export const metadata: Metadata = { title: "Webhooks" };
 
-const KEYS = ["product_id", "status", "cursor"] as const;
+const KEYS = ["app_id", "status", "cursor"] as const;
 
 export default async function Webhooks({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const p = pick(await searchParams, KEYS);
-  const [page, products] = await Promise.all([
+  const [page, apps] = await Promise.all([
     load((c) => c.GET("/webhook-deliveries", { params: { query: { ...p, limit: 50 } as QueryOf<"/webhook-deliveries"> } })),
-    load((c) => c.GET("/products")),
+    load((c) => c.GET("/apps")),
   ]);
   return (
     <>
       <PageHeader
         title="Webhooks"
-        lead="Every event we sent, or tried to send, to a product's webhook URL, newest first. Products can also read every event from their events feed, so a failed webhook does not mean lost data."
+        lead="Every event we sent, or tried to send, to an app's webhook URL, newest first. Apps can also read every event from their events feed, so a failed webhook does not mean lost data."
       />
       <FilterBar action="/webhooks" active={anySet(p)}>
-        <FilterField label="Product">
-          <ProductSelect products={products.items} value={p.product_id} />
+        <FilterField label="App">
+          <AppSelect apps={apps.items} value={p.app_id} />
         </FilterField>
         <FilterField label="Status">
           <select name="status" defaultValue={p.status ?? ""} className={filterInput}>
@@ -44,14 +44,14 @@ export default async function Webhooks({ searchParams }: { searchParams: Promise
       <Panel flush>
         {page.items.length === 0 ? (
           <Empty title={anySet(p) ? "No deliveries match" : "No webhooks sent yet"}>
-            {anySet(p) ? "Try another status or clear the filters." : "Deliveries appear here as soon as a product's bills or payments change."}
+            {anySet(p) ? "Try another status or clear the filters." : "Deliveries appear here as soon as an app's charges or payments change."}
           </Empty>
         ) : (
           <Table label="Webhook deliveries">
             <thead>
               <tr>
                 <Th>Created</Th>
-                <Th>Product</Th>
+                <Th>App</Th>
                 <Th>Event</Th>
                 <Th>About</Th>
                 <Th>Status</Th>

@@ -14,7 +14,7 @@ export default function AuthLayout({ children }: { children: ReactNode }) {
         <Wordmark onDark />
         <div className="mt-auto max-w-[17rem]">
           <p className="font-display text-[1.65rem] leading-[1.2] font-semibold tracking-[-0.015em]">
-            One paybill. Every Talksasa product.
+            One paybill. Every Talksasa app.
           </p>
           <p className="mt-4 text-sm leading-relaxed text-white/65">
             Staff console for collections, reconciliation and refunds. Every action you take here is recorded under your name.

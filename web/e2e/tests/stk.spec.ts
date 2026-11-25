@@ -7,9 +7,9 @@ import { expect, test } from "@playwright/test";
  *   ...0  succeeds (with a receipt) after about 300 ms
  *   ...1  is cancelled by the customer (ResultCode 1032)
  *
- * Needs two different open bills with a balance of at most KES 250,000:
- *   E2E_STK_TOKEN         paid by the happy path (the bill ends up paid)
- *   E2E_STK_CANCEL_TOKEN  used for the cancel path (stays open)
+ * Needs two different pending charges of at most KES 250,000:
+ *   E2E_STK_TOKEN         paid by the happy path (the charge succeeds)
+ *   E2E_STK_CANCEL_TOKEN  used for the cancel path (stays pending)
  */
 const PAY = process.env.E2E_PAY_URL ?? "http://127.0.0.1:3000";
 const STK = process.env.E2E_STK_TOKEN ?? "";
@@ -19,7 +19,7 @@ const SHOTS = "test-results/screens";
 test.describe("pay page M-Pesa prompt", () => {
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
-  test("sends a prompt and shows the bill as paid", async ({ page }) => {
+  test("sends a prompt and shows the charge as paid", async ({ page }) => {
     test.skip(!STK, "E2E_STK_TOKEN not set (run via make e2e with the fake Daraja)");
     const res = await page.goto(`${PAY}/${STK}`);
     expect(res?.status()).toBe(200);

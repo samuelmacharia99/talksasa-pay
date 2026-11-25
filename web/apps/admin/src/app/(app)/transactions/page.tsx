@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 
+import { AppSelect } from "@/components/AppSelect";
 import { FilterBar, FilterField, filterInput } from "@/components/FilterBar";
 import { PageHeader, Panel } from "@/components/PageHeader";
 import { Pager } from "@/components/Pager";
-import { ProductSelect } from "@/components/ProductSelect";
 import { load, type QueryOf } from "@/lib/api";
 import { anySet, pick } from "@/lib/params";
 
@@ -11,20 +11,23 @@ import { TxnTable } from "./TxnTable";
 
 export const metadata: Metadata = { title: "Transactions" };
 
-const KEYS = ["product_id", "status", "channel", "receipt", "phone", "from", "to", "payer_id", "request_id", "cursor"] as const;
+const KEYS = ["app_id", "charge_id", "status", "channel", "direction", "receipt", "phone", "from", "to", "unmatched", "cursor"] as const;
 
 export default async function Transactions({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const p = pick(await searchParams, KEYS);
-  const [page, products] = await Promise.all([
+  const [page, apps] = await Promise.all([
     load((c) => c.GET("/transactions", { params: { query: { ...p, limit: 50 } as QueryOf<"/transactions"> } })),
-    load((c) => c.GET("/products")),
+    load((c) => c.GET("/apps")),
   ]);
   return (
     <>
       <PageHeader title="Transactions" lead="Every shilling in and out, newest first. Rows are never edited or deleted; corrections appear as new rows." />
       <FilterBar action="/transactions" active={anySet(p)}>
-        <FilterField label="Product">
-          <ProductSelect products={products.items} value={p.product_id} />
+        {p.charge_id ? <input type="hidden" name="charge_id" value={p.charge_id} /> : null}
+        {p.unmatched ? <input type="hidden" name="unmatched" value={p.unmatched} /> : null}
+        {p.direction ? <input type="hidden" name="direction" value={p.direction} /> : null}
+        <FilterField label="App">
+          <AppSelect apps={apps.items} value={p.app_id} />
         </FilterField>
         <FilterField label="Status">
           <select name="status" defaultValue={p.status ?? ""} className={filterInput}>

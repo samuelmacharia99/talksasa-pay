@@ -5,9 +5,9 @@ export type DeliveryStatus = "pending" | "delivered" | "failed" | "skipped";
 
 export const DELIVERY_STATUS: Record<DeliveryStatus, { label: string; help: string }> = {
   pending: { label: "Pending", help: "Waiting for its first attempt or for the next retry." },
-  delivered: { label: "Delivered", help: "The product answered with a 2xx status." },
-  failed: { label: "Failed", help: "Every retry failed. The product did not get this event by webhook." },
-  skipped: { label: "Skipped", help: "Not sent, usually because the product had no webhook URL at the time." },
+  delivered: { label: "Delivered", help: "The app answered with a 2xx status." },
+  failed: { label: "Failed", help: "Every retry failed. The app did not get this event by webhook." },
+  skipped: { label: "Skipped", help: "Not sent, usually because the app had no webhook URL at the time." },
 };
 
 export function deliveryStatusLabel(status: string): string {
@@ -19,24 +19,29 @@ export function canRedeliver(status: string): boolean {
   return status === "failed" || status === "skipped";
 }
 
-/** Where the event's subject lives in the panel. */
-export function subjectHref(subjectType: string, subjectId: string): string | undefined {
+/**
+ * Where the event's subject lives in the panel. A payment prompt has no page
+ * of its own: it links to its charge when the event body names it.
+ */
+export function subjectHref(subjectType: string, subjectId: string, data?: unknown): string | undefined {
   switch (subjectType) {
-    case "payment_request":
-      return `/requests/${subjectId}`;
+    case "charge":
+      return `/charges/${subjectId}`;
     case "transaction":
       return `/transactions/${subjectId}`;
-    case "payer":
-      return `/payers/${subjectId}`;
+    case "stk_push": {
+      const chargeId = data && typeof data === "object" ? (data as Record<string, unknown>).charge_id : undefined;
+      return typeof chargeId === "string" && /^[0-9a-f-]{36}$/i.test(chargeId) ? `/charges/${chargeId}` : undefined;
+    }
     default:
       return undefined;
   }
 }
 
 export const SUBJECT_LABEL: Record<string, string> = {
-  payment_request: "Bill",
+  charge: "Charge",
   transaction: "Transaction",
-  payer: "Payer",
+  stk_push: "Payment prompt",
 };
 
 /** HTTP status code of an attempt as a tone for display. */

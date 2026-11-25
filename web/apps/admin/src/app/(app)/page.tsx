@@ -7,13 +7,22 @@ import { Suspense } from "react";
 import { Panel } from "@/components/PageHeader";
 import { api, load } from "@/lib/api";
 import { log } from "@/lib/log";
-import { mpesaAttention } from "@/lib/mpesa";
+import { attentionItems, nairobiToday, overviewTiles } from "@/lib/overview";
 
 export const metadata: Metadata = { title: "Overview" };
 
 const UNASSIGNED = "00000000-0000-0000-0000-000000000000";
 
 const FAILED_SAMPLE = 100;
+
+const toneText = {
+  ok: "text-ok",
+  warn: "text-warn",
+  bad: "text-bad",
+  info: "text-ink",
+  neutral: "text-ink",
+  violet: "text-violet",
+} as const;
 
 /**
  * How many webhook deliveries have failed (capped: "100+"). Best effort: the
@@ -32,79 +41,44 @@ async function failedDeliveries(): Promise<{ count: number; more: boolean } | nu
 
 export default async function Overview() {
   const [d, failed] = await Promise.all([load((c) => c.GET("/dashboard")), failedDeliveries()]);
-  const names = new Map(d.products.map((p) => [p.id, `${p.name} (${p.account_prefix})`]));
-  names.set(UNASSIGNED, "Unmatched (not yet assigned)");
-  const split = Object.entries(d.last_30_days.by_product).sort((a, b) => b[1] - a[1]);
-  const c = d.counts;
-
-  const attention: Array<{ href: string; label: string; detail: string; urgent: boolean }> = [
-    {
-      href: "/suspense",
-      label: c.suspense_count === 1 ? "1 unmatched payment" : `${c.suspense_count} unmatched payments`,
-      detail: c.suspense_count ? `${formatKes(c.suspense_amount)} waiting to be assigned to a payer` : "Every payment has found its payer",
-      urgent: c.suspense_count > 0,
-    },
-    {
-      href: "/transactions?status=needs_review",
-      label: c.needs_review === 1 ? "1 transaction needs review" : `${c.needs_review} transactions need review`,
-      detail: c.needs_review ? "M-Pesa did not confirm these in time; check before acting" : "Nothing is waiting on M-Pesa confirmation",
-      urgent: c.needs_review > 0,
-    },
-    {
-      href: "/transactions?status=pending",
-      label: `${c.pending} pending`,
-      detail: "Payments started but not yet confirmed by M-Pesa",
-      urgent: false,
-    },
-    {
-      href: "/requests?status=open",
-      label: `${c.open_requests} unpaid bills`,
-      detail: `${formatKes(c.outstanding)} outstanding across all products`,
-      urgent: false,
-    },
-  ];
-  if (c.duplicate_references > 0) {
-    attention.splice(2, 0, {
-      href: "/requests?duplicates=true",
-      label: c.duplicate_references === 1 ? "1 bill shares its reference with another" : `${c.duplicate_references} bills share their reference with another`,
-      detail: "A reversal reopened a bill the product had already billed again; cancel or settle one of each pair",
-      urgent: true,
-    });
-  }
-  // M-Pesa counts: shown once GET /dashboard reports them (optional until then).
-  attention.splice(2, 0, ...mpesaAttention(c));
-  if (failed && failed.count > 0) {
-    const n = failed.more ? `${failed.count}+` : String(failed.count);
-    attention.splice(2, 0, {
-      href: "/webhooks?status=failed",
-      label: failed.count === 1 && !failed.more ? "1 webhook failed" : `${n} webhooks failed`,
-      detail: "Products did not receive these events by webhook; fix the cause, then redeliver",
-      urgent: true,
-    });
-  }
+  const names = new Map(d.apps.map((a) => [a.id, `${a.name} (${a.account_prefix})`]));
+  names.set(UNASSIGNED, "Unmatched (no app yet)");
+  const split = Object.entries(d.last_30_days.by_app).sort((a, b) => b[1] - a[1]);
+  const tiles = overviewTiles(d.counts, nairobiToday(new Date(d.generated_at)));
+  const attention = attentionItems(d.counts, failed);
 
   return (
     <div className="grid gap-8">
       <section aria-labelledby="today" className="pt-2">
         <h1 id="today" className="font-display text-[clamp(2rem,4.2vw,3.1rem)] leading-[1.08] font-semibold tracking-[-0.025em]">
-          <span className="num">{formatKes(d.today.total)}</span>{" "}
-          <span className="text-muted">collected today</span>
+          <span className="num">{formatKes(d.today.total)}</span> <span className="text-muted">collected today</span>
         </h1>
         <p className="mt-3 max-w-2xl text-[0.9375rem] text-ink-2">
-          From {d.today.payments} {d.today.payments === 1 ? "payment" : "payments"}.{" "}
-          <Amount value={d.last_7_days.total} /> over the last 7 days and <Amount value={d.last_30_days.total} /> over 30.
-          Customers hold <Amount value={c.credit_held} /> in credit.
+          From {d.today.payments} {d.today.payments === 1 ? "payment" : "payments"}. <Amount value={d.last_7_days.total} /> over the
+          last 7 days and <Amount value={d.last_30_days.total} /> over 30.
         </p>
         <p className="mt-1 text-[0.8125rem] text-faint">
           Kenyan time. Updated <DateTime value={d.generated_at} />.
         </p>
       </section>
 
+      <ul aria-label="Counts" className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-line bg-line sm:grid-cols-3 xl:grid-cols-6">
+        {tiles.map((t) => (
+          <li key={t.label} className="bg-surface">
+            <Link href={t.href} className="group block h-full px-4 py-3.5 hover:bg-wash">
+              <span className="block text-[0.8125rem] text-muted group-hover:text-ink">{t.label}</span>
+              <span className={cx("num mt-1 block font-display text-xl font-semibold tracking-[-0.01em]", toneText[t.tone])}>{t.value}</span>
+              <span className="mt-0.5 block text-[0.75rem] leading-snug text-muted">{t.detail}</span>
+            </Link>
+          </li>
+        ))}
+      </ul>
+
       <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
         <Panel title="Daily collections, last 30 days">
           <BarChart data={d.daily} caption="Collections per day for the last 30 days, in Kenya shillings" />
         </Panel>
-        <Panel title="By product, last 30 days" flush>
+        <Panel title="By app, last 30 days" flush>
           {split.length === 0 ? (
             <p className="p-5 text-sm text-muted">No payments in the last 30 days.</p>
           ) : (
@@ -130,21 +104,31 @@ export default async function Overview() {
 
       <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
         <Panel title="Needs attention" flush>
-          <ul className="divide-y divide-line">
-            {attention.map((a) => (
-              <li key={a.href}>
-                <Link href={a.href} className="group flex items-start gap-3 px-5 py-3.5 hover:bg-wash">
-                  <span aria-hidden className={cx("mt-1.5 size-2 shrink-0 rounded-full", a.urgent ? "bg-bad" : "bg-line-strong")} />
-                  <span className="min-w-0">
-                    <span className="block text-sm font-medium text-ink group-hover:underline">{a.label}</span>
-                    <span className="block text-[0.8125rem] text-muted">{a.detail}</span>
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
+          {attention.length === 0 ? (
+            <p className="p-5 text-sm text-muted">Nothing needs attention right now.</p>
+          ) : (
+            <ul className="divide-y divide-line">
+              {attention.map((a) => (
+                <li key={a.href}>
+                  <Link href={a.href} className="group flex items-start gap-3 px-5 py-3.5 hover:bg-wash">
+                    <span aria-hidden className={cx("mt-1.5 size-2 shrink-0 rounded-full", a.urgent ? "bg-bad" : "bg-warn")} />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-ink group-hover:underline">{a.label}</span>
+                      <span className="block text-[0.8125rem] text-muted">{a.detail}</span>
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
         </Panel>
-        <Suspense fallback={<Panel title="Ledger health"><p className="text-sm text-muted">Checking…</p></Panel>}>
+        <Suspense
+          fallback={
+            <Panel title="Ledger health">
+              <p className="text-sm text-muted">Checking…</p>
+            </Panel>
+          }
+        >
           <Health />
         </Suspense>
       </div>
@@ -154,22 +138,16 @@ export default async function Overview() {
 
 async function Health() {
   const i = await load((c) => c.GET("/integrity"));
-  const ok = i.audit_chain_ok && i.ledger_ok;
   return (
     <Panel title="Ledger health">
-      <p className={cx("font-medium", ok ? "text-ok" : "text-bad")}>{ok ? "All checks pass" : "A check failed. Escalate now."}</p>
-      <ul className="mt-3 grid gap-2 text-sm text-ink-2">
-        <li>
-          {i.audit_chain_ok
-            ? "Audit log is intact: no entry has been changed or removed."
-            : `Audit log was altered at entry ${i.first_bad_audit_id}.`}
-        </li>
-        <li>
-          {i.ledger_ok
-            ? "Every bill and credit balance matches its payment records."
-            : `${i.drift.length} balance(s) disagree with their payment records.`}
-        </li>
-      </ul>
+      <p className={cx("font-medium", i.audit_chain_ok ? "text-ok" : "text-bad")}>
+        {i.audit_chain_ok ? "All checks pass" : "A check failed. Escalate now."}
+      </p>
+      <p className="mt-3 text-sm text-ink-2">
+        {i.audit_chain_ok
+          ? "Audit log is intact: no entry has been changed or removed."
+          : `Audit log was altered at entry ${i.first_bad_audit_id}.`}
+      </p>
       <p className="mt-3 text-[0.8125rem] text-faint">
         Checked <DateTime value={i.checked_at} />
       </p>

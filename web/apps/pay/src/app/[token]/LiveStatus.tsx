@@ -27,21 +27,19 @@ export function useLive(): Live {
 }
 
 /**
- * Polls the bill's status while the page is visible and refreshes the page
- * when the bill changes (e.g. the M-Pesa payment lands). Also tracks the
+ * Polls the charge's status while the page is visible and refreshes the page
+ * when the charge changes (e.g. the M-Pesa payment lands). Also tracks the
  * latest payment prompt for StkPanel. Stops after 30 minutes so a forgotten
  * tab does not poll forever.
  */
 export function LiveProvider({
   token,
   status,
-  amountPaid,
   initialStk,
   children,
 }: {
   token: string;
   status: string;
-  amountPaid: number;
   initialStk: StkSnapshot | null;
   children: ReactNode;
 }) {
@@ -63,12 +61,12 @@ export function LiveProvider({
       try {
         const res = await fetch(`/api/status/${token}`, { cache: "no-store" });
         if (!res.ok || stopped) return;
-        const s = (await res.json()) as { status: string; amount_paid: number; stk_push?: StkSnapshot | null };
+        const s = (await res.json()) as { status: string; stk_push?: StkSnapshot | null };
         if (stopped) return;
         if (s.stk_push !== undefined) {
           setStk((prev) => (sameStk(prev, s.stk_push ?? null) ? prev : (s.stk_push ?? null)));
         }
-        if (s.status !== status || s.amount_paid !== amountPaid) router.refresh();
+        if (s.status !== status) router.refresh();
       } catch {
         // Offline for a moment; try again on the next tick.
       }
@@ -78,7 +76,7 @@ export function LiveProvider({
       stopped = true;
       clearInterval(id);
     };
-  }, [token, status, amountPaid, router, watching, startedAt, fast]);
+  }, [token, status, router, watching, startedAt, fast]);
 
   const wake = useCallback(() => {
     setStartedAt(Date.now());

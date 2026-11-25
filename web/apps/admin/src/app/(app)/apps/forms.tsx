@@ -11,30 +11,30 @@ import { MAX_ALLOWED_IPS, validateAllowedIPs } from "@/lib/webhooks";
 
 import {
   type AllowedIPsResult,
-  createProduct,
+  createApp,
   issueAPIKey,
   revokeAPIKey,
   rotateWebhookSecret,
   type SecretResult,
   setAllowedIPs,
-  setProductStatus,
+  setAppStatus,
   setWebhookURL,
 } from "./actions";
 
 const err = (s: ActionResult<unknown> | undefined) => (s && !s.ok ? s.error : undefined);
 
-export function CreateProductForm() {
-  const [state, action] = useActionState(createProduct, undefined);
+export function CreateAppForm() {
+  const [state, action] = useActionState(createApp, undefined);
   if (state?.ok) {
     return (
       <div className="grid gap-4">
         <SecretOnce
-          title="Product created. Copy its webhook signing secret now."
-          help="The product's developers need this to verify our webhooks. It is never shown again; rotate it if it is lost."
+          title="App created. Copy its webhook signing secret now."
+          help="The app's developers need this to verify our webhooks. It is never shown again; rotate it if it is lost."
           value={state.data.secret}
         />
-        <Link href={`/products/${state.data.productId}`} className="text-sm font-medium text-violet hover:underline">
-          Open the product to issue an API key
+        <Link href={`/apps/${state.data.appId}`} className="text-sm font-medium text-violet hover:underline">
+          Open the app to issue an API key
         </Link>
       </div>
     );
@@ -44,7 +44,7 @@ export function CreateProductForm() {
       <div className="sm:col-span-2">
         <FormError message={err(state)} />
       </div>
-      <Field label="Product name" name="name" required maxLength={100} placeholder="Domains" />
+      <Field label="App name" name="name" required maxLength={100} placeholder="Domains" />
       <Field
         label="Account prefix"
         name="account_prefix"
@@ -63,7 +63,7 @@ export function CreateProductForm() {
         className="sm:col-span-2"
       />
       <div className="sm:col-span-2">
-        <SubmitButton pending="Creating…">Create product</SubmitButton>
+        <SubmitButton pending="Creating…">Create app</SubmitButton>
       </div>
     </form>
   );
@@ -100,7 +100,7 @@ export function RotateSecretForm({ id }: { id: string }) {
     return (
       <SecretOnce
         title="New webhook signing secret"
-        help="For the next 24 hours every webhook carries two signatures, one per secret. Update the product's configuration with this one before then."
+        help="For the next 24 hours every webhook carries two signatures, one per secret. Update the app's configuration with this one before then."
         value={state.data.secret}
       />
     );
@@ -109,8 +109,8 @@ export function RotateSecretForm({ id }: { id: string }) {
     <form action={action} className="grid gap-3">
       <FormError message={err(state)} />
       <p className="text-sm text-ink-2">
-        Replace the secret the product uses to verify our webhooks. We keep signing with the old one as well for 24 hours,
-        so the product can switch over without rejecting events.
+        Replace the secret the app uses to verify our webhooks. We keep signing with the old one as well for 24 hours,
+        so the app can switch over without rejecting events.
       </p>
       {confirming ? (
         <div className="flex flex-wrap gap-2">
@@ -134,26 +134,26 @@ export function RotateSecretForm({ id }: { id: string }) {
 
 export function StatusForm({ id, status }: { id: string; status: "active" | "suspended" }) {
   const next = status === "active" ? "suspended" : "active";
-  const [state, action] = useActionState(setProductStatus.bind(null, id, next), undefined);
+  const [state, action] = useActionState(setAppStatus.bind(null, id, next), undefined);
   const [confirming, setConfirming] = useState(false);
   return (
     <form action={action} className="grid gap-3">
       <FormError message={err(state)} />
       <p className="text-sm text-ink-2">
         {status === "active"
-          ? "Suspending blocks the product's API keys and its payment links at once. Money customers still send is recorded as usual."
-          : "Re-activating restores the product's API keys and payment links."}
+          ? "Suspending blocks the app's API keys and its payment links at once. Money customers still send is recorded as usual."
+          : "Re-activating restores the app's API keys and payment links."}
       </p>
       {status === "active" && !confirming ? (
         <div>
           <Button variant="danger" onClick={() => setConfirming(true)}>
-            Suspend product
+            Suspend app
           </Button>
         </div>
       ) : (
         <div className="flex flex-wrap gap-2">
           <SubmitButton variant={status === "active" ? "danger" : "primary"} pending="Saving…">
-            {status === "active" ? "Yes, suspend it" : "Re-activate product"}
+            {status === "active" ? "Yes, suspend it" : "Re-activate app"}
           </SubmitButton>
           {confirming ? (
             <Button variant="ghost" onClick={() => setConfirming(false)}>
@@ -172,7 +172,7 @@ export function IssueKeyForm({ id }: { id: string }) {
     return (
       <SecretOnce
         title="API key issued"
-        help="Put it in the product's secret manager now. We store only a fingerprint, so it can never be shown again."
+        help="Put it in the app's secret manager now. We store only a fingerprint, so it can never be shown again."
         value={state.data.secret}
       />
     );

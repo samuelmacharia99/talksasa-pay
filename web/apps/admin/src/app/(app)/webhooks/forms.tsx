@@ -8,7 +8,7 @@ import { SubmitButton } from "@/components/SubmitButton";
 
 import { redeliver, type RedeliverResult } from "./actions";
 
-export function RedeliverForm({ eventID, productLabel }: { eventID: string; productLabel: string }) {
+export function RedeliverForm({ eventID, appLabel }: { eventID: string; appLabel: string }) {
   const [state, action] = useActionState(redeliver.bind(null, eventID), undefined as RedeliverResult);
   const [confirming, setConfirming] = useState(false);
   if (state?.ok) {
@@ -22,8 +22,8 @@ export function RedeliverForm({ eventID, productLabel }: { eventID: string; prod
     <form action={action} className="grid gap-3">
       <FormError message={state && !state.ok ? state.error : undefined} />
       <p className="text-sm text-ink-2">
-        Send this event to {productLabel} again, with fresh retries. Do this once the product has fixed whatever made it
-        fail. The product must already ignore events it has seen, so a repeat is harmless.
+        Send this event to {appLabel} again, with fresh retries. Do this once the app has fixed whatever made it
+        fail. The app must already ignore events it has seen, so a repeat is harmless.
       </p>
       {confirming ? (
         <div className="flex flex-wrap gap-2">

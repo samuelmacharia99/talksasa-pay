@@ -1,12 +1,14 @@
 import { DateTime, Empty, Table, Td, Th } from "@talksasa/ui";
 import type { Metadata } from "next";
+import Link from "next/link";
 import { Suspense } from "react";
 
+import { AppSelect } from "@/components/AppSelect";
 import { FilterBar, FilterField, filterInput } from "@/components/FilterBar";
 import { PageHeader, Panel } from "@/components/PageHeader";
 import { Pager } from "@/components/Pager";
-import { ProductSelect } from "@/components/ProductSelect";
 import { load, type QueryOf } from "@/lib/api";
+import { entityHref } from "@/lib/labels";
 import { anySet, pick } from "@/lib/params";
 
 export const metadata: Metadata = { title: "Audit log" };
@@ -15,19 +17,22 @@ const ACTIONS: Array<[string, string]> = [
   ["", "Everything"],
   ["admin.", "Sign-ins and sign-outs"],
   ["admin_user.", "Staff accounts"],
-  ["product.", "Products"],
+  ["app.", "Apps"],
   ["api_key.", "API keys"],
-  ["payer.", "Payers"],
-  ["transaction.", "Transactions"],
+  // "charge" also matches the expiry job's "charges.expired".
+  ["charge", "Charges"],
+  ["transaction.", "Transactions (resolve, assign, reverse)"],
+  ["webhook", "Webhooks"],
+  ["mpesa.", "M-Pesa settings"],
 ];
 
-const WHO: Record<string, string> = { admin: "Staff", cli: "Command line", product: "Product API", system: "System" };
+const WHO: Record<string, string> = { admin: "Staff", cli: "Command line", app: "App API", system: "System" };
 
 export default async function Audit({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
-  const p = pick(await searchParams, ["product_id", "action", "cursor"] as const);
-  const [page, products] = await Promise.all([
+  const p = pick(await searchParams, ["app_id", "action", "cursor"] as const);
+  const [page, apps] = await Promise.all([
     load((c) => c.GET("/audit", { params: { query: { ...p, limit: 50 } as QueryOf<"/audit"> } })),
-    load((c) => c.GET("/products")),
+    load((c) => c.GET("/apps")),
   ]);
   return (
     <>
@@ -48,8 +53,8 @@ export default async function Audit({ searchParams }: { searchParams: Promise<Re
             ))}
           </select>
         </FilterField>
-        <FilterField label="Product">
-          <ProductSelect products={products.items} value={p.product_id} />
+        <FilterField label="App">
+          <AppSelect apps={apps.items} value={p.app_id} />
         </FilterField>
       </FilterBar>
       <Panel flush>
@@ -79,7 +84,13 @@ export default async function Audit({ searchParams }: { searchParams: Promise<Re
                     <span className="block font-medium">{a.action}</span>
                     <span className="block text-[0.75rem] text-muted">
                       {a.account_prefix ? `${a.account_prefix}, ` : ""}
-                      {a.entity_type}
+                      {entityHref(a.entity_type, a.entity_id) ? (
+                        <Link href={entityHref(a.entity_type, a.entity_id)!} className="text-violet hover:underline">
+                          {a.entity_type.replace(/_/g, " ")}
+                        </Link>
+                      ) : (
+                        a.entity_type.replace(/_/g, " ")
+                      )}
                     </span>
                   </Td>
                   <Td className="max-w-[26rem]">

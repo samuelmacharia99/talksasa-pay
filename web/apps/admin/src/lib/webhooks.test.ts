@@ -33,10 +33,15 @@ describe("delivery status", () => {
     expect(attemptTone(null)).toBe("bad");
   });
   it("links subjects to their panel pages", () => {
-    expect(subjectHref("payment_request", "r1")).toBe("/requests/r1");
+    expect(subjectHref("charge", "c1")).toBe("/charges/c1");
     expect(subjectHref("transaction", "t1")).toBe("/transactions/t1");
-    expect(subjectHref("payer", "p1")).toBe("/payers/p1");
     expect(subjectHref("other", "x")).toBeUndefined();
+  });
+  it("links a payment prompt to its charge when the event names it", () => {
+    const chargeId = "0193a7a4-1111-7000-8000-000000000001";
+    expect(subjectHref("stk_push", "s1", { object: "stk_push", charge_id: chargeId })).toBe(`/charges/${chargeId}`);
+    expect(subjectHref("stk_push", "s1")).toBeUndefined();
+    expect(subjectHref("stk_push", "s1", { charge_id: "../../x" })).toBeUndefined();
   });
   it("pretty-prints JSON without throwing", () => {
     expect(prettyJSON({ a: 1 })).toBe('{\n  "a": 1\n}');
