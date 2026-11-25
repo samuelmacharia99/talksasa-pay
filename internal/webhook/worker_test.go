@@ -22,12 +22,12 @@ import (
 	"github.com/riverqueue/river/rivertype"
 
 	"github.com/talksasa/talksasa-pay/internal/apiview"
+	"github.com/talksasa/talksasa-pay/internal/app"
 	"github.com/talksasa/talksasa-pay/internal/audit"
 	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/platform/crypto"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
-	"github.com/talksasa/talksasa-pay/internal/product"
 	"github.com/talksasa/talksasa-pay/internal/queue"
 	"github.com/talksasa/talksasa-pay/internal/store"
 	"github.com/talksasa/talksasa-pay/internal/testutil/testdb"
@@ -80,15 +80,15 @@ func always(status int) func(int) (int, map[string]string, string) {
 }
 
 type harness struct {
-	t        *testing.T
-	ctx      context.Context
-	db       *testdb.DB
-	products *product.Service
-	logs     *syncBuffer
-	logger   *slog.Logger
-	worker   *Worker
-	river    *queue.Client
-	emitter  *events.Emitter
+	t       *testing.T
+	ctx     context.Context
+	db      *testdb.DB
+	apps    *app.Service
+	logs    *syncBuffer
+	logger  *slog.Logger
+	worker  *Worker
+	river   *queue.Client
+	emitter *events.Emitter
 }
 
 type harnessOpts struct {
@@ -110,7 +110,7 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	products := product.NewService(product.Options{
+	apps := app.NewService(app.Options{
 		Pool: d.App, Keyring: kr, APIKeyPepper: []byte(strings.Repeat("p", 40)), AllowHTTPHooks: true, Logger: logger,
 	})
 	hc, err := NewHTTPClient(ClientOptions{Env: config.EnvDevelopment, AllowLoopback: true, Timeout: 3 * time.Second})
@@ -118,7 +118,7 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 		t.Fatal(err)
 	}
 	w, err := NewWorker(Options{
-		Pool: d.App, Secrets: products, Logger: logger, Client: hc, Env: config.EnvDevelopment, Timeout: 3 * time.Second,
+		Pool: d.App, Secrets: apps, Logger: logger, Client: hc, Env: config.EnvDevelopment, Timeout: 3 * time.Second,
 		BreakerThreshold: o.threshold, BreakerCooldown: o.cooldown,
 		Backoff: func(int) time.Duration { return 20 * time.Millisecond },
 	})
@@ -149,14 +149,14 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 		})
 	}
 	return &harness{
-		t: t, ctx: ctx, db: d, products: products, logs: logs, logger: logger, worker: w, river: rc,
+		t: t, ctx: ctx, db: d, apps: apps, logs: logs, logger: logger, worker: w, river: rc,
 		emitter: events.NewEmitter(apiview.View{PayBaseURL: "https://pay.test/"}, queue.NewEnqueuer(rc)),
 	}
 }
 
-func (h *harness) product(prefix, hookURL string) product.Created {
+func (h *harness) app(prefix, hookURL string) app.Created {
 	h.t.Helper()
-	c, err := h.products.Create(h.ctx, operator, product.CreateParams{Name: prefix + " product", AccountPrefix: prefix, WebhookURL: hookURL})
+	c, err := h.apps.Create(h.ctx, operator, app.CreateParams{Name: prefix + " app", AccountPrefix: prefix, WebhookURL: hookURL})
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -164,13 +164,13 @@ func (h *harness) product(prefix, hookURL string) product.Created {
 }
 
 // emit writes an event (+ delivery row + River job) like the real services do.
-func (h *harness) emit(productID uuid.UUID) uuid.UUID {
+func (h *harness) emit(appID uuid.UUID) uuid.UUID {
 	h.t.Helper()
 	var id uuid.UUID
 	err := db.WithTx(h.ctx, h.db.App, operator.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
 		var err error
-		id, err = h.emitter.Emit(ctx, q, productID, events.PaymentRequestPaid, "payment_request", uuid.New(),
-			map[string]any{"object": "payment_request", "amount": 1500, "status": "paid"})
+		id, err = h.emitter.Emit(ctx, q, appID, events.ChargeSucceeded, "charge", uuid.New(),
+			map[string]any{"object": "charge", "amount": 1500, "status": "succeeded"})
 		return err
 	})
 	if err != nil {
@@ -222,8 +222,8 @@ func deref(s *string) string {
 func TestWorkerDelivers(t *testing.T) {
 	h := newHarness(t, harnessOpts{})
 	rcv := newReceiver(t, always(200))
-	p := h.product("DLV", rcv.srv.URL+"/hooks?token=receiver-token-123")
-	evID := h.emit(p.Product.ID)
+	p := h.app("DLV", rcv.srv.URL+"/hooks?token=receiver-token-123")
+	evID := h.emit(p.App.ID)
 
 	d := h.waitStatus(evID, store.WebhookDeliveryStatusDelivered)
 	if d.Attempts != 1 || d.DeliveredAt == nil || d.LastStatusCode == nil || *d.LastStatusCode != 200 {
@@ -231,7 +231,7 @@ func TestWorkerDelivers(t *testing.T) {
 	}
 	got := rcv.last()
 	if got.hdr.Get("Content-Type") != "application/json" || got.hdr.Get("User-Agent") != UserAgent ||
-		got.hdr.Get(HeaderEventID) != evID.String() || got.hdr.Get(HeaderEventType) != events.PaymentRequestPaid {
+		got.hdr.Get(HeaderEventID) != evID.String() || got.hdr.Get(HeaderEventType) != events.ChargeSucceeded {
 		t.Fatalf("headers: %v", got.hdr)
 	}
 	sig := got.hdr.Get(HeaderSignature)
@@ -249,7 +249,7 @@ func TestWorkerDelivers(t *testing.T) {
 	if err := json.Unmarshal(got.body, &env); err != nil {
 		t.Fatal(err)
 	}
-	if env.Object != "event" || env.ID != evID || env.Type != events.PaymentRequestPaid || env.APIVersion != apiview.APIVersion ||
+	if env.Object != "event" || env.ID != evID || env.Type != events.ChargeSucceeded || env.APIVersion != apiview.APIVersion ||
 		env.CreatedAt.IsZero() || !strings.Contains(string(env.Data), `"amount":1500`) {
 		t.Fatalf("envelope: %s", got.body)
 	}
@@ -264,7 +264,7 @@ func TestWorkerDelivers(t *testing.T) {
 	// Idempotent: running the job again for a delivered event sends nothing.
 	err := h.worker.Work(h.ctx, &river.Job[queue.WebhookArgs]{
 		JobRow: &rivertype.JobRow{ID: 999999, Attempt: 1, MaxAttempts: 25},
-		Args:   queue.WebhookArgs{EventID: evID, ProductID: p.Product.ID},
+		Args:   queue.WebhookArgs{EventID: evID, AppID: p.App.ID},
 	})
 	if err != nil || rcv.hits.Load() != 1 || h.delivery(evID).Attempts != 1 {
 		t.Fatalf("redelivered a delivered event: err=%v hits=%d", err, rcv.hits.Load())
@@ -302,8 +302,8 @@ func TestWorkerRetriesThenDelivers(t *testing.T) {
 		}
 		return 204, nil, ""
 	})
-	p := h.product("RTY", rcv.srv.URL)
-	evID := h.emit(p.Product.ID)
+	p := h.app("RTY", rcv.srv.URL)
+	evID := h.emit(p.App.ID)
 	d := h.waitStatus(evID, store.WebhookDeliveryStatusDelivered)
 	if d.Attempts != 3 || rcv.hits.Load() != 3 {
 		t.Fatalf("attempts %d hits %d", d.Attempts, rcv.hits.Load())
@@ -331,8 +331,8 @@ func TestWorkerRetries4xx(t *testing.T) {
 		}
 		return 200, nil, "ok"
 	})
-	p := h.product("FXX", rcv.srv.URL)
-	evID := h.emit(p.Product.ID)
+	p := h.app("FXX", rcv.srv.URL)
+	evID := h.emit(p.App.ID)
 	d := h.waitStatus(evID, store.WebhookDeliveryStatusDelivered)
 	if d.Attempts != 2 {
 		t.Fatalf("attempts %d", d.Attempts)
@@ -345,24 +345,24 @@ func TestWorkerRetries4xx(t *testing.T) {
 func TestWorkerSkips(t *testing.T) {
 	h := newHarness(t, harnessOpts{})
 	rcv := newReceiver(t, always(200))
-	none := h.product("NOU", "")
-	evID := h.emit(none.Product.ID)
+	none := h.app("NOU", "")
+	evID := h.emit(none.App.ID)
 	d := h.waitStatus(evID, store.WebhookDeliveryStatusSkipped)
 	if deref(d.LastError) != "no webhook URL configured" || d.Attempts != 0 {
 		t.Fatalf("skip: %+v", d)
 	}
 
-	sus := h.product("SUS", rcv.srv.URL)
-	if _, err := h.products.SetStatus(h.ctx, operator, sus.Product.ID, store.ProductStatusSuspended); err != nil {
+	sus := h.app("SUS", rcv.srv.URL)
+	if _, err := h.apps.SetStatus(h.ctx, operator, sus.App.ID, store.AppStatusSuspended); err != nil {
 		t.Fatal(err)
 	}
-	evID = h.emit(sus.Product.ID)
+	evID = h.emit(sus.App.ID)
 	d = h.waitStatus(evID, store.WebhookDeliveryStatusSkipped)
-	if deref(d.LastError) != "product suspended" || rcv.hits.Load() != 0 {
+	if deref(d.LastError) != "app suspended" || rcv.hits.Load() != 0 {
 		t.Fatalf("suspended: %+v hits=%d", d, rcv.hits.Load())
 	}
 	// The event is still in the pull feed.
-	if _, err := store.New(h.db.App).GetEventForProduct(h.ctx, store.GetEventForProductParams{ProductID: sus.Product.ID, ID: evID}); err != nil {
+	if _, err := store.New(h.db.App).GetEventForApp(h.ctx, store.GetEventForAppParams{AppID: sus.App.ID, ID: evID}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -370,14 +370,14 @@ func TestWorkerSkips(t *testing.T) {
 func TestWorkerSignsWithPreviousSecretDuringGrace(t *testing.T) {
 	h := newHarness(t, harnessOpts{})
 	rcv := newReceiver(t, always(200))
-	p := h.product("ROT", rcv.srv.URL)
+	p := h.app("ROT", rcv.srv.URL)
 	oldSecret := p.WebhookSecret
-	newSecret, err := h.products.RotateWebhookSecret(h.ctx, operator, p.Product.ID)
+	newSecret, err := h.apps.RotateWebhookSecret(h.ctx, operator, p.App.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	evID := h.emit(p.Product.ID)
+	evID := h.emit(p.App.ID)
 	h.waitStatus(evID, store.WebhookDeliveryStatusDelivered)
 	got := rcv.last()
 	sig := got.hdr.Get(HeaderSignature)
@@ -391,10 +391,10 @@ func TestWorkerSignsWithPreviousSecretDuringGrace(t *testing.T) {
 	}
 
 	// Grace over: only the new secret signs.
-	if _, err := h.db.Owner.Exec(h.ctx, `UPDATE products SET webhook_secret_prev_expires_at = now() - interval '1 second' WHERE id = $1`, p.Product.ID); err != nil {
+	if _, err := h.db.Owner.Exec(h.ctx, `UPDATE apps SET webhook_secret_prev_expires_at = now() - interval '1 second' WHERE id = $1`, p.App.ID); err != nil {
 		t.Fatal(err)
 	}
-	evID = h.emit(p.Product.ID)
+	evID = h.emit(p.App.ID)
 	h.waitStatus(evID, store.WebhookDeliveryStatusDelivered)
 	got = rcv.last()
 	sig = got.hdr.Get(HeaderSignature)
@@ -408,8 +408,8 @@ func TestWorkerSignsWithPreviousSecretDuringGrace(t *testing.T) {
 func TestWorkerCircuitBreakerSnoozes(t *testing.T) {
 	h := newHarness(t, harnessOpts{threshold: 2, cooldown: time.Hour})
 	rcv := newReceiver(t, always(503))
-	p := h.product("BRK", rcv.srv.URL)
-	evID := h.emit(p.Product.ID)
+	p := h.app("BRK", rcv.srv.URL)
+	evID := h.emit(p.App.ID)
 
 	// Two failures open the breaker; the next run is snoozed, not attempted.
 	deadline := time.Now().Add(15 * time.Second)
@@ -430,7 +430,7 @@ func TestWorkerCircuitBreakerSnoozes(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if !h.worker.endpoints.open(p.Product.ID) {
+	if !h.worker.endpoints.open(p.App.ID) {
 		t.Fatal("breaker not open")
 	}
 	d := h.delivery(evID)
@@ -443,7 +443,7 @@ func TestWorkerCircuitBreakerSnoozes(t *testing.T) {
 	}
 
 	// Other events for the same endpoint are held too, without attempts.
-	ev2 := h.emit(p.Product.ID)
+	ev2 := h.emit(p.App.ID)
 	time.Sleep(300 * time.Millisecond)
 	if d2 := h.delivery(ev2); d2.Attempts != 0 || rcv.hits.Load() != 2 {
 		t.Fatalf("breaker let a request through: %+v hits=%d", d2, rcv.hits.Load())
@@ -459,17 +459,17 @@ func TestWorkerFinalAttemptFailsThenAdminRedelivers(t *testing.T) {
 		}
 		return 500, nil, "down"
 	})
-	p := h.product("FIN", rcv.srv.URL)
+	p := h.app("FIN", rcv.srv.URL)
 
 	// An event whose job has only 2 attempts (instead of 25).
 	var evID uuid.UUID
 	err := db.WithTx(h.ctx, h.db.App, operator.String(), func(ctx context.Context, q *store.Queries, tx pgx.Tx) error {
 		var err error
-		evID, err = events.NewEmitter(apiview.View{}, nil).Emit(ctx, q, p.Product.ID, events.PaymentRequestCreated, "payment_request", uuid.New(), map[string]any{"a": 1})
+		evID, err = events.NewEmitter(apiview.View{}, nil).Emit(ctx, q, p.App.ID, events.ChargeCancelled, "charge", uuid.New(), map[string]any{"a": 1})
 		if err != nil {
 			return err
 		}
-		_, err = h.river.InsertTx(ctx, tx, queue.WebhookArgs{EventID: evID, ProductID: p.Product.ID}, &river.InsertOpts{MaxAttempts: 2})
+		_, err = h.river.InsertTx(ctx, tx, queue.WebhookArgs{EventID: evID, AppID: p.App.ID}, &river.InsertOpts{MaxAttempts: 2})
 		return err
 	})
 	if err != nil {
@@ -506,11 +506,11 @@ func TestWorkerFinalAttemptFailsThenAdminRedelivers(t *testing.T) {
 func TestWorkerSkippedCanBeRedelivered(t *testing.T) {
 	h := newHarness(t, harnessOpts{})
 	rcv := newReceiver(t, always(200))
-	p := h.product("SKR", "")
-	evID := h.emit(p.Product.ID)
+	p := h.app("SKR", "")
+	evID := h.emit(p.App.ID)
 	h.waitStatus(evID, store.WebhookDeliveryStatusSkipped)
 	// The original job is `completed` and still holds its unique key.
-	if _, err := h.products.SetWebhookURL(h.ctx, operator, p.Product.ID, rcv.srv.URL); err != nil {
+	if _, err := h.apps.SetWebhookURL(h.ctx, operator, p.App.ID, rcv.srv.URL); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := NewDeliveries(h.db.App, h.river).Redeliver(h.ctx, operator, evID); err != nil {
@@ -527,11 +527,11 @@ func TestWorkerHonoursRetryAfter(t *testing.T) {
 	rcv := newReceiver(t, func(int) (int, map[string]string, string) {
 		return 429, map[string]string{"Retry-After": "120"}, "slow down"
 	})
-	p := h.product("RAF", rcv.srv.URL)
-	evID := h.emit(p.Product.ID)
+	p := h.app("RAF", rcv.srv.URL)
+	evID := h.emit(p.App.ID)
 	job := &river.Job[queue.WebhookArgs]{
 		JobRow: &rivertype.JobRow{ID: 4242, Attempt: 1, MaxAttempts: 25},
-		Args:   queue.WebhookArgs{EventID: evID, ProductID: p.Product.ID},
+		Args:   queue.WebhookArgs{EventID: evID, AppID: p.App.ID},
 	}
 	if err := h.worker.Work(h.ctx, job); err == nil {
 		t.Fatal("429 treated as success")
@@ -555,16 +555,16 @@ func TestWorkerBlocksPrivateDestinationsInProduction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, err := NewWorker(Options{Pool: h.db.App, Secrets: h.products, Logger: h.logger, Client: hc, Env: config.EnvDevelopment})
+	w, err := NewWorker(Options{Pool: h.db.App, Secrets: h.apps, Logger: h.logger, Client: hc, Env: config.EnvDevelopment})
 	if err != nil {
 		t.Fatal(err)
 	}
 	rcv := newReceiver(t, always(200))
-	p := h.product("SSR", rcv.srv.URL+"/x?k=receiver-token-999")
-	evID := h.emit(p.Product.ID)
+	p := h.app("SSR", rcv.srv.URL+"/x?k=receiver-token-999")
+	evID := h.emit(p.App.ID)
 	err = w.Work(h.ctx, &river.Job[queue.WebhookArgs]{
 		JobRow: &rivertype.JobRow{ID: 1, Attempt: 1, MaxAttempts: 25},
-		Args:   queue.WebhookArgs{EventID: evID, ProductID: p.Product.ID},
+		Args:   queue.WebhookArgs{EventID: evID, AppID: p.App.ID},
 	})
 	if err == nil || rcv.hits.Load() != 0 {
 		t.Fatalf("loopback reached: err=%v hits=%d", err, rcv.hits.Load())
@@ -576,14 +576,14 @@ func TestWorkerBlocksPrivateDestinationsInProduction(t *testing.T) {
 	h.assertNoSecrets(p.WebhookSecret, "receiver-token-999")
 
 	// And a production worker refuses plain http:// outright.
-	wp, err := NewWorker(Options{Pool: h.db.App, Secrets: h.products, Logger: h.logger, Client: hc, Env: config.EnvProduction})
+	wp, err := NewWorker(Options{Pool: h.db.App, Secrets: h.apps, Logger: h.logger, Client: hc, Env: config.EnvProduction})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev2 := h.emit(p.Product.ID)
+	ev2 := h.emit(p.App.ID)
 	err = wp.Work(h.ctx, &river.Job[queue.WebhookArgs]{
 		JobRow: &rivertype.JobRow{ID: 2, Attempt: 1, MaxAttempts: 25},
-		Args:   queue.WebhookArgs{EventID: ev2, ProductID: p.Product.ID},
+		Args:   queue.WebhookArgs{EventID: ev2, AppID: p.App.ID},
 	})
 	if err == nil || h.delivery(ev2).Status != store.WebhookDeliveryStatusFailed {
 		t.Fatalf("http URL in production: %v %+v", err, h.delivery(ev2))

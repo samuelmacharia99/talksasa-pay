@@ -21,18 +21,18 @@ import (
 // (*stk.Service implements it; tests use a fake).
 type STKService interface {
 	Resolve(ctx context.Context, actor audit.Actor, p stk.ResolveParams) (store.Transaction, error)
-	ListForRequest(ctx context.Context, requestID uuid.UUID, limit int) ([]stk.Push, error)
+	ListForCharge(ctx context.Context, chargeID uuid.UUID, limit int) ([]stk.Push, error)
 }
 
 // reads are the reporting queries behind the M-Pesa screens
 // (*reporting.Service implements it; tests use a fake).
 type reads interface {
 	GetTransaction(ctx context.Context, id uuid.UUID) (reporting.TxnDetail, error)
-	GetPaymentRequest(ctx context.Context, id uuid.UUID) (reporting.RequestDetail, error)
+	GetCharge(ctx context.Context, id uuid.UUID) (reporting.ChargeDetail, error)
 	ListMpesaCallbacks(ctx context.Context, f reporting.CallbackFilter) (reporting.Page[store.ListMpesaCallbacksAttentionRow], error)
 }
 
-// stkListLimit bounds the pushes shown on a request page.
+// stkListLimit bounds the pushes shown on a charge page.
 const stkListLimit = 100
 
 type stkPushJSON struct {
@@ -170,13 +170,13 @@ func (h *handlers) listSTKPushes(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, err := h.reads().GetPaymentRequest(r.Context(), id); err != nil {
+	if _, err := h.reads().GetCharge(r.Context(), id); err != nil {
 		h.fail(w, r, err)
 		return
 	}
 	out := []stkPushJSON{}
 	if h.d.STK != nil {
-		pushes, err := h.d.STK.ListForRequest(r.Context(), id, stkListLimit)
+		pushes, err := h.d.STK.ListForCharge(r.Context(), id, stkListLimit)
 		if err != nil {
 			h.fail(w, r, err)
 			return

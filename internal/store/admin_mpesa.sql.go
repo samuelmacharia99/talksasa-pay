@@ -46,7 +46,7 @@ type ListMpesaCallbacksAttentionRow struct {
 // Callback inbox for the admin panel. attention_only keeps callbacks that
 // need a look: not processed yet, or processed with an error and no money
 // recorded. (Notes on callbacks that did record money — duplicate receipt,
-// held in suspense — are not failures; those payments surface elsewhere.)
+// held unmatched — are not failures; those payments surface elsewhere.)
 func (q *Queries) ListMpesaCallbacksAttention(ctx context.Context, arg ListMpesaCallbacksAttentionParams) ([]ListMpesaCallbacksAttentionRow, error) {
 	rows, err := q.db.Query(ctx, listMpesaCallbacksAttention,
 		arg.AttentionOnly,

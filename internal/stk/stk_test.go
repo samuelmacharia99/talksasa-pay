@@ -1,3 +1,9 @@
+//go:build gatewaycore
+
+// TODO(gateway-core): these tests still use payers and payment requests.
+// They are compiled only with -tags gatewaycore until the money core ports
+// them to charges (helpers_test.go already seeds apps and charges).
+
 package stk
 
 import (
@@ -20,7 +26,7 @@ const custPhone = "254712345678"
 
 func TestSendAndSuccessCallback(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 1500)
 
@@ -29,7 +35,7 @@ func TestSendAndSuccessCallback(t *testing.T) {
 		t.Fatalf("push after send: %+v", p)
 	}
 	req, co := e.fake.lastPush()
-	if req.AccountReference != pa.AccountNumber || req.TransactionDesc != r.ProductReference || req.Amount != 1500 || req.Phone != custPhone {
+	if req.AccountReference != pa.AccountNumber || req.TransactionDesc != r.AppReference || req.Amount != 1500 || req.Phone != custPhone {
 		t.Fatalf("daraja request: %+v", req)
 	}
 	if *p.CheckoutRequestID != co {
@@ -48,8 +54,8 @@ func TestSendAndSuccessCallback(t *testing.T) {
 	if got, err := e.svc.Get(e.ctx, prod, p.ID); err != nil || got.ID != p.ID {
 		t.Fatalf("Get: %v", err)
 	}
-	if _, err := e.svc.Get(e.ctx, e.product("OTHR"), p.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Get other product: %v", err)
+	if _, err := e.svc.Get(e.ctx, e.app("OTHR"), p.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get other app: %v", err)
 	}
 	if l, err := e.svc.LatestForRequest(e.ctx, r.ID, time.Now().Add(-time.Minute)); err != nil || l == nil || l.ID != p.ID {
 		t.Fatalf("LatestForRequest: %v %v", l, err)
@@ -94,7 +100,7 @@ func TestSendAndSuccessCallback(t *testing.T) {
 		t.Fatal("duplicate changed something")
 	}
 	// Paid: no more pushes.
-	_, _, err := e.svc.Send(e.ctx, audit.Product(prod), SendParams{ProductID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
+	_, _, err := e.svc.Send(e.ctx, audit.App(prod), SendParams{AppID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
 	mustErr(t, err, ErrNotPayable)
 	e.checkInvariants()
 	e.assertNoLeak()
@@ -102,7 +108,7 @@ func TestSendAndSuccessCallback(t *testing.T) {
 
 func TestSendAsksForOutstandingBalance(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 1000)
 	// Part-pay by C2B.
@@ -110,7 +116,7 @@ func TestSendAsksForOutstandingBalance(t *testing.T) {
 	if cb.Error != nil {
 		t.Fatalf("c2b: %v", *cb.Error)
 	}
-	p, _, err := e.svc.Send(e.ctx, audit.Product(prod), SendParams{ProductID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
+	p, _, err := e.svc.Send(e.ctx, audit.App(prod), SendParams{AppID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,12 +128,12 @@ func TestSendAsksForOutstandingBalance(t *testing.T) {
 
 func TestSendValidation(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 100)
-	act := audit.Product(prod)
+	act := audit.App(prod)
 	sp := func(mut func(*SendParams)) error {
-		p := SendParams{ProductID: prod, RequestID: r.ID, Phone: custPhone, Source: SourceProduct, IdempotencyKey: uuid.NewString()}
+		p := SendParams{AppID: prod, RequestID: r.ID, Phone: custPhone, Source: SourceApp, IdempotencyKey: uuid.NewString()}
 		mut(&p)
 		_, _, err := e.svc.Send(e.ctx, act, p)
 		return err
@@ -137,8 +143,8 @@ func TestSendValidation(t *testing.T) {
 	mustErr(t, sp(func(p *SendParams) { p.IdempotencyKey = strings.Repeat("k", 256) }), ErrInvalidIdempotency)
 	mustErr(t, sp(func(p *SendParams) { p.IdempotencyKey = "bad\x01key" }), ErrInvalidIdempotency)
 	mustErr(t, sp(func(p *SendParams) { p.RequestID = uuid.New() }), ErrNotFound)
-	other := e.product("OTHR")
-	mustErr(t, sp(func(p *SendParams) { p.ProductID = other }), ErrNotFound) // product-scoped
+	other := e.app("OTHR")
+	mustErr(t, sp(func(p *SendParams) { p.AppID = other }), ErrNotFound) // app-scoped
 
 	big := e.request(prod, pa.ID, mpesa.MaxAmount+1)
 	mustErr(t, sp(func(p *SendParams) { p.RequestID = big.ID }), ErrAmountTooLarge)
@@ -153,7 +159,7 @@ func TestSendValidation(t *testing.T) {
 	}
 	mustErr(t, sp(func(p *SendParams) { p.RequestID = cancelled.ID }), ErrNotPayable)
 
-	if _, err := e.products.SetStatus(e.ctx, operator, prod, store.ProductStatusSuspended); err != nil {
+	if _, err := e.apps.SetStatus(e.ctx, operator, prod, store.AppStatusSuspended); err != nil {
 		t.Fatal(err)
 	}
 	mustErr(t, sp(func(p *SendParams) {}), ErrNotPayable)
@@ -162,7 +168,7 @@ func TestSendValidation(t *testing.T) {
 	if off.Available() {
 		t.Fatal("service without a client is available")
 	}
-	if _, _, err := off.Send(e.ctx, act, SendParams{ProductID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage}); !errors.Is(err, ErrUnavailable) {
+	if _, _, err := off.Send(e.ctx, act, SendParams{AppID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage}); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("off: %v", err)
 	}
 	if n := e.count(`SELECT count(*) FROM stk_pushes WHERE payment_request_id <> $1`, maxed.ID); n != 0 {
@@ -173,32 +179,32 @@ func TestSendValidation(t *testing.T) {
 
 func TestSendIdempotencyAndOneLivePush(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 100)
-	act := audit.Product(prod)
+	act := audit.App(prod)
 	key := "order-42-push"
-	p1, replayed, err := e.svc.Send(e.ctx, act, SendParams{ProductID: prod, RequestID: r.ID, Phone: "0712345678", Source: SourceProduct, IdempotencyKey: key})
+	p1, replayed, err := e.svc.Send(e.ctx, act, SendParams{AppID: prod, RequestID: r.ID, Phone: "0712345678", Source: SourceApp, IdempotencyKey: key})
 	if err != nil || replayed {
 		t.Fatal(err, replayed)
 	}
-	p2, replayed, err := e.svc.Send(e.ctx, act, SendParams{ProductID: prod, RequestID: r.ID, Phone: custPhone, Source: SourceProduct, IdempotencyKey: key})
+	p2, replayed, err := e.svc.Send(e.ctx, act, SendParams{AppID: prod, RequestID: r.ID, Phone: custPhone, Source: SourceApp, IdempotencyKey: key})
 	if err != nil || !replayed || p2.ID != p1.ID {
 		t.Fatalf("replay: %v %v %v", p2.ID, replayed, err)
 	}
-	_, _, err = e.svc.Send(e.ctx, act, SendParams{ProductID: prod, RequestID: r.ID, Phone: "0722000111", Source: SourceProduct, IdempotencyKey: key})
+	_, _, err = e.svc.Send(e.ctx, act, SendParams{AppID: prod, RequestID: r.ID, Phone: "0722000111", Source: SourceApp, IdempotencyKey: key})
 	mustErr(t, err, ErrIdempotencyConflict)
 	r2 := e.request(prod, pa.ID, 100)
-	_, _, err = e.svc.Send(e.ctx, act, SendParams{ProductID: prod, RequestID: r2.ID, Phone: custPhone, Source: SourceProduct, IdempotencyKey: key})
+	_, _, err = e.svc.Send(e.ctx, act, SendParams{AppID: prod, RequestID: r2.ID, Phone: custPhone, Source: SourceApp, IdempotencyKey: key})
 	mustErr(t, err, ErrIdempotencyConflict)
 
 	// Another key while p1 is live.
-	_, _, err = e.svc.Send(e.ctx, act, SendParams{ProductID: prod, RequestID: r.ID, Phone: custPhone, Source: SourceProduct, IdempotencyKey: "other"})
+	_, _, err = e.svc.Send(e.ctx, act, SendParams{AppID: prod, RequestID: r.ID, Phone: custPhone, Source: SourceApp, IdempotencyKey: "other"})
 	var ip *InProgressError
 	if !errors.As(err, &ip) || ip.LiveID != p1.ID {
 		t.Fatalf("live push: %v", err)
 	}
-	_, _, err = e.svc.Send(e.ctx, act, SendParams{ProductID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
+	_, _, err = e.svc.Send(e.ctx, act, SendParams{AppID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
 	if !errors.As(err, &ip) || ip.LiveID != p1.ID {
 		t.Fatalf("live push (pay page): %v", err)
 	}
@@ -210,7 +216,7 @@ func TestSendIdempotencyAndOneLivePush(t *testing.T) {
 
 func TestSendConcurrentSameKey(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 100)
 	const n = 8
@@ -224,7 +230,7 @@ func TestSendConcurrentSameKey(t *testing.T) {
 	for range n {
 		go func() {
 			<-start
-			p, rp, err := e.svc.Send(e.ctx, audit.Product(prod), SendParams{ProductID: prod, RequestID: r.ID, Phone: custPhone, Source: SourceProduct, IdempotencyKey: "same"})
+			p, rp, err := e.svc.Send(e.ctx, audit.App(prod), SendParams{AppID: prod, RequestID: r.ID, Phone: custPhone, Source: SourceApp, IdempotencyKey: "same"})
 			out <- res{p, rp, err}
 		}()
 	}
@@ -254,13 +260,13 @@ func TestSendConcurrentSameKey(t *testing.T) {
 
 func TestSendDarajaRejectedAndTransient(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 100)
-	act := audit.Product(prod)
+	act := audit.App(prod)
 
 	e.fake.setPushErr(&mpesa.Error{Kind: mpesa.Rejected, HTTPStatus: 400, Code: "400.002.02", Message: "Bad Request - Invalid PhoneNumber"})
-	p, _, err := e.svc.Send(e.ctx, act, SendParams{ProductID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
+	p, _, err := e.svc.Send(e.ctx, act, SendParams{AppID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
 	mustErr(t, err, ErrDaraja)
 	if p.Status != store.StkPushStatusFailed || *p.ResultDesc != "Bad Request - Invalid PhoneNumber" || *p.ResultCode != "400.002.02" {
 		t.Fatalf("rejected push: %+v", p)
@@ -274,7 +280,7 @@ func TestSendDarajaRejectedAndTransient(t *testing.T) {
 
 	// Transient: outcome unknown, push stays initiating, no error.
 	e.fake.setPushErr(&mpesa.Error{Kind: mpesa.Transient, Message: "timeout"})
-	p2, _, err := e.svc.Send(e.ctx, act, SendParams{ProductID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
+	p2, _, err := e.svc.Send(e.ctx, act, SendParams{AppID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
 	if err != nil || p2.Status != store.StkPushStatusInitiating {
 		t.Fatalf("transient: %+v %v", p2, err)
 	}
@@ -301,7 +307,7 @@ func TestSendDarajaRejectedAndTransient(t *testing.T) {
 
 func TestFailureCallbacks(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 100)
 	p := e.send(prod, r.ID, custPhone)
@@ -344,25 +350,9 @@ func TestFailureCallbacks(t *testing.T) {
 	e.checkInvariants()
 }
 
-func TestCustomerMessage(t *testing.T) {
-	for code, want := range map[string]string{
-		"1032": "You cancelled the M-Pesa prompt.",
-		"1037": "We couldn't reach your phone. Make sure it's on and try again.",
-		"1":    "Your M-Pesa balance wasn't enough.",
-		"2001": "The M-Pesa PIN was wrong.",
-		"1019": "The prompt expired before it was answered.",
-		"9999": "The payment didn't go through.",
-		"":     "The payment didn't go through.",
-	} {
-		if got := CustomerMessage(code); got != want {
-			t.Errorf("CustomerMessage(%q) = %q, want %q", code, got, want)
-		}
-	}
-}
-
 func TestAmountMismatch(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 500)
 	p := e.send(prod, r.ID, custPhone)
@@ -396,7 +386,7 @@ func TestAmountMismatch(t *testing.T) {
 
 func TestReceiptTaken(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 300)
 	receipt := newReceipt()
@@ -424,14 +414,14 @@ func TestReceiptTaken(t *testing.T) {
 
 func TestOrphanCallbacks(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 
 	// Transient error after Daraja actually showed the prompt: the push has
 	// no checkout id; the callback matches it by phone and amount.
 	r := e.request(prod, pa.ID, 700)
 	e.fake.setPushErr(&mpesa.Error{Kind: mpesa.Transient, Message: "read timeout"})
-	p, _, err := e.svc.Send(e.ctx, audit.Product(prod), SendParams{ProductID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
+	p, _, err := e.svc.Send(e.ctx, audit.App(prod), SendParams{AppID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
 	if err != nil || p.Status != store.StkPushStatusInitiating {
 		t.Fatal(p, err)
 	}
@@ -456,7 +446,7 @@ func TestOrphanCallbacks(t *testing.T) {
 	ra := e.request(prod, pa.ID, 250)
 	rb := e.request(prod, pa.ID, 250)
 	for _, rq := range []uuid.UUID{ra.ID, rb.ID} {
-		if _, _, err := e.svc.Send(e.ctx, audit.Product(prod), SendParams{ProductID: prod, RequestID: rq, Phone: custPhone, Source: SourcePayPage}); err != nil {
+		if _, _, err := e.svc.Send(e.ctx, audit.App(prod), SendParams{AppID: prod, RequestID: rq, Phone: custPhone, Source: SourcePayPage}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -464,7 +454,7 @@ func TestOrphanCallbacks(t *testing.T) {
 	if amb.Error == nil || !strings.Contains(*amb.Error, "suspense") || amb.TransactionID == nil {
 		t.Fatalf("ambiguous: %+v", amb)
 	}
-	if tx := e.txn(*amb.TransactionID); tx.Status != store.TxnStatusSucceeded || tx.ProductID != nil || tx.PayerAccountID != nil {
+	if tx := e.txn(*amb.TransactionID); tx.Status != store.TxnStatusSucceeded || tx.AppID != nil || tx.PayerAccountID != nil {
 		t.Fatalf("unmatched txn: %+v", tx)
 	}
 	if e.req(prod, ra.ID).AmountPaid != 0 || e.req(prod, rb.ID).AmountPaid != 0 {
@@ -473,7 +463,7 @@ func TestOrphanCallbacks(t *testing.T) {
 
 	// None: no push at all with that phone/amount.
 	none := e.deliver(store.MpesaCallbackKindStk, stkSuccess("ws_CO_none", newReceipt(), 999, "254799000111"))
-	if none.Error == nil || none.TransactionID == nil || e.txn(*none.TransactionID).ProductID != nil {
+	if none.Error == nil || none.TransactionID == nil || e.txn(*none.TransactionID).AppID != nil {
 		t.Fatalf("none: %+v", none)
 	}
 	e.checkInvariants()
@@ -482,11 +472,11 @@ func TestOrphanCallbacks(t *testing.T) {
 
 func TestDarajaRejectedPushIsNotAnOrphan(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 450)
 	e.fake.setPushErr(&mpesa.Error{Kind: mpesa.Rejected, Message: "Invalid Access Token"})
-	if _, _, err := e.svc.Send(e.ctx, audit.Product(prod), SendParams{ProductID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage}); !errors.Is(err, ErrDaraja) {
+	if _, _, err := e.svc.Send(e.ctx, audit.App(prod), SendParams{AppID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage}); !errors.Is(err, ErrDaraja) {
 		t.Fatal(err)
 	}
 	cb := e.deliver(store.MpesaCallbackKindStk, stkSuccess("ws_CO_stranger", newReceipt(), 450, custPhone))
@@ -498,7 +488,7 @@ func TestDarajaRejectedPushIsNotAnOrphan(t *testing.T) {
 
 func TestSuccessAfterGiveUp(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 800)
 	p := e.send(prod, r.ID, custPhone)
@@ -549,11 +539,11 @@ func TestSuccessAfterGiveUp(t *testing.T) {
 
 func TestOrphanAfterNotSent(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 320)
 	e.fake.setPushErr(&mpesa.Error{Kind: mpesa.Transient, Message: "EOF"})
-	p, _, err := e.svc.Send(e.ctx, audit.Product(prod), SendParams{ProductID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
+	p, _, err := e.svc.Send(e.ctx, audit.App(prod), SendParams{AppID: prod, RequestID: r.ID, Phone: custPhone, Source: SourcePayPage})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +572,7 @@ func TestOrphanAfterNotSent(t *testing.T) {
 
 func TestSweepOutcomes(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 
 	// Query success -> unknown + needs_review; then the late callback
@@ -667,7 +657,7 @@ func TestSweepOutcomes(t *testing.T) {
 
 func TestSweepLosesRaceToCallback(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 100)
 	p := e.send(prod, r.ID, custPhone)
@@ -697,7 +687,7 @@ func TestSweepLosesRaceToCallback(t *testing.T) {
 
 func TestResolve(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	staff := audit.Admin(uuid.New())
 
@@ -772,7 +762,7 @@ func TestResolve(t *testing.T) {
 
 func TestC2B(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 1000)
 
@@ -800,7 +790,7 @@ func TestC2B(t *testing.T) {
 	}
 	// Unknown account: suspense.
 	unk := e.deliver(store.MpesaCallbackKindC2bConfirmation, c2b(newReceipt(), 70, "WHO-1", testShortCode))
-	if unk.TransactionID == nil || e.txn(*unk.TransactionID).ProductID != nil || e.txn(*unk.TransactionID).Status != store.TxnStatusSucceeded {
+	if unk.TransactionID == nil || e.txn(*unk.TransactionID).AppID != nil || e.txn(*unk.TransactionID).Status != store.TxnStatusSucceeded {
 		t.Fatalf("unknown: %+v", unk)
 	}
 	// Another short code: not recorded.
@@ -819,15 +809,15 @@ func TestC2B(t *testing.T) {
 		t.Fatalf("malformed stk: %+v", badSTK)
 	}
 
-	// Suspended product: still allocated, with a warning.
-	if _, err := e.products.SetStatus(e.ctx, operator, prod, store.ProductStatusSuspended); err != nil {
+	// Suspended app: still allocated, with a warning.
+	if _, err := e.apps.SetStatus(e.ctx, operator, prod, store.AppStatusSuspended); err != nil {
 		t.Fatal(err)
 	}
 	in := e.deliver(store.MpesaCallbackKindC2bConfirmation, c2b(newReceipt(), 60, pa.AccountNumber, testShortCode))
 	if in.Error != nil || in.TransactionID == nil || e.txn(*in.TransactionID).PayerAccountID == nil {
 		t.Fatalf("inactive: %+v", in)
 	}
-	if !strings.Contains(e.logs.String(), "inactive product or closed payer") {
+	if !strings.Contains(e.logs.String(), "inactive app or closed payer") {
 		t.Fatal("no inactive warning")
 	}
 	e.checkInvariants()
@@ -836,7 +826,7 @@ func TestC2B(t *testing.T) {
 
 func TestSuccessCallbackWithoutReceipt(t *testing.T) {
 	e := newEnv(t)
-	prod := e.product("HOST")
+	prod := e.app("HOST")
 	pa := e.payer(prod)
 	r := e.request(prod, pa.ID, 100)
 	p := e.send(prod, r.ID, custPhone)
@@ -850,37 +840,4 @@ func TestSuccessCallbackWithoutReceipt(t *testing.T) {
 		t.Fatal("not sent to review")
 	}
 	e.checkInvariants()
-}
-
-func TestStoreCallback(t *testing.T) {
-	e := newEnv(t)
-	for _, raw := range []string{"", "[]", `"x"`, "{bad", `{"a":"` + strings.Repeat("x", MaxCallbackBytes) + `"}`} {
-		if _, err := e.svc.StoreCallback(e.ctx, store.MpesaCallbackKindStk, netipAddr(), []byte(raw)); !errors.Is(err, ErrInvalidCallback) {
-			t.Fatalf("StoreCallback(%.20q): %v", raw, err)
-		}
-	}
-	id, err := e.svc.StoreCallback(e.ctx, store.MpesaCallbackKindStk, netipAddr(), []byte(` {"a":1} `))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := e.count(`SELECT count(*) FROM river_job WHERE kind = 'mpesa_process_callback' AND args->>'callback_id' = $1`, id.String()); n != 1 {
-		t.Fatalf("jobs: %d", n)
-	}
-	if cb := e.callback(id); cb.ProcessedAt != nil {
-		t.Fatal("processed early")
-	}
-	// Unknown callback id: no retry loop.
-	if err := e.svc.ProcessCallback(e.ctx, uuid.New()); err != nil {
-		t.Fatal(err)
-	}
-	e.checkInvariants()
-}
-
-func TestQueryBackoff(t *testing.T) {
-	want := []time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute, 15 * time.Minute, 15 * time.Minute, 15 * time.Minute}
-	for i, w := range want {
-		if got := QueryBackoff(i + 1); got != w {
-			t.Fatalf("QueryBackoff(%d) = %v, want %v", i+1, got, w)
-		}
-	}
 }

@@ -26,9 +26,9 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/talksasa/talksasa-pay/internal/apiview"
+	"github.com/talksasa/talksasa-pay/internal/app"
 	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
-	"github.com/talksasa/talksasa-pay/internal/product"
 	"github.com/talksasa/talksasa-pay/internal/queue"
 	"github.com/talksasa/talksasa-pay/internal/store"
 )
@@ -38,26 +38,26 @@ const workerActor = "system:webhook-worker"
 
 // Defaults for Options.
 const (
-	DefaultBreakerThreshold      = 5
-	DefaultBreakerCooldown       = time.Minute
-	DefaultMaxInFlightPerProduct = 10
+	DefaultBreakerThreshold  = 5
+	DefaultBreakerCooldown   = time.Minute
+	DefaultMaxInFlightPerApp = 10
 
 	maxStoredBody  = 1024 // characters of response body kept per attempt
 	maxStoredError = 500
 )
 
-// SecretSource returns a product's current and (within the rotation grace)
-// previous webhook secret. *product.Service implements it.
+// SecretSource returns an app's current and (within the rotation grace)
+// previous webhook secret. *app.Service implements it.
 type SecretSource interface {
-	WebhookSecrets(ctx context.Context, productID uuid.UUID) (current, previous []byte, err error)
+	WebhookSecrets(ctx context.Context, appID uuid.UUID) (current, previous []byte, err error)
 }
 
-var _ SecretSource = (*product.Service)(nil)
+var _ SecretSource = (*app.Service)(nil)
 
 // Options configures the Worker.
 type Options struct {
 	Pool    *db.Pool
-	Secrets SecretSource // the product service
+	Secrets SecretSource // the app service
 	Logger  *slog.Logger
 	// Client must come from NewHTTPClient (SSRF protection lives there).
 	Client *http.Client
@@ -67,9 +67,9 @@ type Options struct {
 	// the River job timeout is this plus a margin for database work.
 	Timeout time.Duration
 
-	BreakerThreshold      int           // consecutive failures that open the breaker (default 5)
-	BreakerCooldown       time.Duration // how long it stays open (default 1 min)
-	MaxInFlightPerProduct int           // concurrent deliveries per product (default 10)
+	BreakerThreshold  int           // consecutive failures that open the breaker (default 5)
+	BreakerCooldown   time.Duration // how long it stays open (default 1 min)
+	MaxInFlightPerApp int           // concurrent deliveries per app (default 10)
 
 	// Backoff overrides the retry delay (tests); nil uses Backoff.
 	Backoff func(attempt int) time.Duration
@@ -108,8 +108,8 @@ func NewWorker(o Options) (*Worker, error) {
 	if o.BreakerCooldown <= 0 {
 		o.BreakerCooldown = DefaultBreakerCooldown
 	}
-	if o.MaxInFlightPerProduct <= 0 {
-		o.MaxInFlightPerProduct = DefaultMaxInFlightPerProduct
+	if o.MaxInFlightPerApp <= 0 {
+		o.MaxInFlightPerApp = DefaultMaxInFlightPerApp
 	}
 	if o.Backoff == nil {
 		o.Backoff = Backoff
@@ -120,7 +120,7 @@ func NewWorker(o Options) (*Worker, error) {
 	return &Worker{
 		pool: o.Pool, secrets: o.Secrets, logger: o.Logger, client: o.Client,
 		allowHTTP: o.Env == config.EnvDevelopment, timeout: o.Timeout, backoff: o.Backoff, now: o.Now,
-		endpoints: newEndpoints(o.BreakerThreshold, o.BreakerCooldown, o.MaxInFlightPerProduct, o.Now),
+		endpoints: newEndpoints(o.BreakerThreshold, o.BreakerCooldown, o.MaxInFlightPerApp, o.Now),
 	}, nil
 }
 
@@ -146,7 +146,7 @@ func (w *Worker) NextRetry(job *river.Job[queue.WebhookArgs]) time.Time {
 func (w *Worker) Work(ctx context.Context, job *river.Job[queue.WebhookArgs]) error {
 	args := job.Args
 	q := store.New(w.pool)
-	log := w.logger.With(slog.String("event_id", args.EventID.String()), slog.String("product_id", args.ProductID.String()),
+	log := w.logger.With(slog.String("event_id", args.EventID.String()), slog.String("app_id", args.AppID.String()),
 		slog.Int("job_attempt", job.Attempt))
 
 	ev, err := q.GetEventInternal(ctx, args.EventID)
@@ -156,8 +156,8 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[queue.WebhookArgs]) er
 	if err != nil {
 		return fmt.Errorf("webhook: load event: %w", err)
 	}
-	if ev.ProductID != args.ProductID {
-		return river.JobCancel(errors.New("webhook: job product does not match the event"))
+	if ev.AppID != args.AppID {
+		return river.JobCancel(errors.New("webhook: job app does not match the event"))
 	}
 	d, err := q.GetWebhookDelivery(ctx, ev.ID)
 	if db.IsNotFound(err) {
@@ -172,15 +172,15 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[queue.WebhookArgs]) er
 		return nil
 	}
 
-	p, err := q.GetProductWebhookTarget(ctx, ev.ProductID)
+	p, err := q.GetAppWebhookTarget(ctx, ev.AppID)
 	if err != nil {
-		return fmt.Errorf("webhook: load product: %w", err)
+		return fmt.Errorf("webhook: load app: %w", err)
 	}
 	switch {
 	case p.WebhookUrl == nil || strings.TrimSpace(*p.WebhookUrl) == "":
 		return w.skip(ctx, ev.ID, "no webhook URL configured")
-	case p.Status != store.ProductStatusActive:
-		return w.skip(ctx, ev.ID, "product suspended")
+	case p.Status != store.AppStatusActive:
+		return w.skip(ctx, ev.ID, "app suspended")
 	}
 	target, err := url.Parse(strings.TrimSpace(*p.WebhookUrl))
 	if err != nil || target.Host == "" || (target.Scheme != "https" && (target.Scheme != "http" || !w.allowHTTP)) {
@@ -193,7 +193,7 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[queue.WebhookArgs]) er
 		return river.JobCancel(errors.New("webhook: unusable webhook URL"))
 	}
 
-	adm, wait, tk := w.endpoints.acquire(ev.ProductID)
+	adm, wait, tk := w.endpoints.acquire(ev.AppID)
 	switch adm {
 	case rejectedOpen:
 		// Snoozing does not consume an attempt, so the event keeps all its retries.
@@ -205,7 +205,7 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[queue.WebhookArgs]) er
 	v := noVerdict
 	defer func() { w.endpoints.release(tk, v) }()
 
-	cur, prev, err := w.secrets.WebhookSecrets(ctx, ev.ProductID)
+	cur, prev, err := w.secrets.WebhookSecrets(ctx, ev.AppID)
 	if err != nil {
 		return fmt.Errorf("webhook: load signing secret: %w", err)
 	}

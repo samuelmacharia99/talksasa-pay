@@ -1,6 +1,6 @@
 -- name: InsertAudit :exec
-INSERT INTO audit_log (actor_type, actor_id, action, entity_type, entity_id, product_id, details)
-VALUES (@actor_type, @actor_id, @action, @entity_type, @entity_id, @product_id, @details);
+INSERT INTO audit_log (actor_type, actor_id, action, entity_type, entity_id, app_id, details)
+VALUES (@actor_type, @actor_id, @action, @entity_type, @entity_id, @app_id, @details);
 
 -- name: VerifyAuditChain :one
 -- 0 means the whole chain verifies.

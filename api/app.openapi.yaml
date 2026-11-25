@@ -1,0 +1,605 @@
+openapi: 3.1.0
+info:
+  title: Talksasa Pay app API
+  version: "2026-11-25"
+  description: |
+    The API apps use to collect money through the Talksasa M-Pesa paybill,
+    like Paystack or Flutterwave. An app creates a **charge** ("collect KES X
+    for my reference Y"), the gateway prompts the customer's phone (STK push)
+    and/or the customer pays at the paybill with the charge's account number,
+    and the gateway reports the result, with the M-Pesa receipt, by webhook
+    and in the events feed. The gateway knows nothing about the app's
+    customers or invoices: keep your own mapping from `reference` (and
+    `metadata`) to your records.
+
+    **Authentication.** `Authorization: Bearer tsp_live_...` (or `tsp_test_`
+    outside production). Every request is scoped to the key's app; there is
+    no way to name another app (another app's ids are simply 404). A key may
+    be restricted to an IP allow-list (403 `ip_not_allowed` otherwise). A
+    suspended app's keys stop working (401).
+
+    **Money.** Amounts are integer Kenyan shillings (KES), 1 to 250,000 per
+    charge. There are no decimals. Apps can request and read money; they can
+    never record, move or refund it.
+
+    **Money rules.**
+      - A charge's amount, reference and account number never change. To
+        charge a different amount, cancel and create a new charge.
+      - `reference` is unique among all your charges (409
+        `duplicate_reference`).
+      - Every charge has an `account_number`: yours if you send one (it must
+        start with your account prefix, a hyphen and a digit, e.g.
+        `HOST-1042`), otherwise generated (`HOST-4K7QZ9M`). It is the
+        AccountReference of every prompt and what the customer types at the
+        paybill.
+      - A charge is `succeeded` only when Safaricom confirms a payment with
+        an M-Pesa receipt for exactly the charge amount. Each receipt counts
+        once.
+      - A failed prompt does NOT fail the charge: you get `stk_push.failed`
+        and the charge stays `pending` until it is paid, cancelled or
+        expires. Prompt again with `POST /charges/{id}/stk-push` (one live
+        prompt at a time).
+      - Late money is never dropped: money for an `expired` or `cancelled`
+        charge still makes it `succeeded` (`charge.succeeded`). Handle a
+        payment that arrives after you cancelled.
+      - Money for a charge that already succeeded (the customer paid twice)
+        is reported as `payment.received` with `duplicate_of_charge` set.
+        You (or Talksasa staff) refund it.
+      - Paybill payments whose account number starts with your prefix but
+        match no waiting charge (same account number and exact amount) are
+        reported as `payment.received`: you decide what they pay.
+      - Talksasa staff may record a reversal of a payment (e.g. Safaricom
+        reversed it): you get `transaction.reversed` and the charge becomes
+        `reversed`.
+
+    **Idempotency.** Every write is safe to retry. `POST /charges` and
+    `POST /charges/{id}/stk-push` require an `Idempotency-Key` header: the
+    same key with the same body returns the original result with 200 and
+    `Idempotent-Replayed: true`; the same key with a different body is 409
+    `idempotency_conflict`. Cancel is a no-op on an already-cancelled charge.
+
+    **Events.** Every change is delivered as a signed webhook AND is
+    available from `GET /events`, a gap-free feed. Webhooks are at least once
+    and may arrive out of order: de-duplicate by event `id`, and when in
+    doubt re-read the resource or the feed.
+
+    **Errors** are RFC 9457 `application/problem+json` with a stable `code`.
+    `429` and `503` carry `Retry-After`; back off and retry. `503 busy` and
+    `503 overloaded` mean nothing was changed. `503 timeout` means the
+    outcome is unknown: retry with the SAME Idempotency-Key (or re-read),
+    never with a new one. Quote `request_id` (also in the `X-Request-Id`
+    header) when asking for help.
+servers:
+  - url: /v1
+security:
+  - apiKey: []
+paths:
+  /whoami:
+    get:
+      operationId: whoami
+      summary: The app this key belongs to
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhoAmI" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /charges:
+    post:
+      operationId: createCharge
+      summary: Create a charge (and optionally prompt the customer's phone)
+      description: |
+        Creates a `pending` charge for exactly `amount` KES. The response
+        carries `checkout_url` (a hosted pay page you can send the customer)
+        and `paybill` (manual M-Pesa instructions).
+
+        With `phone`, the first M-Pesa prompt is sent right away and
+        returned as `latest_stk_push`, exactly as `POST
+        /charges/{id}/stk-push` would. The charge is created even if the
+        prompt cannot be sent: `latest_stk_push` is then the `failed` push
+        (see its `result_desc`), or null when M-Pesa is unavailable. Prompt
+        again later or let the customer pay at the paybill.
+
+        Errors: 409 `duplicate_reference` (a charge with this reference
+        exists), 409 `idempotency_conflict`, 400 `idempotency_key_required`,
+        422 `validation_failed` (field errors in `errors`), 403
+        `app_suspended`.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChargeInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Charge" }
+        "200":
+          description: Replay of an earlier identical request (same Idempotency-Key)
+          headers:
+            Idempotent-Replayed: { schema: { type: string, enum: ["true"] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Charge" }
+        default: { $ref: "#/components/responses/Problem" }
+    get:
+      operationId: listCharges
+      summary: Charges, newest first
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/ChargeStatus" } }
+        - { name: reference, in: query, description: Exact reference, schema: { type: string, maxLength: 128 } }
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Charge" } }
+                  next_cursor: { type: [string, "null"] }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /charges/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ID"
+    get:
+      operationId: getCharge
+      summary: One charge, with its latest prompt
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Charge" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /charges/{id}/stk-push:
+    parameters:
+      - $ref: "#/components/parameters/ID"
+    post:
+      operationId: sendSTKPush
+      summary: Send an M-Pesa payment prompt for the charge
+      description: |
+        Asks Safaricom to show "Pay KES <amount> to Talksasa" on the
+        customer's phone. The amount is always the charge's exact amount.
+        Only `pending` charges can be prompted (409 `not_payable`), and only
+        one prompt per charge can be live at a time (409 `stk_in_progress`
+        with the live push's id in `detail`). After a prompt fails, prompt
+        again.
+
+        The response is 202 with the push. Its outcome arrives as events:
+        `stk_push.sent`, then `stk_push.succeeded` together with
+        `charge.succeeded`, or `stk_push.failed` (`result_code` /
+        `result_desc`: cancelled by the customer, timed out, insufficient
+        funds, wrong PIN...; the charge stays pending). If Safaricom never
+        calls back, Talksasa checks with Safaricom after about a minute; a
+        success without a receipt becomes `stk_push.needs_review` and
+        `charge.needs_review` while staff confirm it — do NOT treat that as
+        paid.
+
+        Requires an `Idempotency-Key`: the same key returns the same push
+        (200, `Idempotent-Replayed: true`); the same key with a different
+        phone or charge is 409 `idempotency_conflict`. On `503 timeout`
+        retry with the SAME key: a new key could send the customer a second
+        prompt.
+
+        503 `mpesa_unavailable`: M-Pesa is not enabled in this environment.
+        502 `mpesa_error`: Safaricom refused or failed to send the prompt
+        (the failed push's id is in the problem's `detail`; nothing was
+        charged).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/STKPushInput" }
+      responses:
+        "202":
+          description: Prompt sent (or being sent) to the phone
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/STKPush" }
+        "200":
+          description: Replay of an earlier identical request (same Idempotency-Key)
+          headers:
+            Idempotent-Replayed: { schema: { type: string, enum: ["true"] } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/STKPush" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /charges/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/ID"
+    post:
+      operationId: cancelCharge
+      summary: Cancel a pending charge
+      description: |
+        Emits `charge.cancelled`. Idempotent: cancelling an already-cancelled
+        charge returns it with 200. Only `pending` charges can be cancelled
+        (409 `not_cancellable`). A live prompt is not withdrawn: if the
+        customer still pays, the charge becomes `succeeded`
+        (`charge.succeeded`) — late money is never dropped.
+      responses:
+        "200":
+          description: Cancelled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Charge" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /stk-pushes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ID"
+    get:
+      operationId: getSTKPush
+      summary: One STK push
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/STKPush" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /transactions:
+    get:
+      operationId: listTransactions
+      summary: Money received (and reversed) for your app, newest first
+      parameters:
+        - { name: charge_id, in: query, schema: { type: string, format: uuid } }
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Transaction" } }
+                  next_cursor: { type: [string, "null"] }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /transactions/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ID"
+    get:
+      operationId: getTransaction
+      summary: One transaction
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Transaction" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /events:
+    get:
+      operationId: listEvents
+      summary: Gap-free feed of every event, oldest first
+      description: |
+        Store `next_cursor` after processing a page and pass it as `after`
+        next time. The feed never skips an event, even one whose transaction
+        committed late, so polling it is a complete alternative (or backstop)
+        to webhooks. Start with no `after` to read from the beginning.
+      parameters:
+        - { name: after, in: query, schema: { type: string, maxLength: 200 } }
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor, has_more]
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Event" } }
+                  next_cursor: { type: [string, "null"], description: "Pass as `after`; null when data is empty (keep your previous cursor)." }
+                  has_more: { type: boolean }
+        default: { $ref: "#/components/responses/Problem" }
+
+webhooks:
+  event:
+    post:
+      summary: An event, delivered to the app's webhook URL
+      description: |
+        Headers:
+          - `Talksasa-Event-Id`: the event id (de-duplicate on it)
+          - `Talksasa-Event-Type`
+          - `Talksasa-Signature: t=<unix seconds>,v1=<hex>[,v1=<hex>]` where
+            `v1 = HMAC-SHA256(webhook_secret, "<t>.<raw body>")`. Accept if
+            ANY v1 matches (two appear for 24 h after a secret rotation) and
+            `|now - t| <= 300` seconds. Compare in constant time.
+        Respond 2xx within 10 s. Anything else (or a timeout) is retried
+        with backoff for about 3 days. Process asynchronously if slow.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Event" }
+      responses:
+        "200": { description: Accepted }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: "App API key: tsp_live_<key id>_<secret> (tsp_test_ outside production)."
+  parameters:
+    ID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Unique per logical request (e.g. a UUID, or "invoice-123-v1"). Kept forever.
+      schema: { type: string, minLength: 1, maxLength: 255 }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string, maxLength: 200 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+  responses:
+    Problem:
+      description: Error
+      headers:
+        Retry-After: { schema: { type: integer }, description: "Seconds; on 429 and 503" }
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code:
+          type: string
+          description: Stable machine-readable code.
+          enum:
+            - unauthorized
+            - ip_not_allowed
+            - app_suspended
+            - rate_limited
+            - overloaded
+            - busy
+            - timeout
+            - not_found
+            - method_not_allowed
+            - validation_failed
+            - invalid_json
+            - unsupported_media_type
+            - payload_too_large
+            - idempotency_key_required
+            - idempotency_conflict
+            - duplicate_reference
+            - not_cancellable
+            - not_payable
+            - amount_too_large
+            - stk_in_progress
+            - mpesa_unavailable
+            - mpesa_error
+            - not_implemented
+            - internal_error
+        request_id: { type: string }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
+    WhoAmI:
+      type: object
+      required: [app_id, app_name, account_prefix, key_id]
+      properties:
+        app_id: { type: string, format: uuid }
+        app_name: { type: string }
+        account_prefix: { type: string, description: "Your paybill account-number prefix, e.g. HOST" }
+        key_id: { type: string }
+    ChargeInput:
+      type: object
+      additionalProperties: false
+      required: [reference, amount]
+      properties:
+        reference:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Your own reference (invoice number, order id). Unique among your charges.
+        amount: { type: integer, minimum: 1, maximum: 250000, description: KES }
+        description: { type: string, minLength: 1, maxLength: 500, description: Shown to the customer on the pay page }
+        phone:
+          type: string
+          maxLength: 20
+          description: "Optional Safaricom number to prompt right away: 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX or +2547XXXXXXXX"
+        account_number:
+          type: string
+          maxLength: 12
+          pattern: "^[A-Z]{2,6}-[0-9][A-Z0-9]*$"
+          description: |
+            Optional. Your own account number for this charge (e.g. your
+            customer number HOST-1042): your prefix, a hyphen, a digit, then
+            A-Z/0-9, at most 12 characters. Omit it to get a generated one.
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Any JSON object up to 4096 bytes, echoed back on the charge and its events.
+        expires_in:
+          type: integer
+          minimum: 900
+          maximum: 604800
+          default: 86400
+          description: Seconds until a pending charge expires (15 minutes to 7 days; default 24 hours).
+    ChargeStatus:
+      type: string
+      enum: [pending, needs_review, succeeded, expired, cancelled, reversed]
+      description: |
+        pending: waiting for money (prompts may be retried). needs_review:
+        Safaricom said paid without a receipt; staff are checking (not paid
+        yet). succeeded: paid; see transaction_id. expired / cancelled: no
+        longer prompted (late money still succeeds it). reversed: staff
+        reversed the payment.
+    Paybill:
+      type: object
+      required: [business_number, account_number]
+      properties:
+        business_number: { type: string, description: The Talksasa paybill number }
+        account_number: { type: string, description: What the customer types as the account number }
+    Charge:
+      type: object
+      required: [object, id, reference, amount, currency, description, metadata, account_number, status, checkout_url, paybill,
+        expires_at, succeeded_at, transaction_id, latest_stk_push, created_at, updated_at]
+      properties:
+        object: { type: string, const: charge }
+        id: { type: string, format: uuid }
+        reference: { type: string }
+        amount: { type: integer, description: KES }
+        currency: { type: string, enum: [KES] }
+        description: { type: [string, "null"] }
+        metadata: { type: [object, "null"], additionalProperties: true, description: As you sent it }
+        account_number: { type: string, description: "Paybill account number and STK AccountReference, e.g. HOST-1042" }
+        status: { $ref: "#/components/schemas/ChargeStatus" }
+        checkout_url: { type: string, format: uri, description: Hosted pay page for this charge }
+        paybill:
+          description: Manual M-Pesa instructions while the charge can be paid (pending or needs_review); null otherwise
+          oneOf:
+            - $ref: "#/components/schemas/Paybill"
+            - { type: "null" }
+        expires_at: { type: string, format: date-time }
+        succeeded_at: { type: [string, "null"], format: date-time }
+        transaction_id: { type: [string, "null"], format: uuid, description: The payment that made the charge succeed }
+        latest_stk_push:
+          description: The charge's newest prompt, if any
+          oneOf:
+            - $ref: "#/components/schemas/STKPush"
+            - { type: "null" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Transaction:
+      type: object
+      required: [object, id, kind, direction, channel, status, amount, currency, receipt, phone, account_number, charge_id,
+        reverses_transaction_id, occurred_at, created_at, completed_at]
+      properties:
+        object: { type: string, const: transaction }
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [payment, refund, reversal, adjustment] }
+        direction: { type: string, enum: [in, out] }
+        channel: { type: string, enum: [mpesa_stk, mpesa_c2b, mpesa_b2c, manual] }
+        status: { type: string, enum: [pending, succeeded, failed, cancelled, needs_review] }
+        amount: { type: integer }
+        currency: { type: string, enum: [KES] }
+        receipt: { type: [string, "null"], description: M-Pesa receipt number }
+        phone: { type: [string, "null"], description: Masked }
+        account_number: { type: [string, "null"], description: The account number as the customer typed it (paybill) or as sent with the prompt }
+        charge_id: { type: [string, "null"], format: uuid, description: The charge this money was for, when known }
+        reverses_transaction_id: { type: [string, "null"], format: uuid }
+        occurred_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: [string, "null"], format: date-time }
+    PaymentReceived:
+      description: |
+        Data of `payment.received`: a payment routed to your app that did not
+        pay a waiting charge. `duplicate_of_charge` is set when it named a
+        charge that had already succeeded (the customer paid twice).
+      allOf:
+        - $ref: "#/components/schemas/Transaction"
+        - type: object
+          required: [duplicate_of_charge]
+          properties:
+            duplicate_of_charge: { type: [string, "null"], format: uuid }
+    STKPushInput:
+      type: object
+      additionalProperties: false
+      required: [phone]
+      properties:
+        phone:
+          type: string
+          description: "Safaricom number to prompt: 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX or +2547XXXXXXXX"
+          maxLength: 20
+    STKPush:
+      type: object
+      required: [object, id, charge_id, transaction_id, status, amount, phone, checkout_request_id, result_code, result_desc,
+        created_at, updated_at, completed_at]
+      properties:
+        object: { type: string, const: stk_push }
+        id: { type: string, format: uuid }
+        charge_id: { type: string, format: uuid }
+        transaction_id: { type: string, format: uuid, description: "The M-Pesa transaction that holds (or will hold) this payment: pending until Safaricom answers. If the payment arrived after the prompt had been given up, it is the new transaction it was recorded on." }
+        status:
+          type: string
+          enum: [initiating, sent, succeeded, failed, needs_review]
+          description: |
+            initiating: being sent to Safaricom. sent: on the customer's phone.
+            succeeded: paid (receipt recorded). failed: see result_code/result_desc
+            (the charge stays pending). needs_review: Safaricom reported success
+            without a receipt; staff are confirming. Not paid until
+            charge.succeeded arrives.
+        amount: { type: integer }
+        phone: { type: string, description: Masked }
+        checkout_request_id: { type: [string, "null"], description: "Safaricom's CheckoutRequestID (quote it to support)" }
+        result_code: { type: [string, "null"], description: "Safaricom result code, e.g. 1032 = cancelled by the customer, 1037 = phone unreachable, 1 = insufficient funds, 2001 = wrong PIN" }
+        result_desc: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        completed_at: { type: [string, "null"], format: date-time }
+    EventType:
+      type: string
+      enum:
+        - charge.succeeded
+        - charge.needs_review
+        - charge.expired
+        - charge.cancelled
+        - stk_push.sent
+        - stk_push.failed
+        - stk_push.succeeded
+        - stk_push.needs_review
+        - payment.received
+        - transaction.reversed
+    Event:
+      type: object
+      required: [object, id, type, api_version, created_at, data]
+      properties:
+        object: { type: string, const: event }
+        id: { type: string, format: uuid }
+        type: { $ref: "#/components/schemas/EventType" }
+        api_version: { type: string }
+        created_at: { type: string, format: date-time }
+        data:
+          description: |
+            State at the time of the event: charge.* -> Charge;
+            stk_push.* -> STKPush; payment.received -> PaymentReceived;
+            transaction.reversed -> Transaction (the reversal transaction;
+            its reverses_transaction_id names the payment, its charge_id the
+            charge that is now reversed).
+          oneOf:
+            - $ref: "#/components/schemas/Charge"
+            - $ref: "#/components/schemas/STKPush"
+            - $ref: "#/components/schemas/PaymentReceived"
+            - $ref: "#/components/schemas/Transaction"

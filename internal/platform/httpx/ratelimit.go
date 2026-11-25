@@ -162,7 +162,7 @@ func LimitByIP(l *RateLimiter, scope string) func(http.Handler) http.Handler {
 }
 
 // LimitBy rejects requests over the limit for key(r) with 429 and an exact
-// Retry-After. Use it after authentication with the API key id (or product
+// Retry-After. Use it after authentication with the API key id (or app
 // id) as the key, e.g. for /v1:
 //
 //	LimitBy(l, func(r *http.Request) string { return "v1|" + principal(r).KeyID })

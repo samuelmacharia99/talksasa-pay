@@ -16,7 +16,7 @@ import (
 )
 
 // runWorker runs background jobs (River): webhook delivery, maintenance
-// (payment request expiry, webhook attempt retention) and, when M-Pesa is
+// (charge expiry, webhook attempt retention) and, when M-Pesa is
 // configured, Daraja callback processing and the STK status sweep. Several
 // workers may run at once; River elects one leader to schedule the periodic
 // jobs.
@@ -41,7 +41,7 @@ func runWorker(ctx context.Context, logw io.Writer) error {
 		return err
 	}
 	hookWorker, err := webhook.NewWorker(webhook.Options{
-		Pool: a.pool, Secrets: a.products, Logger: a.logger, Client: hc,
+		Pool: a.pool, Secrets: a.apps, Logger: a.logger, Client: hc,
 		Env: a.cfg.Env, Timeout: a.cfg.Worker.WebhookTimeout,
 	})
 	if err != nil {

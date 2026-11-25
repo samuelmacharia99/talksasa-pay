@@ -348,7 +348,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Audit-chain and ledger-balance checks */
+        /** Audit-chain check */
         get: {
             parameters: {
                 query?: never;
@@ -377,14 +377,14 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/products": {
+    "/apps": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List products */
+        /** List apps */
         get: {
             parameters: {
                 query?: never;
@@ -401,14 +401,14 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            items: components["schemas"]["Product"][];
+                            items: components["schemas"]["App"][];
                         };
                     };
                 };
             };
         };
         put?: never;
-        /** Create a product (admin) */
+        /** Create an app (admin) */
         post: {
             parameters: {
                 query?: never;
@@ -433,7 +433,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            product: components["schemas"]["Product"];
+                            app: components["schemas"]["App"];
                             webhook_secret: string;
                         };
                     };
@@ -448,7 +448,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/products/{id}": {
+    "/apps/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -457,7 +457,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** One product */
+        /** One app */
         get: {
             parameters: {
                 query?: never;
@@ -475,7 +475,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["Product"];
+                        "application/json": components["schemas"]["App"];
                     };
                 };
                 404: components["responses"]["Problem"];
@@ -489,7 +489,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/products/{id}/webhook-url": {
+    "/apps/{id}/webhook-url": {
         parameters: {
             query?: never;
             header?: never;
@@ -524,7 +524,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["Product"];
+                        "application/json": components["schemas"]["App"];
                     };
                 };
                 422: components["responses"]["Problem"];
@@ -537,7 +537,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/products/{id}/rotate-webhook-secret": {
+    "/apps/{id}/rotate-webhook-secret": {
         parameters: {
             query?: never;
             header?: never;
@@ -579,7 +579,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/products/{id}/status": {
+    "/apps/{id}/status": {
         parameters: {
             query?: never;
             header?: never;
@@ -590,7 +590,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Suspend or re-activate a product (admin) */
+        /** Suspend or re-activate an app (admin) */
         post: {
             parameters: {
                 query?: never;
@@ -615,7 +615,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["Product"];
+                        "application/json": components["schemas"]["App"];
                     };
                 };
             };
@@ -626,7 +626,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/products/{id}/api-keys": {
+    "/apps/{id}/api-keys": {
         parameters: {
             query?: never;
             header?: never;
@@ -635,7 +635,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** List a product's API keys (never the secrets) */
+        /** List an app's API keys (never the secrets) */
         get: {
             parameters: {
                 query?: never;
@@ -701,7 +701,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/products/{id}/api-keys/{keyID}/revoke": {
+    "/apps/{id}/api-keys/{keyID}/revoke": {
         parameters: {
             query?: never;
             header?: never;
@@ -742,7 +742,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/products/{id}/api-keys/{keyID}/allowed-ips": {
+    "/apps/{id}/api-keys/{keyID}/allowed-ips": {
         parameters: {
             query?: never;
             header?: never;
@@ -803,7 +803,7 @@ export interface paths {
         get: {
             parameters: {
                 query?: {
-                    product_id?: components["parameters"]["product_id"];
+                    app_id?: components["parameters"]["app_id"];
                     status?: "pending" | "delivered" | "failed" | "skipped";
                     cursor?: components["parameters"]["cursor"];
                     limit?: components["parameters"]["limit"];
@@ -931,20 +931,25 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/payers": {
+    "/charges": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Search payer accounts */
+        /** List charges, newest first */
         get: {
             parameters: {
                 query?: {
-                    product_id?: components["parameters"]["product_id"];
-                    /** @description Account number, name, external ref or phone */
+                    app_id?: components["parameters"]["app_id"];
+                    status?: components["schemas"]["ChargeStatus"];
+                    /** @description Reference, description or account number (typed loosely) */
                     q?: string;
+                    /** @description Created from: YYYY-MM-DD (Nairobi) or RFC 3339 */
+                    from?: string;
+                    /** @description Created to: YYYY-MM-DD inclusive (Nairobi) or RFC 3339 */
+                    to?: string;
                     cursor?: components["parameters"]["cursor"];
                     limit?: components["parameters"]["limit"];
                 };
@@ -961,7 +966,7 @@ export interface paths {
                     };
                     content: {
                         "application/json": {
-                            items: components["schemas"]["Payer"][];
+                            items: components["schemas"]["Charge"][];
                             next_cursor?: string;
                         };
                     };
@@ -977,7 +982,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/payers/{id}": {
+    "/charges/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -986,7 +991,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** One payer with phones and credit movements */
+        /** One charge with its prompts and every transaction naming it */
         get: {
             parameters: {
                 query?: never;
@@ -1004,7 +1009,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["PayerDetail"];
+                        "application/json": components["schemas"]["ChargeDetail"];
                     };
                 };
                 404: components["responses"]["Problem"];
@@ -1018,57 +1023,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/payment-requests": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List payment requests */
-        get: {
-            parameters: {
-                query?: {
-                    product_id?: components["parameters"]["product_id"];
-                    payer_id?: string;
-                    status?: components["schemas"]["RequestStatus"];
-                    /** @description Reference, description or account number */
-                    q?: string;
-                    /** @description Only live requests reopened by a reversal while a newer live request had the same reference */
-                    duplicates?: boolean;
-                    cursor?: components["parameters"]["cursor"];
-                    limit?: components["parameters"]["limit"];
-                };
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            items: components["schemas"]["PaymentRequest"][];
-                            next_cursor?: string;
-                        };
-                    };
-                };
-                400: components["responses"]["Problem"];
-            };
-        };
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/payment-requests/{id}": {
+    "/charges/{id}/stk-pushes": {
         parameters: {
             query?: never;
             header?: never;
@@ -1077,7 +1032,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** One payment request with its allocations */
+        /** M-Pesa prompts sent for a charge, newest first */
         get: {
             parameters: {
                 query?: never;
@@ -1095,7 +1050,9 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["PaymentRequestDetail"];
+                        "application/json": {
+                            items: components["schemas"]["STKPush"][];
+                        };
                     };
                 };
                 404: components["responses"]["Problem"];
@@ -1120,9 +1077,8 @@ export interface paths {
         get: {
             parameters: {
                 query?: {
-                    product_id?: components["parameters"]["product_id"];
-                    payer_id?: string;
-                    request_id?: string;
+                    app_id?: components["parameters"]["app_id"];
+                    charge_id?: string;
                     channel?: components["schemas"]["Channel"];
                     status?: components["schemas"]["TxnStatus"];
                     direction?: "in" | "out";
@@ -1132,7 +1088,62 @@ export interface paths {
                     from?: string;
                     /** @description YYYY-MM-DD inclusive (Nairobi) or RFC 3339 */
                     to?: string;
-                    suspense?: "true";
+                    /** @description Only succeeded incoming money with no app */
+                    unmatched?: "true";
+                    cursor?: components["parameters"]["cursor"];
+                    limit?: components["parameters"]["limit"];
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["Transaction"][];
+                            next_cursor?: string;
+                        };
+                    };
+                };
+                400: components["responses"]["Problem"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/transactions/unmatched": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Unmatched payments (unknown account prefix), newest first
+         * @description Succeeded incoming money that could not be routed to an app because
+         *     the account number's prefix belongs to no app. Assign each one to an
+         *     app with POST /transactions/{id}/assign.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    receipt?: string;
+                    phone?: string;
+                    /** @description YYYY-MM-DD (Nairobi) or RFC 3339 */
+                    from?: string;
+                    /** @description YYYY-MM-DD inclusive (Nairobi) or RFC 3339 */
+                    to?: string;
                     cursor?: components["parameters"]["cursor"];
                     limit?: components["parameters"]["limit"];
                 };
@@ -1174,7 +1185,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** One transaction with events and allocations */
+        /** One transaction with its status history */
         get: {
             parameters: {
                 query?: never;
@@ -1221,10 +1232,12 @@ export interface paths {
          * Confirm or fail an M-Pesa payment in needs_review (finance, admin)
          * @description Safaricom reported success for an STK push but never sent the receipt.
          *     Look the payment up on the M-Pesa portal, then either confirm it with
-         *     its receipt (the transaction succeeds and is applied to the bill) or
-         *     mark it failed (no money arrived). Audited with the reason.
+         *     its receipt (the transaction succeeds and its charge succeeds, or the
+         *     app gets payment.received) or mark it failed (no money arrived; a
+         *     charge in needs_review goes back to pending). Audited with the reason.
          *     409 `not_resolvable` if the transaction is not needs_review;
-         *     409 `receipt_taken` if the receipt is already recorded elsewhere.
+         *     409 `receipt_taken` if the receipt is already recorded elsewhere;
+         *     409 `amount_mismatch` if Safaricom reported a different amount.
          */
         post: {
             parameters: {
@@ -1268,7 +1281,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/payment-requests/{id}/stk-pushes": {
+    "/transactions/{id}/assign": {
         parameters: {
             query?: never;
             header?: never;
@@ -1277,8 +1290,18 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** M-Pesa prompts sent for a payment request, newest first */
-        get: {
+        get?: never;
+        put?: never;
+        /**
+         * Assign an unmatched payment to an app (finance, admin)
+         * @description Routes a succeeded payment with no app (unknown account prefix) to an
+         *     app, which then gets `payment.received`. Set once: a payment that
+         *     already has an app is 409 `already_assigned`. Audited with the reason.
+         *     The app must exist (422 `validation_failed` on `app_id`); assigning
+         *     to a suspended app is allowed (money rule 8) and the response says so
+         *     in `app_status`.
+         */
+        post: {
             parameters: {
                 query?: never;
                 header?: never;
@@ -1287,24 +1310,93 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** Format: uuid */
+                        app_id: string;
+                        reason: string;
+                    };
+                };
+            };
             responses: {
-                /** @description OK */
+                /** @description Assigned */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": {
-                            items: components["schemas"]["STKPush"][];
-                        };
+                        "application/json": components["schemas"]["TransactionDetail"];
                     };
                 };
+                403: components["responses"]["Problem"];
                 404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/transactions/{id}/reverse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["id"];
+            };
+            cookie?: never;
+        };
+        get?: never;
         put?: never;
-        post?: never;
+        /**
+         * Record a reversal of a succeeded payment (admin)
+         * @description Money rule 9: records a reversal transaction (kind `reversal`,
+         *     direction `out`) for the payment's full amount. If the payment paid a
+         *     charge, the charge becomes `reversed`. The app gets
+         *     `transaction.reversed`. Admin only, with a reason, audited. An M-Pesa
+         *     payment needs Safaricom's reversal receipt.
+         *     409 `not_reversible` (not a succeeded incoming payment) or
+         *     `already_reversed`; 409 `receipt_taken` if the reversal receipt is
+         *     already recorded.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: components["parameters"]["id"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        reason: string;
+                        /** @description Safaricom's reversal receipt; required for M-Pesa payments */
+                        receipt?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Reversed; the reversal transaction */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TransactionDetail"];
+                    };
+                };
+                403: components["responses"]["Problem"];
+                404: components["responses"]["Problem"];
+                409: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
         delete?: never;
         options?: never;
         head?: never;
@@ -1366,7 +1458,7 @@ export interface paths {
         get: {
             parameters: {
                 query?: {
-                    product_id?: components["parameters"]["product_id"];
+                    app_id?: components["parameters"]["app_id"];
                     /** @description Prefix */
                     action?: string;
                     actor_id?: string;
@@ -1613,7 +1705,7 @@ export interface components {
             /** Format: uuid */
             id: string;
             /** @enum {string} */
-            source: "product" | "pay_page";
+            source: "app" | "pay_page";
             /** @enum {string} */
             status: "initiating" | "sent" | "succeeded" | "failed" | "unknown";
             amount: number;
@@ -1658,7 +1750,7 @@ export interface components {
         /** @enum {string} */
         Role: "viewer" | "finance" | "approver" | "admin";
         /** @enum {string} */
-        RequestStatus: "open" | "partially_paid" | "paid" | "cancelled" | "expired";
+        ChargeStatus: "pending" | "needs_review" | "succeeded" | "expired" | "cancelled" | "reversed";
         /** @enum {string} */
         TxnStatus: "pending" | "succeeded" | "failed" | "cancelled" | "needs_review";
         /** @enum {string} */
@@ -1669,7 +1761,7 @@ export interface components {
             email: string;
             name: string;
             role: components["schemas"]["Role"];
-            permissions: ("read" | "products.manage" | "users.manage" | "payments.resolve")[];
+            permissions: ("read" | "apps.manage" | "users.manage" | "payments.resolve" | "payments.reverse")[];
             /** Format: date-time */
             expires_at: string;
             /** Format: date-time */
@@ -1697,7 +1789,7 @@ export interface components {
             /** Format: date-time */
             expires_at: string;
         };
-        Product: {
+        App: {
             /** Format: uuid */
             id: string;
             name: string;
@@ -1727,7 +1819,7 @@ export interface components {
             /** Format: uuid */
             event_id: string;
             /** Format: uuid */
-            product_id: string;
+            app_id: string;
             account_prefix: string;
             event_type: string;
             subject_type: string;
@@ -1756,91 +1848,62 @@ export interface components {
             /** @description First 1 KB of the receiver's response */
             response_body: string | null;
         };
-        Payer: {
+        Charge: {
             /** Format: uuid */
             id: string;
             /** Format: uuid */
-            product_id: string;
+            app_id: string;
             account_prefix: string;
-            external_ref: string;
-            account_number: string;
-            display_name: string;
-            email: string | null;
-            /** @enum {string} */
-            status: "active" | "closed";
-            credit_balance: number;
-            /** Format: date-time */
-            created_at: string;
-        };
-        PayerDetail: components["schemas"]["Payer"] & {
-            product_name: string;
-            /** Format: date-time */
-            updated_at: string;
-            phones: {
-                /** @description Masked */
-                phone: string;
-                is_primary: boolean;
-            }[];
-            credit_movements: {
-                id: number;
-                batch_kind: string;
-                /** Format: uuid */
-                transaction_id: string | null;
-                /** Format: uuid */
-                payment_request_id: string | null;
-                amount: number;
-                /** Format: date-time */
-                created_at: string;
-            }[];
-        };
-        PaymentRequest: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            product_id: string;
-            account_prefix: string;
-            /** Format: uuid */
-            payer_account_id: string;
-            account_number: string;
-            payer_name: string;
-            product_reference: string;
-            description: string;
+            app_name: string;
+            reference: string;
+            description: string | null;
             amount: number;
-            amount_paid: number;
-            outstanding: number;
-            status: components["schemas"]["RequestStatus"];
+            /** @enum {string} */
+            currency: "KES";
+            account_number: string;
+            /** @description Masked; the phone the app gave for the first prompt */
+            phone: string | null;
+            status: components["schemas"]["ChargeStatus"];
             /** Format: date-time */
-            expires_at: string | null;
+            expires_at: string;
+            /** Format: date-time */
+            succeeded_at: string | null;
+            /**
+             * Format: uuid
+             * @description The payment that made the charge succeed
+             */
+            transaction_id: string | null;
+            /**
+             * Format: date-time
+             * @description When it expired or was cancelled
+             */
+            closed_at: string | null;
             /** Format: date-time */
             created_at: string;
-            /** Format: date-time */
-            paid_at: string | null;
-            /** Format: date-time */
-            closed_at: string | null;
-            /** @description Reopened by a reversal while a newer live request had the same reference; staff should cancel or settle one of them. */
-            duplicate_reference: boolean;
         };
-        PaymentRequestDetail: components["schemas"]["PaymentRequest"] & {
-            product_name: string;
+        ChargeDetail: components["schemas"]["Charge"] & {
+            /** @enum {string} */
+            app_status: "active" | "suspended";
+            metadata: {
+                [key: string]: unknown;
+            } | null;
+            /** @description True when the gateway generated the account number */
+            account_generated: boolean;
             /** Format: date-time */
             updated_at: string;
-            allocations: {
-                id: number;
-                /** @enum {string} */
-                batch_kind: "payment" | "credit_application" | "reversal";
-                /** Format: uuid */
-                transaction_id: string | null;
-                receipt: string | null;
-                amount: number;
-                /** Format: date-time */
-                created_at: string;
-            }[];
+            /** @description Newest first */
+            stk_pushes: components["schemas"]["STKPush"][];
+            /** @description Every transaction naming this charge, oldest first: the payment that paid it, failed prompts, duplicates and a reversal */
+            transactions: components["schemas"]["Transaction"][];
         };
         Transaction: {
             /** Format: uuid */
             id: string;
-            /** Format: uuid */
-            product_id: string | null;
+            /**
+             * Format: uuid
+             * @description null = unmatched (no app)
+             */
+            app_id: string | null;
             account_prefix: string | null;
             /** @enum {string} */
             direction: "in" | "out";
@@ -1852,12 +1915,11 @@ export interface components {
             receipt: string | null;
             /** @description Masked */
             phone: string | null;
-            bill_ref: string | null;
-            /** Format: uuid */
-            payer_account_id: string | null;
+            /** @description As typed at the paybill, or as sent with the prompt */
             account_number: string | null;
             /** Format: uuid */
-            payment_request_id: string | null;
+            charge_id: string | null;
+            charge_reference: string | null;
             failure_reason: string | null;
             /** Format: date-time */
             created_at: string;
@@ -1875,8 +1937,7 @@ export interface components {
             occurred_at: string | null;
             /** Format: date-time */
             updated_at: string;
-            payer_name: string | null;
-            product_reference: string | null;
+            app_name: string | null;
             /** @description Provider payload with phones masked */
             raw_payload: unknown;
             events: {
@@ -1886,37 +1947,20 @@ export interface components {
                 /** Format: date-time */
                 occurred_at: string;
             }[];
-            allocations: {
-                id: number;
-                /** Format: uuid */
-                batch_id: string;
-                /** @enum {string} */
-                batch_kind: "payment" | "credit_application" | "reversal";
-                line_no: number;
-                /**
-                 * Format: uuid
-                 * @description null = payer credit
-                 */
-                payment_request_id: string | null;
-                product_reference: string | null;
-                amount: number;
-                /** Format: date-time */
-                created_at: string;
-            }[];
         };
         AuditEntry: {
             id: number;
             /** Format: date-time */
             occurred_at: string;
             /** @enum {string} */
-            actor_type: "system" | "admin" | "cli" | "product";
+            actor_type: "system" | "admin" | "cli" | "app";
             actor_id: string;
             actor_name?: string;
             action: string;
             entity_type: string;
             entity_id: string | null;
             /** Format: uuid */
-            product_id: string | null;
+            app_id: string | null;
             account_prefix: string | null;
             details: {
                 [key: string]: unknown;
@@ -1925,8 +1969,8 @@ export interface components {
         Window: {
             total: number;
             payments: number;
-            /** @description product id -> KES; nil UUID = unassigned */
-            by_product: {
+            /** @description app id -> KES; nil UUID = unassigned (unmatched) */
+            by_app: {
                 [key: string]: number;
             };
         };
@@ -1939,28 +1983,31 @@ export interface components {
                 day: string;
                 total: number;
                 payments: number;
-                by_product: {
+                by_app: {
                     [key: string]: number;
                 };
             }[];
-            products: components["schemas"]["Product"][];
+            apps: components["schemas"]["App"][];
             counts: {
-                open_requests: number;
-                outstanding: number;
-                suspense_count: number;
-                suspense_amount: number;
-                needs_review: number;
-                pending: number;
-                credit_held: number;
-                payers: number;
-                /** @description Live requests reopened by a reversal while a newer live request had the same reference; staff should resolve them. */
-                duplicate_references: number;
+                charges_pending: number;
+                /** @description Charges that succeeded since midnight Nairobi time */
+                charges_succeeded_today: number;
+                /** @description KES */
+                charges_succeeded_today_amount: number;
+                charges_needs_review: number;
+                /** @description M-Pesa payments staff must confirm or fail */
+                transactions_needs_review: number;
+                /** @description Succeeded incoming payments with no app (unknown prefix) */
+                unmatched_count: number;
+                /** @description KES */
+                unmatched_amount: number;
+                pending_transactions: number;
                 /** @description STK pushes a status check reported as paid but no receipt arrived; their transactions are in needs_review until staff enter the receipt. */
                 unknown_stk_pushes: number;
                 /** @description Safaricom callbacks still unprocessed 5 minutes after arrival, plus callbacks whose processing recorded an error in the last 7 days. */
                 unprocessed_callbacks: number;
-                /** @description Successful incoming payments in the last 30 days for a product that is not active or a payer account that is closed. The money was applied as normal; staff should follow up. */
-                inactive_product_payments: number;
+                /** @description Successful incoming payments in the last 30 days for an app that is not active. The money was recorded and forwarded as normal; staff should follow up. */
+                inactive_app_payments: number;
             };
             timezone: string;
             /** Format: date-time */
@@ -1969,14 +2016,6 @@ export interface components {
         Integrity: {
             audit_chain_ok: boolean;
             first_bad_audit_id?: number;
-            ledger_ok: boolean;
-            drift: {
-                kind: string;
-                /** Format: uuid */
-                id: string;
-                cached: number;
-                actual: number;
-            }[];
             /** Format: date-time */
             checked_at: string;
         };
@@ -1994,7 +2033,7 @@ export interface components {
     };
     parameters: {
         id: string;
-        product_id: string;
+        app_id: string;
         cursor: string;
         limit: number;
     };

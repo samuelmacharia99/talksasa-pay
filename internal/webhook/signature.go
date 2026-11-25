@@ -1,10 +1,10 @@
-// Package webhook delivers events to product webhook URLs: signing, an
+// Package webhook delivers events to app webhook URLs: signing, an
 // SSRF-safe HTTP client, the River worker with its retry policy, a
-// per-product circuit breaker and concurrency limit, and the admin-side
+// per-app circuit breaker and concurrency limit, and the admin-side
 // delivery queries (list, detail, redeliver).
 //
 // Delivery is at least once. Receivers de-duplicate on Talksasa-Event-Id
-// and verify Talksasa-Signature (see api/product.openapi.yaml, `webhooks:`).
+// and verify Talksasa-Signature (see api/app.openapi.yaml, `webhooks:`).
 package webhook
 
 import (
@@ -28,7 +28,7 @@ const (
 const SignatureTolerance = 5 * time.Minute
 
 // Sign returns the hex v1 signature: HMAC-SHA256(secret, "<t>.<body>").
-// secret is the full secret string as handed to the product ("whsec_...").
+// secret is the full secret string as handed to the app ("whsec_...").
 func Sign(secret []byte, t int64, body []byte) string {
 	m := hmac.New(sha256.New, secret)
 	m.Write([]byte(strconv.FormatInt(t, 10)))

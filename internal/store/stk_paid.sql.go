@@ -27,32 +27,42 @@ func (q *Queries) BlockSTKPushConfirm(ctx context.Context, arg BlockSTKPushConfi
 }
 
 const findLiveSTKPushesForC2B = `-- name: FindLiveSTKPushesForC2B :many
-SELECT p.id, p.product_id, p.payment_request_id, p.transaction_id, p.source, p.phone, p.amount, p.idempotency_key, p.request_hash, p.merchant_request_id, p.checkout_request_id, p.status, p.result_code, p.result_desc, p.query_attempts, p.next_query_at, p.created_at, p.updated_at, p.completed_at, p.paid_transaction_id, p.confirm_blocked FROM stk_pushes p
+SELECT p.id, p.app_id, p.charge_id, p.transaction_id, p.source, p.phone, p.amount, p.idempotency_key, p.request_hash, p.merchant_request_id, p.checkout_request_id, p.status, p.result_code, p.result_desc, p.query_attempts, p.next_query_at, p.created_at, p.updated_at, p.completed_at, p.paid_transaction_id, p.confirm_blocked FROM stk_pushes p
   JOIN transactions t ON t.id = p.transaction_id
- WHERE t.payer_account_id = $1
-   AND p.amount = $2
+  JOIN charges c ON c.app_id = p.app_id AND c.id = p.charge_id
+ WHERE p.app_id = $1
+   AND c.account_number_norm = $2
+   AND c.status IN ('pending', 'needs_review')
+   AND p.amount = $3
    AND p.status IN ('initiating', 'sent', 'unknown')
    AND p.confirm_blocked IS NULL
    AND t.status IN ('pending', 'needs_review')
-   AND ($3::text IS NULL OR p.phone = $3)
+   AND ($4::text IS NULL OR p.phone = $4)
    AND p.created_at > now() - interval '1 day'
  ORDER BY p.created_at DESC
  LIMIT 2
 `
 
 type FindLiveSTKPushesForC2BParams struct {
-	PayerAccountID *uuid.UUID
-	Amount         int64
-	Phone          *string
+	AppID             uuid.UUID
+	AccountNumberNorm string
+	Amount            int64
+	Phone             *string
 }
 
 // A paybill (C2B) confirmation may be Safaricom's second notice for an STK
-// payment. Candidates: the payer's prompts still waiting (or in review) for
-// exactly this amount, whose transaction has no receipt yet, not blocked by
-// an anomaly; phone must match when the notice carries a usable one. The
-// caller acts only on exactly one candidate.
+// payment. Candidates: prompts of this app's live charges with this account
+// number, still waiting (or in review) for exactly this amount, whose
+// transaction has no receipt yet, not blocked by an anomaly; phone must
+// match when the notice carries a usable one. The caller acts only on
+// exactly one candidate.
 func (q *Queries) FindLiveSTKPushesForC2B(ctx context.Context, arg FindLiveSTKPushesForC2BParams) ([]StkPush, error) {
-	rows, err := q.db.Query(ctx, findLiveSTKPushesForC2B, arg.PayerAccountID, arg.Amount, arg.Phone)
+	rows, err := q.db.Query(ctx, findLiveSTKPushesForC2B,
+		arg.AppID,
+		arg.AccountNumberNorm,
+		arg.Amount,
+		arg.Phone,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -62,8 +72,8 @@ func (q *Queries) FindLiveSTKPushesForC2B(ctx context.Context, arg FindLiveSTKPu
 		var i StkPush
 		if err := rows.Scan(
 			&i.ID,
-			&i.ProductID,
-			&i.PaymentRequestID,
+			&i.AppID,
+			&i.ChargeID,
 			&i.TransactionID,
 			&i.Source,
 			&i.Phone,
@@ -96,7 +106,7 @@ func (q *Queries) FindLiveSTKPushesForC2B(ctx context.Context, arg FindLiveSTKPu
 const setSTKPushPaidTransaction = `-- name: SetSTKPushPaidTransaction :one
 UPDATE stk_pushes SET paid_transaction_id = $1
  WHERE id = $2 AND paid_transaction_id IS NULL
-RETURNING id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked
+RETURNING id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked
 `
 
 type SetSTKPushPaidTransactionParams struct {
@@ -110,8 +120,8 @@ func (q *Queries) SetSTKPushPaidTransaction(ctx context.Context, arg SetSTKPushP
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,

@@ -1,5 +1,5 @@
 -- name: InsertWebhookDelivery :exec
-INSERT INTO webhook_deliveries (event_id, product_id) VALUES (@event_id, @product_id);
+INSERT INTO webhook_deliveries (event_id, app_id) VALUES (@event_id, @app_id);
 
 -- name: LockWebhookDelivery :one
 SELECT * FROM webhook_deliveries WHERE event_id = @event_id FOR NO KEY UPDATE;
@@ -14,8 +14,8 @@ UPDATE webhook_deliveries
 RETURNING *;
 
 -- name: SkipWebhookDelivery :exec
--- No webhook URL configured (or product suspended): nothing to send. The
--- product still sees the event in /v1/events.
+-- No webhook URL configured (or app suspended): nothing to send. The
+-- app still sees the event in /v1/events.
 UPDATE webhook_deliveries SET status = 'skipped', last_error = sqlc.narg(reason)
  WHERE event_id = @event_id AND status = 'pending';
 
@@ -33,7 +33,7 @@ RETURNING *;
 SELECT d.*, e.type AS event_type, e.subject_type, e.subject_id
   FROM webhook_deliveries d
   JOIN events e ON e.id = d.event_id
- WHERE (sqlc.narg(product_id)::uuid IS NULL OR d.product_id = sqlc.narg(product_id))
+ WHERE (sqlc.narg(app_id)::uuid IS NULL OR d.app_id = sqlc.narg(app_id))
    AND (sqlc.narg(status)::webhook_delivery_status IS NULL OR d.status = sqlc.narg(status))
    AND (sqlc.narg(cursor_at)::timestamptz IS NULL
         OR (d.created_at, d.event_id) < (sqlc.narg(cursor_at)::timestamptz, sqlc.narg(cursor_id)::uuid))

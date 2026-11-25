@@ -9,8 +9,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/talksasa/talksasa-pay/internal/admin"
+	"github.com/talksasa/talksasa-pay/internal/app"
 	tlog "github.com/talksasa/talksasa-pay/internal/platform/log"
-	"github.com/talksasa/talksasa-pay/internal/product"
 	"github.com/talksasa/talksasa-pay/internal/reporting"
 	"github.com/talksasa/talksasa-pay/internal/store"
 )
@@ -56,7 +56,7 @@ func toMe(p admin.Principal) meJSON {
 		ExpiresAt: p.ExpiresAt, IdleExpiresAt: p.IdleExpiresAt}
 }
 
-type productJSON struct {
+type appJSON struct {
 	ID            uuid.UUID `json:"id"`
 	Name          string    `json:"name"`
 	AccountPrefix string    `json:"account_prefix"`
@@ -65,8 +65,8 @@ type productJSON struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
-func toProduct(p product.Product) productJSON {
-	return productJSON{ID: p.ID, Name: p.Name, AccountPrefix: p.AccountPrefix, WebhookURL: p.WebhookURL,
+func toApp(p app.App) appJSON {
+	return appJSON{ID: p.ID, Name: p.Name, AccountPrefix: p.AccountPrefix, WebhookURL: p.WebhookURL,
 		Status: string(p.Status), CreatedAt: p.CreatedAt}
 }
 
@@ -81,7 +81,7 @@ type apiKeyJSON struct {
 	AllowedIPs []string   `json:"allowed_ips"` // null = any address
 }
 
-func toAPIKey(k product.APIKey) apiKeyJSON {
+func toAPIKey(k app.APIKey) apiKeyJSON {
 	out := apiKeyJSON{KeyID: k.KeyID, Label: k.Label, CreatedBy: k.CreatedBy, CreatedAt: k.CreatedAt,
 		ExpiresAt: k.ExpiresAt, RevokedAt: k.RevokedAt, LastUsedAt: k.LastUsedAt}
 	if len(k.AllowedCIDRs) > 0 {
@@ -110,146 +110,85 @@ func mapPage[S, T any](p reporting.Page[S], f func(S) T) pageJSON[T] {
 	return out
 }
 
-type payerJSON struct {
-	ID            uuid.UUID `json:"id"`
-	ProductID     uuid.UUID `json:"product_id"`
-	AccountPrefix string    `json:"account_prefix"`
-	ExternalRef   string    `json:"external_ref"`
-	AccountNumber string    `json:"account_number"`
-	DisplayName   string    `json:"display_name"`
-	Email         *string   `json:"email"`
-	Status        string    `json:"status"`
-	CreditBalance int64     `json:"credit_balance"`
-	CreatedAt     time.Time `json:"created_at"`
-}
-
-func toPayerRow(r store.ListPayersAdminRow) payerJSON {
-	return payerJSON{ID: r.ID, ProductID: r.ProductID, AccountPrefix: r.AccountPrefix, ExternalRef: r.ExternalRef,
-		AccountNumber: r.AccountNumber, DisplayName: r.DisplayName, Email: r.Email, Status: string(r.Status),
-		CreditBalance: r.CreditBalance, CreatedAt: r.CreatedAt}
-}
-
-type phoneJSON struct {
-	Phone     string `json:"phone"` // masked
-	IsPrimary bool   `json:"is_primary"`
-}
-
-type creditMovementJSON struct {
-	ID               int64      `json:"id"`
-	BatchKind        string     `json:"batch_kind"`
-	TransactionID    *uuid.UUID `json:"transaction_id"`
-	PaymentRequestID *uuid.UUID `json:"payment_request_id"`
-	Amount           int64      `json:"amount"`
-	CreatedAt        time.Time  `json:"created_at"`
-}
-
-type payerDetailJSON struct {
-	payerJSON
-	ProductName string               `json:"product_name"`
-	UpdatedAt   time.Time            `json:"updated_at"`
-	Phones      []phoneJSON          `json:"phones"`
-	Credit      []creditMovementJSON `json:"credit_movements"`
-}
-
-func toPayerDetail(d reporting.PayerDetail) payerDetailJSON {
-	p := d.Payer
-	out := payerDetailJSON{
-		payerJSON: payerJSON{ID: p.ID, ProductID: p.ProductID, AccountPrefix: p.AccountPrefix, ExternalRef: p.ExternalRef,
-			AccountNumber: p.AccountNumber, DisplayName: p.DisplayName, Email: p.Email, Status: string(p.Status),
-			CreditBalance: p.CreditBalance, CreatedAt: p.CreatedAt},
-		ProductName: p.ProductName, UpdatedAt: p.UpdatedAt, Phones: []phoneJSON{}, Credit: []creditMovementJSON{},
-	}
-	for _, ph := range d.Phones {
-		out.Phones = append(out.Phones, phoneJSON{Phone: tlog.MaskPhone(ph.Phone), IsPrimary: ph.IsPrimary})
-	}
-	for _, c := range d.Credit {
-		out.Credit = append(out.Credit, creditMovementJSON{ID: c.ID, BatchKind: string(c.BatchKind), TransactionID: c.TransactionID,
-			PaymentRequestID: c.PaymentRequestID, Amount: c.Amount, CreatedAt: c.CreatedAt})
-	}
-	return out
-}
-
-type requestJSON struct {
-	ID               uuid.UUID  `json:"id"`
-	ProductID        uuid.UUID  `json:"product_id"`
-	AccountPrefix    string     `json:"account_prefix"`
-	PayerAccountID   uuid.UUID  `json:"payer_account_id"`
-	AccountNumber    string     `json:"account_number"`
-	PayerName        string     `json:"payer_name"`
-	ProductReference string     `json:"product_reference"`
-	Description      string     `json:"description"`
-	Amount           int64      `json:"amount"`
-	AmountPaid       int64      `json:"amount_paid"`
-	Outstanding      int64      `json:"outstanding"`
-	Status           string     `json:"status"`
-	ExpiresAt        *time.Time `json:"expires_at"`
-	CreatedAt        time.Time  `json:"created_at"`
-	PaidAt           *time.Time `json:"paid_at"`
-	ClosedAt         *time.Time `json:"closed_at"`
-	// DuplicateReference: reopened by a reversal while a newer live request
-	// had the same reference.
-	DuplicateReference bool `json:"duplicate_reference"`
-}
-
-func toRequestRow(r store.ListPaymentRequestsAdminRow) requestJSON {
-	return requestJSON{ID: r.ID, ProductID: r.ProductID, AccountPrefix: r.AccountPrefix, PayerAccountID: r.PayerAccountID,
-		AccountNumber: r.AccountNumber, PayerName: r.DisplayName, ProductReference: r.ProductReference, Description: r.Description,
-		Amount: r.Amount, AmountPaid: r.AmountPaid, Outstanding: r.Amount - r.AmountPaid, Status: string(r.Status),
-		ExpiresAt: r.ExpiresAt, CreatedAt: r.CreatedAt, PaidAt: r.PaidAt, ClosedAt: r.ClosedAt,
-		DuplicateReference: r.DuplicateReference}
-}
-
-type requestAllocationJSON struct {
-	ID            int64      `json:"id"`
-	BatchKind     string     `json:"batch_kind"`
-	TransactionID *uuid.UUID `json:"transaction_id"`
-	Receipt       *string    `json:"receipt"`
+type chargeJSON struct {
+	ID            uuid.UUID  `json:"id"`
+	AppID         uuid.UUID  `json:"app_id"`
+	AccountPrefix string     `json:"account_prefix"`
+	AppName       string     `json:"app_name"`
+	Reference     string     `json:"reference"`
+	Description   *string    `json:"description"`
 	Amount        int64      `json:"amount"`
+	Currency      string     `json:"currency"`
+	AccountNumber string     `json:"account_number"`
+	Phone         *string    `json:"phone"` // masked
+	Status        string     `json:"status"`
+	ExpiresAt     time.Time  `json:"expires_at"`
+	SucceededAt   *time.Time `json:"succeeded_at"`
+	TransactionID *uuid.UUID `json:"transaction_id"`
+	ClosedAt      *time.Time `json:"closed_at"`
 	CreatedAt     time.Time  `json:"created_at"`
 }
 
-type requestDetailJSON struct {
-	requestJSON
-	ProductName string                  `json:"product_name"`
-	UpdatedAt   time.Time               `json:"updated_at"`
-	Allocations []requestAllocationJSON `json:"allocations"`
+func toChargeRow(r store.ListChargesAdminRow) chargeJSON {
+	return chargeJSON{ID: r.ID, AppID: r.AppID, AccountPrefix: r.AccountPrefix, AppName: r.AppName, Reference: r.Reference,
+		Description: r.Description, Amount: r.Amount, Currency: r.Currency, AccountNumber: r.AccountNumber,
+		Phone: maskPtr(r.Phone), Status: string(r.Status), ExpiresAt: r.ExpiresAt, SucceededAt: r.SucceededAt,
+		TransactionID: r.TransactionID, ClosedAt: r.ClosedAt, CreatedAt: r.CreatedAt}
 }
 
-func toRequestDetail(d reporting.RequestDetail) requestDetailJSON {
-	r := d.Request
-	out := requestDetailJSON{
-		requestJSON: requestJSON{ID: r.ID, ProductID: r.ProductID, AccountPrefix: r.AccountPrefix, PayerAccountID: r.PayerAccountID,
-			AccountNumber: r.AccountNumber, PayerName: r.DisplayName, ProductReference: r.ProductReference, Description: r.Description,
-			Amount: r.Amount, AmountPaid: r.AmountPaid, Outstanding: r.Amount - r.AmountPaid, Status: string(r.Status),
-			ExpiresAt: r.ExpiresAt, CreatedAt: r.CreatedAt, PaidAt: r.PaidAt, ClosedAt: r.ClosedAt,
-			DuplicateReference: r.DuplicateReference},
-		ProductName: r.ProductName, UpdatedAt: r.UpdatedAt, Allocations: []requestAllocationJSON{},
+type chargeDetailJSON struct {
+	chargeJSON
+	AppStatus        string          `json:"app_status"`
+	Metadata         json.RawMessage `json:"metadata"`
+	AccountGenerated bool            `json:"account_generated"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+	STKPushes        []stkPushJSON   `json:"stk_pushes"`
+	Transactions     []txnJSON       `json:"transactions"`
+}
+
+func toChargeDetail(d reporting.ChargeDetail) chargeDetailJSON {
+	c := d.Charge
+	out := chargeDetailJSON{
+		chargeJSON: chargeJSON{ID: c.ID, AppID: c.AppID, AccountPrefix: c.AccountPrefix, AppName: c.AppName, Reference: c.Reference,
+			Description: c.Description, Amount: c.Amount, Currency: c.Currency, AccountNumber: c.AccountNumber,
+			Phone: maskPtr(c.Phone), Status: string(c.Status), ExpiresAt: c.ExpiresAt, SucceededAt: c.SucceededAt,
+			TransactionID: c.TransactionID, ClosedAt: c.ClosedAt, CreatedAt: c.CreatedAt},
+		AppStatus: string(c.AppStatus), Metadata: json.RawMessage(c.Metadata), AccountGenerated: c.AccountGenerated,
+		UpdatedAt: c.UpdatedAt, STKPushes: []stkPushJSON{}, Transactions: []txnJSON{},
 	}
-	for _, a := range d.Allocations {
-		out.Allocations = append(out.Allocations, requestAllocationJSON{ID: a.ID, BatchKind: string(a.BatchKind),
-			TransactionID: a.TransactionID, Receipt: a.ProviderTransactionID, Amount: a.Amount, CreatedAt: a.CreatedAt})
+	if len(c.Metadata) == 0 {
+		out.Metadata = json.RawMessage("null")
+	}
+	for _, p := range d.Pushes {
+		out.STKPushes = append(out.STKPushes, toSTKPush(p))
+	}
+	for _, t := range d.Transactions {
+		out.Transactions = append(out.Transactions, txnJSON{ID: t.ID, AppID: t.AppID, Direction: string(t.Direction),
+			Kind: string(t.Kind), Channel: string(t.Channel), Status: string(t.Status), Amount: t.Amount,
+			Receipt: t.ProviderTransactionID, Phone: maskPtr(t.Phone), AccountNumber: t.AccountNumber,
+			ChargeID: t.ChargeID, ChargeReference: &c.Reference, FailureReason: t.FailureReason,
+			CreatedAt: t.CreatedAt, CompletedAt: t.CompletedAt})
 	}
 	return out
 }
 
 type txnJSON struct {
-	ID               uuid.UUID  `json:"id"`
-	ProductID        *uuid.UUID `json:"product_id"`
-	AccountPrefix    *string    `json:"account_prefix"`
-	Direction        string     `json:"direction"`
-	Kind             string     `json:"kind"`
-	Channel          string     `json:"channel"`
-	Status           string     `json:"status"`
-	Amount           int64      `json:"amount"`
-	Receipt          *string    `json:"receipt"`
-	Phone            *string    `json:"phone"` // masked
-	BillRef          *string    `json:"bill_ref"`
-	PayerAccountID   *uuid.UUID `json:"payer_account_id"`
-	AccountNumber    *string    `json:"account_number"`
-	PaymentRequestID *uuid.UUID `json:"payment_request_id"`
-	FailureReason    *string    `json:"failure_reason"`
-	CreatedAt        time.Time  `json:"created_at"`
-	CompletedAt      *time.Time `json:"completed_at"`
+	ID              uuid.UUID  `json:"id"`
+	AppID           *uuid.UUID `json:"app_id"` // null = unmatched
+	AccountPrefix   *string    `json:"account_prefix"`
+	Direction       string     `json:"direction"`
+	Kind            string     `json:"kind"`
+	Channel         string     `json:"channel"`
+	Status          string     `json:"status"`
+	Amount          int64      `json:"amount"`
+	Receipt         *string    `json:"receipt"`
+	Phone           *string    `json:"phone"` // masked
+	AccountNumber   *string    `json:"account_number"`
+	ChargeID        *uuid.UUID `json:"charge_id"`
+	ChargeReference *string    `json:"charge_reference"`
+	FailureReason   *string    `json:"failure_reason"`
+	CreatedAt       time.Time  `json:"created_at"`
+	CompletedAt     *time.Time `json:"completed_at"`
 }
 
 func maskPtr(p *string) *string {
@@ -261,10 +200,10 @@ func maskPtr(p *string) *string {
 }
 
 func toTxnRow(r store.ListTransactionsAdminRow) txnJSON {
-	return txnJSON{ID: r.ID, ProductID: r.ProductID, AccountPrefix: r.AccountPrefix, Direction: string(r.Direction),
+	return txnJSON{ID: r.ID, AppID: r.AppID, AccountPrefix: r.AccountPrefix, Direction: string(r.Direction),
 		Kind: string(r.Kind), Channel: string(r.Channel), Status: string(r.Status), Amount: r.Amount,
-		Receipt: r.ProviderTransactionID, Phone: maskPtr(r.Phone), BillRef: r.BillRef, PayerAccountID: r.PayerAccountID,
-		AccountNumber: r.AccountNumber, PaymentRequestID: r.PaymentRequestID, FailureReason: r.FailureReason,
+		Receipt: r.ProviderTransactionID, Phone: maskPtr(r.Phone), AccountNumber: r.AccountNumber,
+		ChargeID: r.ChargeID, ChargeReference: r.ChargeReference, FailureReason: r.FailureReason,
 		CreatedAt: r.CreatedAt, CompletedAt: r.CompletedAt}
 }
 
@@ -275,45 +214,31 @@ type txnEventJSON struct {
 	OccurredAt time.Time `json:"occurred_at"`
 }
 
-type txnAllocationJSON struct {
-	ID               int64      `json:"id"`
-	BatchID          uuid.UUID  `json:"batch_id"`
-	BatchKind        string     `json:"batch_kind"`
-	LineNo           int32      `json:"line_no"`
-	PaymentRequestID *uuid.UUID `json:"payment_request_id"` // null = payer credit
-	ProductReference *string    `json:"product_reference"`
-	Amount           int64      `json:"amount"`
-	CreatedAt        time.Time  `json:"created_at"`
-}
-
 type txnDetailJSON struct {
 	txnJSON
-	ProviderRequestID     *string             `json:"provider_request_id"`
-	ReversesTransactionID *uuid.UUID          `json:"reverses_transaction_id"`
-	FailureCode           *string             `json:"failure_code"`
-	Reason                *string             `json:"reason"`
-	CreatedBy             *string             `json:"created_by"`
-	OccurredAt            *time.Time          `json:"occurred_at"`
-	UpdatedAt             time.Time           `json:"updated_at"`
-	PayerName             *string             `json:"payer_name"`
-	ProductReference      *string             `json:"product_reference"`
-	RawPayload            json.RawMessage     `json:"raw_payload"`
-	Events                []txnEventJSON      `json:"events"`
-	Allocations           []txnAllocationJSON `json:"allocations"`
+	ProviderRequestID     *string         `json:"provider_request_id"`
+	ReversesTransactionID *uuid.UUID      `json:"reverses_transaction_id"`
+	FailureCode           *string         `json:"failure_code"`
+	Reason                *string         `json:"reason"`
+	CreatedBy             *string         `json:"created_by"`
+	OccurredAt            *time.Time      `json:"occurred_at"`
+	UpdatedAt             time.Time       `json:"updated_at"`
+	AppName               *string         `json:"app_name"`
+	RawPayload            json.RawMessage `json:"raw_payload"`
+	Events                []txnEventJSON  `json:"events"`
 }
 
 func toTxnDetail(d reporting.TxnDetail) txnDetailJSON {
 	t := d.Txn
 	out := txnDetailJSON{
-		txnJSON: txnJSON{ID: t.ID, ProductID: t.ProductID, AccountPrefix: t.AccountPrefix, Direction: string(t.Direction),
+		txnJSON: txnJSON{ID: t.ID, AppID: t.AppID, AccountPrefix: t.AccountPrefix, Direction: string(t.Direction),
 			Kind: string(t.Kind), Channel: string(t.Channel), Status: string(t.Status), Amount: t.Amount,
-			Receipt: t.ProviderTransactionID, Phone: maskPtr(t.Phone), BillRef: t.BillRef, PayerAccountID: t.PayerAccountID,
-			AccountNumber: t.AccountNumber, PaymentRequestID: t.PaymentRequestID, FailureReason: t.FailureReason,
+			Receipt: t.ProviderTransactionID, Phone: maskPtr(t.Phone), AccountNumber: t.AccountNumber,
+			ChargeID: t.ChargeID, ChargeReference: t.ChargeReference, FailureReason: t.FailureReason,
 			CreatedAt: t.CreatedAt, CompletedAt: t.CompletedAt},
 		ProviderRequestID: t.ProviderRequestID, ReversesTransactionID: t.ReversesTransactionID, FailureCode: t.FailureCode,
-		Reason: t.Reason, CreatedBy: t.CreatedBy, OccurredAt: t.OccurredAt, UpdatedAt: t.UpdatedAt, PayerName: t.PayerName,
-		ProductReference: t.ProductReference, RawPayload: redactPayload(t.RawPayload),
-		Events: []txnEventJSON{}, Allocations: []txnAllocationJSON{},
+		Reason: t.Reason, CreatedBy: t.CreatedBy, OccurredAt: t.OccurredAt, UpdatedAt: t.UpdatedAt, AppName: t.AppName,
+		RawPayload: redactPayload(t.RawPayload), Events: []txnEventJSON{},
 	}
 	for _, e := range d.Events {
 		var from *string
@@ -322,10 +247,6 @@ func toTxnDetail(d reporting.TxnDetail) txnDetailJSON {
 			from = &s
 		}
 		out.Events = append(out.Events, txnEventJSON{FromStatus: from, ToStatus: string(e.ToStatus), Actor: e.Actor, OccurredAt: e.OccurredAt})
-	}
-	for _, a := range d.Allocations {
-		out.Allocations = append(out.Allocations, txnAllocationJSON{ID: a.ID, BatchID: a.BatchID, BatchKind: string(a.BatchKind),
-			LineNo: a.LineNo, PaymentRequestID: a.PaymentRequestID, ProductReference: a.ProductReference, Amount: a.Amount, CreatedAt: a.CreatedAt})
 	}
 	return out
 }
@@ -394,30 +315,30 @@ type auditJSON struct {
 	Action        string          `json:"action"`
 	EntityType    string          `json:"entity_type"`
 	EntityID      *string         `json:"entity_id"`
-	ProductID     *uuid.UUID      `json:"product_id"`
+	AppID         *uuid.UUID      `json:"app_id"`
 	AccountPrefix *string         `json:"account_prefix"`
 	Details       json.RawMessage `json:"details"`
 }
 
 type dashboardWindowJSON struct {
-	Total     int64            `json:"total"`
-	Payments  int64            `json:"payments"`
-	ByProduct map[string]int64 `json:"by_product"` // product id -> KES; nil UUID = unassigned (suspense)
+	Total    int64            `json:"total"`
+	Payments int64            `json:"payments"`
+	ByApp    map[string]int64 `json:"by_app"` // app id -> KES; nil UUID = unassigned (unmatched)
 }
 
 func toWindow(w reporting.Window) dashboardWindowJSON {
-	out := dashboardWindowJSON{Total: w.Total, Payments: w.Payments, ByProduct: map[string]int64{}}
-	for k, v := range w.ByProduct {
-		out.ByProduct[k.String()] = v
+	out := dashboardWindowJSON{Total: w.Total, Payments: w.Payments, ByApp: map[string]int64{}}
+	for k, v := range w.ByApp {
+		out.ByApp[k.String()] = v
 	}
 	return out
 }
 
 type dashboardDayJSON struct {
-	Day       string           `json:"day"`
-	Total     int64            `json:"total"`
-	Payments  int64            `json:"payments"`
-	ByProduct map[string]int64 `json:"by_product"`
+	Day      string           `json:"day"`
+	Total    int64            `json:"total"`
+	Payments int64            `json:"payments"`
+	ByApp    map[string]int64 `json:"by_app"`
 }
 
 type dashboardJSON struct {
@@ -425,59 +346,49 @@ type dashboardJSON struct {
 	Last7Days   dashboardWindowJSON `json:"last_7_days"`
 	Last30Days  dashboardWindowJSON `json:"last_30_days"`
 	Daily       []dashboardDayJSON  `json:"daily"`
-	Products    []productJSON       `json:"products"`
+	Apps        []appJSON           `json:"apps"`
 	Counts      map[string]int64    `json:"counts"`
 	Timezone    string              `json:"timezone"`
 	GeneratedAt time.Time           `json:"generated_at"`
 }
 
-func toDashboard(d reporting.Dashboard, products []product.Product) dashboardJSON {
+func toDashboard(d reporting.Dashboard, apps []app.App) dashboardJSON {
 	out := dashboardJSON{
 		Today: toWindow(d.Today), Last7Days: toWindow(d.Last7Days), Last30Days: toWindow(d.Last30Days),
-		Daily: make([]dashboardDayJSON, len(d.Daily)), Products: []productJSON{}, Timezone: "Africa/Nairobi", GeneratedAt: d.GeneratedAt,
+		Daily: make([]dashboardDayJSON, len(d.Daily)), Apps: []appJSON{}, Timezone: "Africa/Nairobi", GeneratedAt: d.GeneratedAt,
 		Counts: map[string]int64{
-			"open_requests": d.Counts.OpenRequests, "outstanding": d.Counts.Outstanding,
-			"suspense_count": d.Counts.SuspenseCount, "suspense_amount": d.Counts.SuspenseAmount,
-			"needs_review": d.Counts.NeedsReview, "pending": d.Counts.Pending,
-			"credit_held": d.Counts.CreditHeld, "payers": d.Counts.Payers,
-			"duplicate_references": d.Counts.DuplicateReferences,
-			"unknown_stk_pushes":   d.Counts.UnknownStkPushes, "unprocessed_callbacks": d.Counts.UnprocessedCallbacks,
-			"inactive_product_payments": d.Counts.InactiveProductPayments,
+			"charges_pending":                d.Counts.ChargesPending,
+			"charges_succeeded_today":        d.Counts.ChargesSucceededToday,
+			"charges_succeeded_today_amount": d.Counts.ChargesSucceededTodayAmount,
+			"charges_needs_review":           d.Counts.ChargesNeedsReview,
+			"transactions_needs_review":      d.Counts.TransactionsNeedsReview,
+			"unmatched_count":                d.Counts.UnmatchedCount,
+			"unmatched_amount":               d.Counts.UnmatchedAmount,
+			"pending_transactions":           d.Counts.PendingTransactions,
+			"unknown_stk_pushes":             d.Counts.UnknownStkPushes,
+			"unprocessed_callbacks":          d.Counts.UnprocessedCallbacks,
+			"inactive_app_payments":          d.Counts.InactiveAppPayments,
 		},
 	}
 	for i, day := range d.Daily {
 		bp := map[string]int64{}
-		for k, v := range day.ByProduct {
+		for k, v := range day.ByApp {
 			bp[k.String()] = v
 		}
-		out.Daily[i] = dashboardDayJSON{Day: day.Day, Total: day.Total, Payments: day.Payments, ByProduct: bp}
+		out.Daily[i] = dashboardDayJSON{Day: day.Day, Total: day.Total, Payments: day.Payments, ByApp: bp}
 	}
-	for _, p := range products {
-		out.Products = append(out.Products, toProduct(p))
+	for _, p := range apps {
+		out.Apps = append(out.Apps, toApp(p))
 	}
 	return out
-}
-
-type driftJSON struct {
-	Kind   string    `json:"kind"`
-	ID     uuid.UUID `json:"id"`
-	Cached int64     `json:"cached"`
-	Actual int64     `json:"actual"`
 }
 
 type integrityJSON struct {
-	AuditChainOK bool        `json:"audit_chain_ok"`
-	FirstBadID   int64       `json:"first_bad_audit_id,omitempty"`
-	LedgerOK     bool        `json:"ledger_ok"`
-	Drift        []driftJSON `json:"drift"`
-	CheckedAt    time.Time   `json:"checked_at"`
+	AuditChainOK bool      `json:"audit_chain_ok"`
+	FirstBadID   int64     `json:"first_bad_audit_id,omitempty"`
+	CheckedAt    time.Time `json:"checked_at"`
 }
 
 func toIntegrity(i reporting.Integrity) integrityJSON {
-	out := integrityJSON{AuditChainOK: i.AuditChainOK, FirstBadID: i.FirstBadID, LedgerOK: len(i.Drift) == 0,
-		Drift: []driftJSON{}, CheckedAt: i.CheckedAt}
-	for _, d := range i.Drift {
-		out.Drift = append(out.Drift, driftJSON{Kind: d.Kind, ID: d.ID, Cached: d.Cached, Actual: d.Actual})
-	}
-	return out
+	return integrityJSON{AuditChainOK: i.AuditChainOK, FirstBadID: i.FirstBadID, CheckedAt: i.CheckedAt}
 }

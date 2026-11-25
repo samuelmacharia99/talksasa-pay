@@ -19,7 +19,7 @@ import (
 // Actor identifies who performed an action.
 type Actor struct {
 	Type store.AuditActorType
-	ID   string // admin user id, CLI operator name, product id, or system component
+	ID   string // admin user id, CLI operator name, app id, or system component
 }
 
 // String renders the actor for transaction_events ("cli:alice").
@@ -44,18 +44,18 @@ func Admin(userID uuid.UUID) Actor {
 	return Actor{Type: store.AuditActorTypeAdmin, ID: userID.String()}
 }
 
-// Product returns an actor for an authenticated product API key.
-func Product(productID uuid.UUID) Actor {
-	return Actor{Type: store.AuditActorTypeProduct, ID: productID.String()}
+// App returns an actor for an authenticated app API key.
+func App(appID uuid.UUID) Actor {
+	return Actor{Type: store.AuditActorTypeApp, ID: appID.String()}
 }
 
 // Entry is one audited action.
 type Entry struct {
 	Actor      Actor
-	Action     string // dotted, e.g. "product.created", "api_key.revoked"
+	Action     string // dotted, e.g. "app.created", "api_key.revoked"
 	EntityType string
 	EntityID   string
-	ProductID  *uuid.UUID
+	AppID      *uuid.UUID
 	Details    map[string]any
 }
 
@@ -88,7 +88,7 @@ func Record(ctx context.Context, q *store.Queries, e Entry) error {
 		Action:     e.Action,
 		EntityType: e.EntityType,
 		EntityID:   entityID,
-		ProductID:  e.ProductID,
+		AppID:      e.AppID,
 		Details:    details,
 	})
 }

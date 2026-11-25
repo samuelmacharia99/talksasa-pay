@@ -12,27 +12,27 @@ import (
 	"github.com/google/uuid"
 )
 
-const getProductWebhookTarget = `-- name: GetProductWebhookTarget :one
-SELECT id, status, webhook_url FROM products WHERE id = $1
+const getAppWebhookTarget = `-- name: GetAppWebhookTarget :one
+SELECT id, status, webhook_url FROM apps WHERE id = $1
 `
 
-type GetProductWebhookTargetRow struct {
+type GetAppWebhookTargetRow struct {
 	ID         uuid.UUID
-	Status     ProductStatus
+	Status     AppStatus
 	WebhookUrl *string
 }
 
-// What the webhook worker needs about a product (never the secrets).
-func (q *Queries) GetProductWebhookTarget(ctx context.Context, id uuid.UUID) (GetProductWebhookTargetRow, error) {
-	row := q.db.QueryRow(ctx, getProductWebhookTarget, id)
-	var i GetProductWebhookTargetRow
+// What the webhook worker needs about an app (never the secrets).
+func (q *Queries) GetAppWebhookTarget(ctx context.Context, id uuid.UUID) (GetAppWebhookTargetRow, error) {
+	row := q.db.QueryRow(ctx, getAppWebhookTarget, id)
+	var i GetAppWebhookTargetRow
 	err := row.Scan(&i.ID, &i.Status, &i.WebhookUrl)
 	return i, err
 }
 
 const getWebhookDelivery = `-- name: GetWebhookDelivery :one
 
-SELECT event_id, product_id, status, attempts, last_attempt_at, last_status_code, last_error, delivered_at, created_at, updated_at FROM webhook_deliveries WHERE event_id = $1
+SELECT event_id, app_id, status, attempts, last_attempt_at, last_status_code, last_error, delivered_at, created_at, updated_at FROM webhook_deliveries WHERE event_id = $1
 `
 
 // Webhook delivery: worker and admin queries (Phase 3).
@@ -42,7 +42,7 @@ func (q *Queries) GetWebhookDelivery(ctx context.Context, eventID uuid.UUID) (We
 	var i WebhookDelivery
 	err := row.Scan(
 		&i.EventID,
-		&i.ProductID,
+		&i.AppID,
 		&i.Status,
 		&i.Attempts,
 		&i.LastAttemptAt,
@@ -56,18 +56,18 @@ func (q *Queries) GetWebhookDelivery(ctx context.Context, eventID uuid.UUID) (We
 }
 
 const getWebhookDeliveryWithEvent = `-- name: GetWebhookDeliveryWithEvent :one
-SELECT d.event_id, d.product_id, p.account_prefix, e.type AS event_type, e.subject_type, e.subject_id,
+SELECT d.event_id, d.app_id, p.account_prefix, e.type AS event_type, e.subject_type, e.subject_id,
        d.status, d.attempts, d.last_attempt_at, d.last_status_code, d.last_error, d.delivered_at, d.created_at,
        e.data AS event_data, e.created_at AS event_created_at
   FROM webhook_deliveries d
   JOIN events e ON e.id = d.event_id
-  JOIN products p ON p.id = d.product_id
+  JOIN apps p ON p.id = d.app_id
  WHERE d.event_id = $1
 `
 
 type GetWebhookDeliveryWithEventRow struct {
 	EventID        uuid.UUID
-	ProductID      uuid.UUID
+	AppID          uuid.UUID
 	AccountPrefix  string
 	EventType      string
 	SubjectType    string
@@ -83,13 +83,13 @@ type GetWebhookDeliveryWithEventRow struct {
 	EventCreatedAt time.Time
 }
 
-// Admin detail: the delivery, its product prefix and the event body.
+// Admin detail: the delivery, its app prefix and the event body.
 func (q *Queries) GetWebhookDeliveryWithEvent(ctx context.Context, eventID uuid.UUID) (GetWebhookDeliveryWithEventRow, error) {
 	row := q.db.QueryRow(ctx, getWebhookDeliveryWithEvent, eventID)
 	var i GetWebhookDeliveryWithEventRow
 	err := row.Scan(
 		&i.EventID,
-		&i.ProductID,
+		&i.AppID,
 		&i.AccountPrefix,
 		&i.EventType,
 		&i.SubjectType,
@@ -107,13 +107,13 @@ func (q *Queries) GetWebhookDeliveryWithEvent(ctx context.Context, eventID uuid.
 	return i, err
 }
 
-const listWebhookDeliveriesWithProduct = `-- name: ListWebhookDeliveriesWithProduct :many
-SELECT d.event_id, d.product_id, p.account_prefix, e.type AS event_type, e.subject_type, e.subject_id,
+const listWebhookDeliveriesWithApp = `-- name: ListWebhookDeliveriesWithApp :many
+SELECT d.event_id, d.app_id, p.account_prefix, e.type AS event_type, e.subject_type, e.subject_id,
        d.status, d.attempts, d.last_attempt_at, d.last_status_code, d.last_error, d.delivered_at, d.created_at
   FROM webhook_deliveries d
   JOIN events e ON e.id = d.event_id
-  JOIN products p ON p.id = d.product_id
- WHERE ($1::uuid IS NULL OR d.product_id = $1)
+  JOIN apps p ON p.id = d.app_id
+ WHERE ($1::uuid IS NULL OR d.app_id = $1)
    AND ($2::webhook_delivery_status IS NULL OR d.status = $2)
    AND ($3::timestamptz IS NULL
         OR (d.created_at, d.event_id) < ($3::timestamptz, $4::uuid))
@@ -121,17 +121,17 @@ SELECT d.event_id, d.product_id, p.account_prefix, e.type AS event_type, e.subje
  LIMIT $5
 `
 
-type ListWebhookDeliveriesWithProductParams struct {
-	ProductID *uuid.UUID
-	Status    NullWebhookDeliveryStatus
-	CursorAt  *time.Time
-	CursorID  *uuid.UUID
-	Lim       int32
+type ListWebhookDeliveriesWithAppParams struct {
+	AppID    *uuid.UUID
+	Status   NullWebhookDeliveryStatus
+	CursorAt *time.Time
+	CursorID *uuid.UUID
+	Lim      int32
 }
 
-type ListWebhookDeliveriesWithProductRow struct {
+type ListWebhookDeliveriesWithAppRow struct {
 	EventID        uuid.UUID
-	ProductID      uuid.UUID
+	AppID          uuid.UUID
 	AccountPrefix  string
 	EventType      string
 	SubjectType    string
@@ -146,9 +146,9 @@ type ListWebhookDeliveriesWithProductRow struct {
 }
 
 // Admin list, newest first, keyset-paginated on (created_at, event_id).
-func (q *Queries) ListWebhookDeliveriesWithProduct(ctx context.Context, arg ListWebhookDeliveriesWithProductParams) ([]ListWebhookDeliveriesWithProductRow, error) {
-	rows, err := q.db.Query(ctx, listWebhookDeliveriesWithProduct,
-		arg.ProductID,
+func (q *Queries) ListWebhookDeliveriesWithApp(ctx context.Context, arg ListWebhookDeliveriesWithAppParams) ([]ListWebhookDeliveriesWithAppRow, error) {
+	rows, err := q.db.Query(ctx, listWebhookDeliveriesWithApp,
+		arg.AppID,
 		arg.Status,
 		arg.CursorAt,
 		arg.CursorID,
@@ -158,12 +158,12 @@ func (q *Queries) ListWebhookDeliveriesWithProduct(ctx context.Context, arg List
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListWebhookDeliveriesWithProductRow
+	var items []ListWebhookDeliveriesWithAppRow
 	for rows.Next() {
-		var i ListWebhookDeliveriesWithProductRow
+		var i ListWebhookDeliveriesWithAppRow
 		if err := rows.Scan(
 			&i.EventID,
-			&i.ProductID,
+			&i.AppID,
 			&i.AccountPrefix,
 			&i.EventType,
 			&i.SubjectType,

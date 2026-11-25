@@ -11,11 +11,12 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/reporting"
 	"github.com/talksasa/talksasa-pay/internal/store"
+	"github.com/talksasa/talksasa-pay/internal/testutil/seed"
 )
 
 // The admin dashboard counts what the M-Pesa jobs leave for staff: unknown
 // STK pushes, callbacks that need attention, and payments for inactive
-// products or closed payers.
+// apps.
 func TestDashboardMpesaCounts(t *testing.T) {
 	e := newEnv(t)
 	rep := reporting.NewService(e.db.App)
@@ -27,27 +28,26 @@ func TestDashboardMpesaCounts(t *testing.T) {
 		}
 		return d.Counts
 	}
-	if c := counts(); c.UnknownStkPushes != 0 || c.UnprocessedCallbacks != 0 || c.InactiveProductPayments != 0 {
+	if c := counts(); c.UnknownStkPushes != 0 || c.UnprocessedCallbacks != 0 || c.InactiveAppPayments != 0 {
 		t.Fatalf("fresh db: %+v", c)
 	}
 
-	pid := e.product("DSH")
-	pr := e.payer(pid)
-	reqID := e.request(pr, 1000, nil)
+	pid := e.app("DSH")
+	ch := e.charge(pid, 1000, time.Time{})
 
 	// One push that a status check left unknown, one still live.
 	unknownPush := func(status store.StkPushStatus) {
 		t.Helper()
 		err := db.WithTx(e.ctx, e.db.App, payWorker.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
-			phone, bill := "254712345678", pr.AccountNumber
+			phone, acct := "254712345678", ch.AccountNumber
 			txn, err := q.InsertPendingSTKTransaction(ctx, store.InsertPendingSTKTransactionParams{
-				ID: uuid.New(), ProductID: &pid, Amount: 1000, Phone: &phone, BillRef: &bill, PayerAccountID: &pr.ID, PaymentRequestID: &reqID,
+				ID: uuid.New(), AppID: &pid, ChargeID: &ch.ID, Amount: 1000, Phone: &phone, AccountNumber: &acct,
 			})
 			if err != nil {
 				return err
 			}
 			now := time.Now()
-			p, err := q.InsertSTKPush(ctx, store.InsertSTKPushParams{ID: uuid.New(), ProductID: pid, PaymentRequestID: reqID,
+			p, err := q.InsertSTKPush(ctx, store.InsertSTKPushParams{ID: uuid.New(), AppID: pid, ChargeID: ch.ID,
 				TransactionID: txn.ID, Source: "pay_page", Phone: phone, Amount: 1000, NextQueryAt: &now})
 			if err != nil {
 				return err
@@ -85,20 +85,21 @@ func TestDashboardMpesaCounts(t *testing.T) {
 		}
 	}
 
-	// A payment while the product is active, then the product is suspended:
-	// the payment now counts as an inactive-product payment.
-	if err := e.pay(pr, 500, nil); err != nil {
-		t.Fatal(err)
+	// A payment while the app is active, then the app is suspended:
+	// the payment now counts as an inactive-app payment.
+	seed.Payment(t, e.ctx, e.db.App, &pid, "DSH-1", 500)
+	if c := counts(); c.InactiveAppPayments != 0 {
+		t.Fatalf("active app counted: %+v", c)
 	}
-	if c := counts(); c.InactiveProductPayments != 0 {
-		t.Fatalf("active product counted: %+v", c)
-	}
-	if _, err := e.products.SetStatus(e.ctx, operator, pid, store.ProductStatusSuspended); err != nil {
+	if _, err := e.apps.SetStatus(e.ctx, operator, pid, store.AppStatusSuspended); err != nil {
 		t.Fatal(err)
 	}
 
 	c := counts()
-	if c.UnknownStkPushes != 1 || c.UnprocessedCallbacks != 2 || c.InactiveProductPayments != 1 {
-		t.Fatalf("counts: unknown=%d callbacks=%d inactive=%d", c.UnknownStkPushes, c.UnprocessedCallbacks, c.InactiveProductPayments)
+	if c.ChargesPending != 1 || c.UnmatchedCount != 0 {
+		t.Fatalf("charge counts: %+v", c)
+	}
+	if c.UnknownStkPushes != 1 || c.UnprocessedCallbacks != 2 || c.InactiveAppPayments != 1 {
+		t.Fatalf("counts: unknown=%d callbacks=%d inactive=%d", c.UnknownStkPushes, c.UnprocessedCallbacks, c.InactiveAppPayments)
 	}
 }

@@ -35,9 +35,9 @@ func TestContextAttrs(t *testing.T) {
 	var buf bytes.Buffer
 	l := New(&buf, Options{Level: slog.LevelInfo})
 	ctx := WithAttrs(context.Background(), slog.String("request_id", "r-123"))
-	ctx = WithAttrs(ctx, slog.String("product_id", "p-1"))
+	ctx = WithAttrs(ctx, slog.String("app_id", "p-1"))
 	l.InfoContext(ctx, "hello")
-	if !strings.Contains(buf.String(), `"request_id":"r-123"`) || !strings.Contains(buf.String(), `"product_id":"p-1"`) {
+	if !strings.Contains(buf.String(), `"request_id":"r-123"`) || !strings.Contains(buf.String(), `"app_id":"p-1"`) {
 		t.Fatalf("context attrs missing: %s", buf.String())
 	}
 }

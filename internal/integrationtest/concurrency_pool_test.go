@@ -7,11 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-
-	"github.com/talksasa/talksasa-pay/internal/audit"
-	"github.com/talksasa/talksasa-pay/internal/payer"
-	"github.com/talksasa/talksasa-pay/internal/paymentrequest"
 )
 
 // cleanCtxError reports whether err is what a caller should see when its
@@ -28,15 +25,13 @@ func cleanCtxError(err error) bool {
 // 12. Far more goroutines than pool connections, each with a short deadline.
 // Failures must be clean context errors with no partial writes; retrying
 // the failed operations afterwards (same receipts / idempotency keys) books
-// each exactly once, and nothing drifts.
+// each exactly once.
 func TestConcurrencyPoolExhaustionShortDeadlines(t *testing.T) {
 	e := newConcEnv(t, 4)
-	p := e.product("POOL").Product
-	const nPayers = 8
-	payers := make([]payer.Payer, nPayers)
-	for i := range payers {
-		payers[i] = e.payer(p.ID, fmt.Sprintf("c%d", i))
-		e.request(p.ID, payers[i].ID, 5000)
+	p := e.app("POOL").App
+	const nCharges = 8
+	for i := 0; i < nCharges; i++ {
+		e.charge(p.ID, 5000)
 	}
 
 	const n = 160
@@ -46,15 +41,14 @@ func TestConcurrencyPoolExhaustionShortDeadlines(t *testing.T) {
 	}
 	amount := func(i int) int64 { return 100 + int64(i%7)*10 }
 	op := func(ctx context.Context, i int) error {
-		pr := payers[i%nPayers]
 		if i%5 == 0 {
-			_, err := e.requests.Create(ctx, audit.Product(p.ID), p.ID, paymentrequest.CreateParams{
-				PayerAccountID: pr.ID, ProductReference: fmt.Sprintf("P-%d", i), Description: "pool",
-				Amount: 700, IdempotencyKey: fmt.Sprintf("pool-%d", i),
-			})
+			_, err := e.insertCharge(ctx, p.ID, fmt.Sprintf("P-%d", i), fmt.Sprintf("pool-%d", i), 700)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil // same key already inserted (a timed-out attempt that committed)
+			}
 			return err
 		}
-		_, _, err := e.payErr(ctx, e.ledger, pr, amount(i), nil, receipts[i])
+		_, err := e.paymentErr(ctx, &p.ID, nil, amount(i), receipts[i])
 		return err
 	}
 
@@ -78,9 +72,8 @@ func TestConcurrencyPoolExhaustionShortDeadlines(t *testing.T) {
 		t.Fatalf("%d of %d timed out: the scenario needs both outcomes", len(failed), n)
 	}
 
-	// No partial writes: every payment that exists is fully allocated, and
-	// nothing is left idle in a transaction.
-	e.checkInvariants(invariantOpts{})
+	// No partial writes, and nothing is left idle in a transaction.
+	e.checkInvariants()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		var idle int64
@@ -110,14 +103,17 @@ func TestConcurrencyPoolExhaustionShortDeadlines(t *testing.T) {
 		}
 	}
 	var got int64
-	if err := e.db.Owner.QueryRow(e.ctx, `SELECT coalesce(sum(amount), 0)::bigint FROM transactions WHERE product_id = $1 AND kind = 'payment'`, p.ID).Scan(&got); err != nil {
+	if err := e.db.Owner.QueryRow(e.ctx, `SELECT coalesce(sum(amount), 0)::bigint FROM transactions WHERE app_id = $1 AND kind = 'payment'`, p.ID).Scan(&got); err != nil {
 		t.Fatal(err)
 	}
 	if got != want {
 		t.Fatalf("booked %d, want %d (a receipt was lost or doubled)", got, want)
 	}
-	if c := e.count(`SELECT count(*) FROM payment_requests WHERE product_id = $1`, p.ID); c != nPayers+n/5 {
-		t.Fatalf("requests = %d, want %d", c, nPayers+n/5)
+	if c := e.count(`SELECT count(*) FROM charges WHERE app_id = $1`, p.ID); c != nCharges+n/5 {
+		t.Fatalf("charges = %d, want %d", c, nCharges+n/5)
 	}
-	e.checkInvariants(invariantOpts{})
+	if c := e.count(`SELECT count(*) FROM events WHERE app_id = $1 AND type = 'payment.received'`, p.ID); c != int64(n-n/5) {
+		t.Fatalf("payment.received events = %d, want %d", c, n-n/5)
+	}
+	e.checkInvariants()
 }

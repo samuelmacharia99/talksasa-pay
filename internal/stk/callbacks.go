@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/talksasa/talksasa-pay/internal/accountref"
 	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/ledger"
 	"github.com/talksasa/talksasa-pay/internal/money"
@@ -103,12 +104,12 @@ var errCallbackNotFound = errors.New("stk: callback not found")
 // an already-processed callback is a no-op.
 //
 // STK success: complete the push's pending transaction with the receipt and
-// allocate it (target request first); amount mismatch or a receipt already
+// pay its charge (ledger.SucceedCharge); amount mismatch or a receipt already
 // on another row -> needs_review + alarm; unknown CheckoutRequestID -> match
 // a single orphan push by phone+amount, else record unmatched. STK failure:
 // fail the push and its transaction (a late failure after "unknown" also
-// fails it). C2B: RecordAndAllocate routed by BillRef (unmatched ->
-// suspense; inactive -> still allocated, warning).
+// fails it). C2B: routed to an app by account prefix (unknown prefix ->
+// unmatched; inactive app -> still recorded and forwarded, warning).
 //
 // Anomalies (unreadable bodies, amount mismatches, receipts on another row,
 // foreign short codes) are final: the callback is marked processed with the
@@ -298,10 +299,8 @@ func (s *Service) stkSuccess(ctx context.Context, q *store.Queries, cb store.Mpe
 		if err != nil {
 			return outcome{}, err
 		}
-		if done.PayerAccountID != nil {
-			if _, err := s.o.Alloc.AllocateTransaction(ctx, q, callbackActor, done.ID); err != nil {
-				return outcome{}, err
-			}
+		if err := s.payCharge(ctx, q, done); err != nil {
+			return outcome{}, err
 		}
 		if err := s.succeedPushTx(ctx, q, push, r.ResultDesc); err != nil {
 			return outcome{}, err
@@ -361,11 +360,11 @@ func (s *Service) successAfterGiveUp(ctx context.Context, q *store.Queries, cb s
 	}
 	in := ledger.IncomingPayment{
 		Channel: store.TxnChannelMpesaStk, Receipt: r.Receipt, ProviderRequest: provReq, Amount: money.KES(r.Amount),
-		Phone: usablePhone(r.Phone), ProductID: &push.ProductID, PayerAccountID: failed.PayerAccountID,
-		PaymentRequestID: &push.PaymentRequestID, OccurredAt: r.OccurredAt, RawPayload: cb.Raw,
+		Phone: usablePhone(r.Phone), AppID: &push.AppID, ChargeID: &push.ChargeID,
+		OccurredAt: r.OccurredAt, RawPayload: cb.Raw,
 	}
-	if failed.BillRef != nil {
-		in.BillRef = *failed.BillRef
+	if failed.AccountNumber != nil {
+		in.AccountNumber = *failed.AccountNumber
 	}
 	txn, created, err := ledger.RecordIncoming(ctx, q, in)
 	if errors.Is(err, ledger.ErrReceiptConflict) {
@@ -380,10 +379,8 @@ func (s *Service) successAfterGiveUp(ctx context.Context, q *store.Queries, cb s
 			append(attrs, slog.String("transaction_id", txn.ID.String()))...)
 		return outcome{note: "receipt already recorded on transaction " + txn.ID.String(), txnID: &txn.ID}, nil
 	}
-	if txn.PayerAccountID != nil {
-		if _, err := s.o.Alloc.AllocateTransaction(ctx, q, callbackActor, txn.ID); err != nil {
-			return outcome{}, err
-		}
+	if err := s.payCharge(ctx, q, txn); err != nil {
+		return outcome{}, err
 	}
 	if push.CheckoutRequestID == nil {
 		if push, err = q.SetSTKPushCheckout(ctx, store.SetSTKPushCheckoutParams{
@@ -393,7 +390,7 @@ func (s *Service) successAfterGiveUp(ctx context.Context, q *store.Queries, cb s
 		}
 	}
 	// The money is on the new transaction: stk_push.succeeded (and every
-	// later read of the push) must point products at it, not the failed row.
+	// later read of the push) must point apps at it, not the failed row.
 	if push, err = q.SetSTKPushPaidTransaction(ctx, store.SetSTKPushPaidTransactionParams{PaidTransactionID: &txn.ID, ID: push.ID}); err != nil {
 		return outcome{}, fmt.Errorf("stk: link paid transaction: %w", err)
 	}
@@ -407,8 +404,7 @@ func (s *Service) successAfterGiveUp(ctx context.Context, q *store.Queries, cb s
 
 // recordSecondPayment records an STK payment whose prompt had already been
 // completed by a separate paybill payment: a new mpesa_stk transaction for
-// the same payer (targeting the prompt's request; if that is already paid,
-// the allocation engine moves the money on as usual).
+// the same charge (already succeeded, so it is reported as a duplicate).
 func (s *Service) recordSecondPayment(ctx context.Context, q *store.Queries, cb store.MpesaCallback, push Push, first store.Transaction, r mpesa.STKResult, lb *logbuf) (outcome, error) {
 	if r.Amount <= 0 {
 		return outcome{note: "second payment without an amount; not recorded", txnID: &first.ID}, nil
@@ -423,11 +419,11 @@ func (s *Service) recordSecondPayment(ctx context.Context, q *store.Queries, cb 
 	}
 	in := ledger.IncomingPayment{
 		Channel: store.TxnChannelMpesaStk, Receipt: r.Receipt, ProviderRequest: provReq, Amount: money.KES(r.Amount),
-		Phone: usablePhone(r.Phone), ProductID: &push.ProductID, PayerAccountID: first.PayerAccountID,
-		PaymentRequestID: &push.PaymentRequestID, OccurredAt: r.OccurredAt, RawPayload: cb.Raw,
+		Phone: usablePhone(r.Phone), AppID: &push.AppID, ChargeID: &push.ChargeID,
+		OccurredAt: r.OccurredAt, RawPayload: cb.Raw,
 	}
-	if first.BillRef != nil {
-		in.BillRef = *first.BillRef
+	if first.AccountNumber != nil {
+		in.AccountNumber = *first.AccountNumber
 	}
 	txn, created, err := ledger.RecordIncoming(ctx, q, in)
 	attrs := []any{slog.String("callback_id", cb.ID.String()), slog.String("stk_push_id", push.ID.String()),
@@ -442,10 +438,10 @@ func (s *Service) recordSecondPayment(ctx context.Context, q *store.Queries, cb 
 	if !created {
 		return outcome{txnID: &txn.ID}, nil // duplicate
 	}
-	if txn.PayerAccountID != nil {
-		if _, err := s.o.Alloc.AllocateTransaction(ctx, q, callbackActor, txn.ID); err != nil {
-			return outcome{}, err
-		}
+	// The charge was already paid by the paybill payment: SucceedCharge
+	// reports this one as a duplicate (payment.received, duplicate_of_charge).
+	if err := s.payCharge(ctx, q, txn); err != nil {
+		return outcome{}, err
 	}
 	lb.warn("customer paid a prompt and a paybill payment of the same amount; both recorded",
 		append(attrs, slog.String("transaction_id", txn.ID.String()), slog.Int64("amount", txn.Amount))...)
@@ -464,7 +460,7 @@ func (s *Service) succeedPushTx(ctx context.Context, q *store.Queries, push Push
 	if err != nil {
 		return fmt.Errorf("stk: push succeeded: %w", err)
 	}
-	return s.o.Events.EmitSTKPush(ctx, q, out.ProductID, out.ID, events.STKPushSucceeded)
+	return s.o.Events.EmitSTKPush(ctx, q, out.AppID, out.ID, events.STKPushSucceeded)
 }
 
 // pushForSuccess finds (and locks) the push a success callback is about: by
@@ -532,21 +528,21 @@ func (s *Service) pushForSuccess(ctx context.Context, q *store.Queries, cb store
 // pickOrphan chooses the push an orphan success callback belongs to among
 // candidates with the same phone and amount (newest first). A customer who
 // retried after a lost Daraja answer leaves a failed push and a newer
-// initiating one for the SAME request: the single initiating push wins; if
-// all are failed but for one request, the newest is used. Anything else is
-// ambiguous (the payment then goes to suspense for staff).
+// initiating one for the SAME charge: the single initiating push wins; if
+// all are failed but for one charge, the newest is used. Anything else is
+// ambiguous (the payment is then recorded unmatched for staff).
 func pickOrphan(cands []store.StkPush) (*store.StkPush, string) {
 	if len(cands) == 0 {
 		return nil, ""
 	}
 	var live []store.StkPush
-	sameRequest := true
+	sameCharge := true
 	for _, c := range cands {
 		if c.Status == store.StkPushStatusInitiating {
 			live = append(live, c)
 		}
-		if c.PaymentRequestID != cands[0].PaymentRequestID {
-			sameRequest = false
+		if c.ChargeID != cands[0].ChargeID {
+			sameCharge = false
 		}
 	}
 	switch {
@@ -554,14 +550,14 @@ func pickOrphan(cands []store.StkPush) (*store.StkPush, string) {
 		return &live[0], ""
 	case len(live) > 1:
 		return nil, "several live orphan pushes with this phone and amount"
-	case sameRequest:
+	case sameCharge:
 		return &cands[0], ""
 	}
-	return nil, "several orphan pushes for different requests with this phone and amount"
+	return nil, "several orphan pushes for different charges with this phone and amount"
 }
 
 // recordUnmatchedSTK records a successful STK payment we cannot tie to a
-// push: unmatched (suspense, no product), with an alarm.
+// push: unmatched (no app), with an alarm.
 func (s *Service) recordUnmatchedSTK(ctx context.Context, q *store.Queries, cb store.MpesaCallback, r mpesa.STKResult, lb *logbuf, why string) (outcome, error) {
 	provReq := r.CheckoutRequestID
 	if _, err := q.GetTransactionByProviderRequest(ctx, store.GetTransactionByProviderRequestParams{
@@ -587,8 +583,8 @@ func (s *Service) recordUnmatchedSTK(ctx context.Context, q *store.Queries, cb s
 	if !created {
 		return outcome{txnID: &txn.ID}, nil // duplicate receipt
 	}
-	lb.alarm("STK payment that matches no push recorded unmatched (suspense)", append(attrs, slog.String("transaction_id", txn.ID.String()), slog.String("why", why))...)
-	return outcome{note: "unmatched STK payment held in suspense: " + why, txnID: &txn.ID}, nil
+	lb.alarm("STK payment that matches no push recorded unmatched", append(attrs, slog.String("transaction_id", txn.ID.String()), slog.String("why", why))...)
+	return outcome{note: "unmatched STK payment held for staff: " + why, txnID: &txn.ID}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -609,24 +605,30 @@ func (s *Service) processC2B(ctx context.Context, q *store.Queries, cb store.Mpe
 		lb.alarm("C2B confirmation for another short code; not recorded", append(attrs, slog.String("short_code", c.ShortCode))...)
 		return outcome{note: "C2B confirmation for short code " + truncate(c.ShortCode, 32) + " (not our paybill); not recorded"}, nil
 	}
-	if s.o.Payers == nil {
-		return outcome{}, errors.New("stk: payer service not configured")
+	// Route by account-number prefix (money rule 7).
+	// TODO(gateway-core): match a live charge (FindLiveChargesByAccount,
+	// exactly one candidate) and pay it via SucceedCharge; otherwise emit
+	// payment.received; warn for inactive apps (rule 8).
+	var appID *uuid.UUID
+	var appActive bool
+	var norm string
+	if ref, err := accountref.Parse(c.BillRef); err == nil {
+		a, err := q.GetAppByPrefix(ctx, ref.Prefix)
+		switch {
+		case err == nil:
+			appID, appActive, norm = &a.ID, a.Status == store.AppStatusActive, ref.Normalized
+		case !db.IsNotFound(err):
+			return outcome{}, err
+		}
 	}
-	route, ok, err := s.o.Payers.Route(ctx, q, c.BillRef)
-	if err != nil {
-		return outcome{}, err
-	}
-	if ok {
-		if res, matched, err := s.c2bForWaitingPrompt(ctx, q, cb, c, route.PayerID, lb, attrs); err != nil || matched {
+	if appID != nil {
+		if res, matched, err := s.c2bForWaitingPrompt(ctx, q, cb, c, *appID, norm, lb, attrs); err != nil || matched {
 			return res, err
 		}
 	}
 	in := ledger.IncomingPayment{
 		Channel: store.TxnChannelMpesaC2b, Receipt: c.Receipt, Amount: money.KES(c.Amount), Phone: usablePhone(c.Phone),
-		BillRef: c.BillRef, OccurredAt: c.OccurredAt, RawPayload: cb.Raw,
-	}
-	if ok {
-		in.ProductID, in.PayerAccountID = &route.ProductID, &route.PayerID
+		AccountNumber: c.BillRef, AppID: appID, OccurredAt: c.OccurredAt, RawPayload: cb.Raw,
 	}
 	txn, created, err := ledger.RecordIncoming(ctx, q, in)
 	if errors.Is(err, ledger.ErrReceiptConflict) {
@@ -636,36 +638,35 @@ func (s *Service) processC2B(ctx context.Context, q *store.Queries, cb store.Mpe
 	if err != nil {
 		return outcome{}, err
 	}
-	if txn.PayerAccountID != nil && txn.Status == store.TxnStatusSucceeded {
-		if _, err := s.o.Alloc.AllocateTransaction(ctx, q, callbackActor, txn.ID); err != nil {
-			return outcome{}, err
-		}
-	}
 	attrs = append(attrs, slog.String("transaction_id", txn.ID.String()))
 	switch {
 	case !created:
 		lb.info("duplicate C2B receipt ignored", attrs...)
 		return outcome{note: "duplicate receipt", txnID: &txn.ID}, nil
-	case !ok:
-		lb.warn("C2B payment to an unknown account number held in suspense", attrs...)
-		return outcome{note: "unknown account number; held in suspense", txnID: &txn.ID}, nil
-	case !route.Active:
-		lb.warn("C2B payment for an inactive product or closed payer allocated as normal",
-			append(attrs, slog.String("product_id", route.ProductID.String()), slog.String("payer_id", route.PayerID.String()))...)
-	default:
+	case appID == nil:
+		lb.warn("C2B payment to an unknown account prefix held unmatched", attrs...)
+		return outcome{note: "unknown account prefix; held unmatched", txnID: &txn.ID}, nil
+	}
+	// TODO(gateway-core): pay the single matching live charge, else
+	// s.o.Events.EmitPaymentReceived(ctx, q, *appID, txn.ID, nil).
+	if !appActive {
+		lb.warn("C2B payment for an inactive app recorded and forwarded as normal",
+			append(attrs, slog.String("app_id", appID.String()))...)
+	} else {
 		lb.info("c2b payment received", attrs...)
 	}
 	return outcome{txnID: &txn.ID}, nil
 }
 
 // c2bForWaitingPrompt: some paybills send a C2B confirmation for STK
-// payments too. If this confirmation's receipt is new and the payer has
-// exactly one prompt still waiting (or in review) for exactly this amount,
-// it IS that prompt's payment (user decision 2026-11-24): complete the
-// prompt's transaction with this receipt, so the money pays the bill the
-// prompt was for, and the STK callback carrying the same receipt is then a
-// duplicate. matched=false means: record it as an ordinary C2B payment.
-func (s *Service) c2bForWaitingPrompt(ctx context.Context, q *store.Queries, cb store.MpesaCallback, c mpesa.C2BConfirmation, payerID uuid.UUID, lb *logbuf, attrs []any) (outcome, bool, error) {
+// payments too. If this confirmation's receipt is new and the app has
+// exactly one prompt still waiting (or in review) for a live charge with
+// this account number and exactly this amount, it IS that prompt's payment
+// (user decision 2026-11-24): complete the prompt's transaction with this
+// receipt, so the money pays the charge the prompt was for, and the STK
+// callback carrying the same receipt is then a duplicate. matched=false
+// means: record it as an ordinary C2B payment.
+func (s *Service) c2bForWaitingPrompt(ctx context.Context, q *store.Queries, cb store.MpesaCallback, c mpesa.C2BConfirmation, appID uuid.UUID, accountNorm string, lb *logbuf, attrs []any) (outcome, bool, error) {
 	if _, err := q.GetTransactionByReceipt(ctx, store.GetTransactionByReceiptParams{Provider: "mpesa", ProviderTransactionID: &c.Receipt}); err == nil {
 		return outcome{}, false, nil // already recorded: the ordinary path reports the duplicate
 	} else if !db.IsNotFound(err) {
@@ -675,7 +676,9 @@ func (s *Service) c2bForWaitingPrompt(ctx context.Context, q *store.Queries, cb 
 	if p := usablePhone(c.Phone); p != "" {
 		ph = &p
 	}
-	cands, err := q.FindLiveSTKPushesForC2B(ctx, store.FindLiveSTKPushesForC2BParams{PayerAccountID: &payerID, Amount: c.Amount, Phone: ph})
+	cands, err := q.FindLiveSTKPushesForC2B(ctx, store.FindLiveSTKPushesForC2BParams{
+		AppID: appID, AccountNumberNorm: accountNorm, Amount: c.Amount, Phone: ph,
+	})
 	if err != nil {
 		return outcome{}, false, err
 	}
@@ -710,10 +713,8 @@ func (s *Service) c2bForWaitingPrompt(ctx context.Context, q *store.Queries, cb 
 	if err != nil {
 		return outcome{}, false, err
 	}
-	if done.PayerAccountID != nil {
-		if _, err := s.o.Alloc.AllocateTransaction(ctx, q, callbackActor, done.ID); err != nil {
-			return outcome{}, false, err
-		}
+	if err := s.payCharge(ctx, q, done); err != nil {
+		return outcome{}, false, err
 	}
 	if err := s.succeedPushTx(ctx, q, push, "Confirmed by Safaricom's paybill notice (receipt "+c.Receipt+")"); err != nil {
 		return outcome{}, false, err
@@ -734,6 +735,17 @@ func completedByC2B(t store.Transaction) bool {
 		TransID *string `json:"TransID"`
 	}
 	return json.Unmarshal(t.RawPayload, &probe) == nil && probe.TransID != nil
+}
+
+// payCharge applies a succeeded payment to the charge it names (if any).
+func (s *Service) payCharge(ctx context.Context, q *store.Queries, txn store.Transaction) error {
+	if txn.ChargeID == nil {
+		return nil
+	}
+	// TODO(gateway-core): emit charge.succeeded (res.Succeeded) or
+	// payment.received with duplicate_of_charge (already succeeded).
+	_, err := ledger.SucceedCharge(ctx, q, *txn.ChargeID, txn.ID)
+	return err
 }
 
 // usablePhone returns p normalised, or "" if it is not a usable number

@@ -12,16 +12,26 @@ import (
 	"github.com/google/uuid"
 )
 
-const getReversalOf = `-- name: GetReversalOf :one
-SELECT id, product_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, bill_ref, payer_account_id, payment_request_id, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at FROM transactions WHERE kind = 'reversal' AND reverses_transaction_id = $1
+const assignTransactionApp = `-- name: AssignTransactionApp :one
+UPDATE transactions SET app_id = $1
+ WHERE id = $2 AND app_id IS NULL
+RETURNING id, app_id, charge_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, account_number, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at
 `
 
-func (q *Queries) GetReversalOf(ctx context.Context, originalID *uuid.UUID) (Transaction, error) {
-	row := q.db.QueryRow(ctx, getReversalOf, originalID)
+type AssignTransactionAppParams struct {
+	AppID *uuid.UUID
+	ID    uuid.UUID
+}
+
+// Staff assign an unmatched payment to an app (set once; the guard trigger
+// refuses a change). No row when it already has an app.
+func (q *Queries) AssignTransactionApp(ctx context.Context, arg AssignTransactionAppParams) (Transaction, error) {
+	row := q.db.QueryRow(ctx, assignTransactionApp, arg.AppID, arg.ID)
 	var i Transaction
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.Direction,
 		&i.Kind,
 		&i.Channel,
@@ -32,9 +42,43 @@ func (q *Queries) GetReversalOf(ctx context.Context, originalID *uuid.UUID) (Tra
 		&i.ProviderTransactionID,
 		&i.ProviderRequestID,
 		&i.Phone,
-		&i.BillRef,
-		&i.PayerAccountID,
-		&i.PaymentRequestID,
+		&i.AccountNumber,
+		&i.ReversesTransactionID,
+		&i.FailureCode,
+		&i.FailureReason,
+		&i.Reason,
+		&i.CreatedBy,
+		&i.RawPayload,
+		&i.OccurredAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+	)
+	return i, err
+}
+
+const getReversalOf = `-- name: GetReversalOf :one
+SELECT id, app_id, charge_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, account_number, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at FROM transactions WHERE kind = 'reversal' AND reverses_transaction_id = $1
+`
+
+func (q *Queries) GetReversalOf(ctx context.Context, originalID *uuid.UUID) (Transaction, error) {
+	row := q.db.QueryRow(ctx, getReversalOf, originalID)
+	var i Transaction
+	err := row.Scan(
+		&i.ID,
+		&i.AppID,
+		&i.ChargeID,
+		&i.Direction,
+		&i.Kind,
+		&i.Channel,
+		&i.Provider,
+		&i.Status,
+		&i.Amount,
+		&i.Currency,
+		&i.ProviderTransactionID,
+		&i.ProviderRequestID,
+		&i.Phone,
+		&i.AccountNumber,
 		&i.ReversesTransactionID,
 		&i.FailureCode,
 		&i.FailureReason,
@@ -50,7 +94,7 @@ func (q *Queries) GetReversalOf(ctx context.Context, originalID *uuid.UUID) (Tra
 }
 
 const getTransactionByReceipt = `-- name: GetTransactionByReceipt :one
-SELECT id, product_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, bill_ref, payer_account_id, payment_request_id, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at FROM transactions WHERE provider = $1 AND provider_transaction_id = $2
+SELECT id, app_id, charge_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, account_number, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at FROM transactions WHERE provider = $1 AND provider_transaction_id = $2
 `
 
 type GetTransactionByReceiptParams struct {
@@ -63,7 +107,8 @@ func (q *Queries) GetTransactionByReceipt(ctx context.Context, arg GetTransactio
 	var i Transaction
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.Direction,
 		&i.Kind,
 		&i.Channel,
@@ -74,9 +119,7 @@ func (q *Queries) GetTransactionByReceipt(ctx context.Context, arg GetTransactio
 		&i.ProviderTransactionID,
 		&i.ProviderRequestID,
 		&i.Phone,
-		&i.BillRef,
-		&i.PayerAccountID,
-		&i.PaymentRequestID,
+		&i.AccountNumber,
 		&i.ReversesTransactionID,
 		&i.FailureCode,
 		&i.FailureReason,
@@ -91,21 +134,22 @@ func (q *Queries) GetTransactionByReceipt(ctx context.Context, arg GetTransactio
 	return i, err
 }
 
-const getTransactionForProduct = `-- name: GetTransactionForProduct :one
-SELECT id, product_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, bill_ref, payer_account_id, payment_request_id, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at FROM transactions WHERE product_id = $1 AND id = $2
+const getTransactionForApp = `-- name: GetTransactionForApp :one
+SELECT id, app_id, charge_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, account_number, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at FROM transactions WHERE app_id = $1 AND id = $2
 `
 
-type GetTransactionForProductParams struct {
-	ProductID *uuid.UUID
-	ID        uuid.UUID
+type GetTransactionForAppParams struct {
+	AppID *uuid.UUID
+	ID    uuid.UUID
 }
 
-func (q *Queries) GetTransactionForProduct(ctx context.Context, arg GetTransactionForProductParams) (Transaction, error) {
-	row := q.db.QueryRow(ctx, getTransactionForProduct, arg.ProductID, arg.ID)
+func (q *Queries) GetTransactionForApp(ctx context.Context, arg GetTransactionForAppParams) (Transaction, error) {
+	row := q.db.QueryRow(ctx, getTransactionForApp, arg.AppID, arg.ID)
 	var i Transaction
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.Direction,
 		&i.Kind,
 		&i.Channel,
@@ -116,9 +160,7 @@ func (q *Queries) GetTransactionForProduct(ctx context.Context, arg GetTransacti
 		&i.ProviderTransactionID,
 		&i.ProviderRequestID,
 		&i.Phone,
-		&i.BillRef,
-		&i.PayerAccountID,
-		&i.PaymentRequestID,
+		&i.AccountNumber,
 		&i.ReversesTransactionID,
 		&i.FailureCode,
 		&i.FailureReason,
@@ -134,17 +176,18 @@ func (q *Queries) GetTransactionForProduct(ctx context.Context, arg GetTransacti
 }
 
 const getTransactionInternal = `-- name: GetTransactionInternal :one
-SELECT id, product_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, bill_ref, payer_account_id, payment_request_id, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at FROM transactions WHERE id = $1
+SELECT id, app_id, charge_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, account_number, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at FROM transactions WHERE id = $1
 `
 
-// Internal use only (workers, admin): not product-scoped because unmatched
-// payments have no product yet.
+// Internal use only (workers, admin): not app-scoped because unmatched
+// payments have no app yet.
 func (q *Queries) GetTransactionInternal(ctx context.Context, id uuid.UUID) (Transaction, error) {
 	row := q.db.QueryRow(ctx, getTransactionInternal, id)
 	var i Transaction
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.Direction,
 		&i.Kind,
 		&i.Channel,
@@ -155,9 +198,7 @@ func (q *Queries) GetTransactionInternal(ctx context.Context, id uuid.UUID) (Tra
 		&i.ProviderTransactionID,
 		&i.ProviderRequestID,
 		&i.Phone,
-		&i.BillRef,
-		&i.PayerAccountID,
-		&i.PaymentRequestID,
+		&i.AccountNumber,
 		&i.ReversesTransactionID,
 		&i.FailureCode,
 		&i.FailureReason,
@@ -173,23 +214,22 @@ func (q *Queries) GetTransactionInternal(ctx context.Context, id uuid.UUID) (Tra
 }
 
 const insertTransaction = `-- name: InsertTransaction :one
-INSERT INTO transactions (id, product_id, direction, kind, channel, provider, status, amount,
-                          provider_transaction_id, provider_request_id, phone, bill_ref,
-                          payer_account_id, payment_request_id, reverses_transaction_id,
-                          failure_code, failure_reason, reason, created_by, raw_payload,
-                          occurred_at, completed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-        $9, $10, $11, $12,
-        $13, $14, $15,
-        $16, $17, $18, $19, $20,
-        $21, $22)
+INSERT INTO transactions (id, app_id, charge_id, direction, kind, channel, provider, status, amount,
+                          provider_transaction_id, provider_request_id, phone, account_number,
+                          reverses_transaction_id, failure_code, failure_reason, reason, created_by,
+                          raw_payload, occurred_at, completed_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+        $10, $11, $12, $13,
+        $14, $15, $16, $17, $18,
+        $19, $20, $21)
 ON CONFLICT ON CONSTRAINT transactions_provider_receipt_uq DO NOTHING
-RETURNING id, product_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, bill_ref, payer_account_id, payment_request_id, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at
+RETURNING id, app_id, charge_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, account_number, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at
 `
 
 type InsertTransactionParams struct {
 	ID                    uuid.UUID
-	ProductID             *uuid.UUID
+	AppID                 *uuid.UUID
+	ChargeID              *uuid.UUID
 	Direction             TxnDirection
 	Kind                  TxnKind
 	Channel               TxnChannel
@@ -199,9 +239,7 @@ type InsertTransactionParams struct {
 	ProviderTransactionID *string
 	ProviderRequestID     *string
 	Phone                 *string
-	BillRef               *string
-	PayerAccountID        *uuid.UUID
-	PaymentRequestID      *uuid.UUID
+	AccountNumber         *string
 	ReversesTransactionID *uuid.UUID
 	FailureCode           *string
 	FailureReason         *string
@@ -216,7 +254,8 @@ type InsertTransactionParams struct {
 func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionParams) (Transaction, error) {
 	row := q.db.QueryRow(ctx, insertTransaction,
 		arg.ID,
-		arg.ProductID,
+		arg.AppID,
+		arg.ChargeID,
 		arg.Direction,
 		arg.Kind,
 		arg.Channel,
@@ -226,9 +265,7 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 		arg.ProviderTransactionID,
 		arg.ProviderRequestID,
 		arg.Phone,
-		arg.BillRef,
-		arg.PayerAccountID,
-		arg.PaymentRequestID,
+		arg.AccountNumber,
 		arg.ReversesTransactionID,
 		arg.FailureCode,
 		arg.FailureReason,
@@ -241,7 +278,8 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 	var i Transaction
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.Direction,
 		&i.Kind,
 		&i.Channel,
@@ -252,9 +290,7 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 		&i.ProviderTransactionID,
 		&i.ProviderRequestID,
 		&i.Phone,
-		&i.BillRef,
-		&i.PayerAccountID,
-		&i.PaymentRequestID,
+		&i.AccountNumber,
 		&i.ReversesTransactionID,
 		&i.FailureCode,
 		&i.FailureReason,
@@ -270,7 +306,7 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 }
 
 const lockTransactionInternal = `-- name: LockTransactionInternal :one
-SELECT id, product_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, bill_ref, payer_account_id, payment_request_id, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at FROM transactions WHERE id = $1 FOR NO KEY UPDATE
+SELECT id, app_id, charge_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, account_number, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at FROM transactions WHERE id = $1 FOR NO KEY UPDATE
 `
 
 func (q *Queries) LockTransactionInternal(ctx context.Context, id uuid.UUID) (Transaction, error) {
@@ -278,7 +314,8 @@ func (q *Queries) LockTransactionInternal(ctx context.Context, id uuid.UUID) (Tr
 	var i Transaction
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.Direction,
 		&i.Kind,
 		&i.Channel,
@@ -289,9 +326,7 @@ func (q *Queries) LockTransactionInternal(ctx context.Context, id uuid.UUID) (Tr
 		&i.ProviderTransactionID,
 		&i.ProviderRequestID,
 		&i.Phone,
-		&i.BillRef,
-		&i.PayerAccountID,
-		&i.PaymentRequestID,
+		&i.AccountNumber,
 		&i.ReversesTransactionID,
 		&i.FailureCode,
 		&i.FailureReason,

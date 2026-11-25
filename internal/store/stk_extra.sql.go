@@ -13,7 +13,7 @@ import (
 )
 
 const findOrphanSTKPushes = `-- name: FindOrphanSTKPushes :many
-SELECT p.id, p.product_id, p.payment_request_id, p.transaction_id, p.source, p.phone, p.amount, p.idempotency_key, p.request_hash, p.merchant_request_id, p.checkout_request_id, p.status, p.result_code, p.result_desc, p.query_attempts, p.next_query_at, p.created_at, p.updated_at, p.completed_at, p.paid_transaction_id, p.confirm_blocked FROM stk_pushes p
+SELECT p.id, p.app_id, p.charge_id, p.transaction_id, p.source, p.phone, p.amount, p.idempotency_key, p.request_hash, p.merchant_request_id, p.checkout_request_id, p.status, p.result_code, p.result_desc, p.query_attempts, p.next_query_at, p.created_at, p.updated_at, p.completed_at, p.paid_transaction_id, p.confirm_blocked FROM stk_pushes p
   JOIN transactions t ON t.id = p.transaction_id
  WHERE p.checkout_request_id IS NULL AND p.phone = $1 AND p.amount = $2
    AND p.status IN ('initiating', 'failed')
@@ -45,8 +45,8 @@ func (q *Queries) FindOrphanSTKPushes(ctx context.Context, arg FindOrphanSTKPush
 		var i StkPush
 		if err := rows.Scan(
 			&i.ID,
-			&i.ProductID,
-			&i.PaymentRequestID,
+			&i.AppID,
+			&i.ChargeID,
 			&i.TransactionID,
 			&i.Source,
 			&i.Phone,
@@ -77,7 +77,7 @@ func (q *Queries) FindOrphanSTKPushes(ctx context.Context, arg FindOrphanSTKPush
 }
 
 const getSTKPushByTransaction = `-- name: GetSTKPushByTransaction :one
-SELECT id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE transaction_id = $1
+SELECT id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE transaction_id = $1
 `
 
 func (q *Queries) GetSTKPushByTransaction(ctx context.Context, transactionID uuid.UUID) (StkPush, error) {
@@ -85,8 +85,8 @@ func (q *Queries) GetSTKPushByTransaction(ctx context.Context, transactionID uui
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,
@@ -109,25 +109,25 @@ func (q *Queries) GetSTKPushByTransaction(ctx context.Context, transactionID uui
 	return i, err
 }
 
-const latestSTKPushForRequest = `-- name: LatestSTKPushForRequest :one
-SELECT id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes
- WHERE payment_request_id = $1 AND created_at >= $2::timestamptz
+const latestSTKPushForChargeSince = `-- name: LatestSTKPushForChargeSince :one
+SELECT id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes
+ WHERE charge_id = $1 AND created_at >= $2::timestamptz
  ORDER BY created_at DESC, id DESC
  LIMIT 1
 `
 
-type LatestSTKPushForRequestParams struct {
-	PaymentRequestID uuid.UUID
-	Since            time.Time
+type LatestSTKPushForChargeSinceParams struct {
+	ChargeID uuid.UUID
+	Since    time.Time
 }
 
-func (q *Queries) LatestSTKPushForRequest(ctx context.Context, arg LatestSTKPushForRequestParams) (StkPush, error) {
-	row := q.db.QueryRow(ctx, latestSTKPushForRequest, arg.PaymentRequestID, arg.Since)
+func (q *Queries) LatestSTKPushForChargeSince(ctx context.Context, arg LatestSTKPushForChargeSinceParams) (StkPush, error) {
+	row := q.db.QueryRow(ctx, latestSTKPushForChargeSince, arg.ChargeID, arg.Since)
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,
@@ -169,7 +169,7 @@ func (q *Queries) LeaseSTKPush(ctx context.Context, arg LeaseSTKPushParams) erro
 
 const listDueSTKPushesAt = `-- name: ListDueSTKPushesAt :many
 
-SELECT id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes
+SELECT id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes
  WHERE status IN ('initiating', 'sent') AND next_query_at <= $1::timestamptz
  ORDER BY next_query_at
  LIMIT $2
@@ -197,8 +197,8 @@ func (q *Queries) ListDueSTKPushesAt(ctx context.Context, arg ListDueSTKPushesAt
 		var i StkPush
 		if err := rows.Scan(
 			&i.ID,
-			&i.ProductID,
-			&i.PaymentRequestID,
+			&i.AppID,
+			&i.ChargeID,
 			&i.TransactionID,
 			&i.Source,
 			&i.Phone,
@@ -229,7 +229,7 @@ func (q *Queries) ListDueSTKPushesAt(ctx context.Context, arg ListDueSTKPushesAt
 }
 
 const lockSTKPushByTransaction = `-- name: LockSTKPushByTransaction :one
-SELECT id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE transaction_id = $1 FOR NO KEY UPDATE
+SELECT id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE transaction_id = $1 FOR NO KEY UPDATE
 `
 
 func (q *Queries) LockSTKPushByTransaction(ctx context.Context, transactionID uuid.UUID) (StkPush, error) {
@@ -237,8 +237,8 @@ func (q *Queries) LockSTKPushByTransaction(ctx context.Context, transactionID uu
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,
@@ -266,7 +266,7 @@ UPDATE stk_pushes
    SET merchant_request_id = coalesce(merchant_request_id, $1),
        checkout_request_id = $2
  WHERE id = $3 AND checkout_request_id IS NULL
-RETURNING id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked
+RETURNING id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked
 `
 
 type SetSTKPushCheckoutParams struct {
@@ -282,8 +282,8 @@ func (q *Queries) SetSTKPushCheckout(ctx context.Context, arg SetSTKPushCheckout
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,

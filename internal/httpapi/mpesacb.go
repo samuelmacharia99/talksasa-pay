@@ -172,8 +172,9 @@ func (c *callbacks) store(kind store.MpesaCallbackKind) http.HandlerFunc {
 	}
 }
 
-// validation: Talksasa never rejects a C2B payment (unknown accounts go to
-// suspense), so external validation always accepts and stores nothing.
+// validation: Talksasa never rejects a C2B payment (unknown account prefixes
+// are held unmatched), so external validation always accepts and stores
+// nothing.
 func (c *callbacks) validation(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(io.Discard, http.MaxBytesReader(w, r.Body, MaxCallbackBody))
 	ack(w)

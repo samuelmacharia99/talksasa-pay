@@ -27,12 +27,11 @@ var ErrNotPending = errors.New("ledger: transaction is no longer pending")
 
 // StartSTKParams describes the pending row an STK push will complete.
 type StartSTKParams struct {
-	ProductID        uuid.UUID
-	PayerAccountID   uuid.UUID
-	PaymentRequestID uuid.UUID
-	Amount           money.KES
-	Phone            string // normalised 2547XXXXXXXX
-	BillRef          string // payer account number (what Daraja shows as AccountReference)
+	AppID         uuid.UUID
+	ChargeID      uuid.UUID
+	Amount        money.KES // always the charge's exact amount
+	Phone         string    // normalised 2547XXXXXXXX
+	AccountNumber string    // the charge's account number (Daraja AccountReference)
 }
 
 // StartSTK inserts a pending mpesa_stk payment (no receipt).
@@ -49,9 +48,8 @@ func StartSTK(ctx context.Context, q *store.Queries, p StartSTKParams) (Transact
 	}
 	ph := p.Phone
 	row, err := q.InsertPendingSTKTransaction(ctx, store.InsertPendingSTKTransactionParams{
-		ID: id, ProductID: &p.ProductID, Amount: int64(p.Amount), Phone: &ph,
-		BillRef: optStr(truncate(strings.TrimSpace(p.BillRef), 64)), PayerAccountID: &p.PayerAccountID,
-		PaymentRequestID: &p.PaymentRequestID,
+		ID: id, AppID: &p.AppID, ChargeID: &p.ChargeID, Amount: int64(p.Amount), Phone: &ph,
+		AccountNumber: optStr(truncate(strings.TrimSpace(p.AccountNumber), 64)),
 	})
 	if err != nil {
 		return Transaction{}, fmt.Errorf("ledger: insert pending stk transaction: %w", err)

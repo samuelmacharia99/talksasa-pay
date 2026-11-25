@@ -12,31 +12,28 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/talksasa/talksasa-pay/internal/audit"
-	"github.com/talksasa/talksasa-pay/internal/ledger"
-	"github.com/talksasa/talksasa-pay/internal/payer"
-	"github.com/talksasa/talksasa-pay/internal/paymentrequest"
+	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/store"
 )
 
 // 10. A consumer pages the events feed continuously while 20 writers create
-// requests and payments, some of them holding their transaction open (begin,
+// charges and payments, some of them holding their transaction open (begin,
 // emit, sleep, commit) and some rolling back. The feed must never return an
 // event twice, never go backwards, and — after a final drain from the
 // reader's own cursor — must have returned every committed event and nothing
 // from a rolled-back transaction. One River webhook job per event.
 func TestConcurrencyEventsFeedGapFree(t *testing.T) {
 	e := newConcEnv(t, concPoolSize)
-	p := e.product("FEED").Product
+	p := e.app("FEED").App
 	const writers = 20
 	iters := 12
 	if testing.Short() {
 		iters = 5
 	}
-	payers := make([]payer.Payer, writers)
-	for w := range payers {
-		payers[w] = e.payer(p.ID, fmt.Sprintf("c%d", w))
+	subjects := make([]store.Charge, writers)
+	for w := range subjects {
+		subjects[w] = e.charge(p.ID, 100)
 	}
 
 	var (
@@ -49,7 +46,7 @@ func TestConcurrencyEventsFeedGapFree(t *testing.T) {
 		rollback := (w+k)%3 == 0 // a third of held-open transactions roll back
 		err := db.WithTx(e.ctx, e.db.App, worker.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
 			var err error
-			id, err = e.events.Emit(ctx, q, p.ID, "test.held_open", "payer", payers[w].ID, map[string]any{"object": "test", "w": w, "k": k})
+			id, err = e.events.Emit(ctx, q, p.ID, "test.held_open", events.SubjectCharge, subjects[w].ID, map[string]any{"object": "test", "w": w, "k": k})
 			if err != nil {
 				return err
 			}
@@ -83,7 +80,7 @@ func TestConcurrencyEventsFeedGapFree(t *testing.T) {
 		q := store.New(e.db.App)
 		seenIDs := map[uuid.UUID]bool{}
 		for !stop.Load() {
-			page, err := q.ListEventsFeed(e.ctx, store.ListEventsFeedParams{ProductID: p.ID, AfterTxid: curTxid, AfterID: curID, Lim: 7})
+			page, err := q.ListEventsFeed(e.ctx, store.ListEventsFeedParams{AppID: p.ID, AfterTxid: curTxid, AfterID: curID, Lim: 7})
 			if err != nil {
 				readerErr <- err
 				return
@@ -110,15 +107,18 @@ func TestConcurrencyEventsFeedGapFree(t *testing.T) {
 	}()
 
 	errs := storm(writers, func(w int) error {
-		pr := payers[w]
 		for k := 0; k < iters; k++ {
 			switch k % 4 {
 			case 0:
-				if _, err := e.createReq(p.ID, pr.ID, fmt.Sprintf("W%d-%d", w, k), fmt.Sprintf("w%d-%d", w, k), 500, nil); err != nil {
+				c, err := e.insertCharge(e.ctx, p.ID, fmt.Sprintf("W%d-%d", w, k), fmt.Sprintf("w%d-%d", w, k), 500)
+				if err != nil {
+					return err
+				}
+				if _, err := e.paymentErr(e.ctx, &p.ID, &c.ID, 500, newReceipt()); err != nil {
 					return err
 				}
 			case 1, 3:
-				if _, _, err := e.payErr(e.ctx, e.ledger, pr, 300, nil, newReceipt()); err != nil {
+				if _, err := e.paymentErr(e.ctx, &p.ID, nil, 300, newReceipt()); err != nil {
 					return err
 				}
 			case 2:
@@ -163,92 +163,78 @@ func TestConcurrencyEventsFeedGapFree(t *testing.T) {
 	if len(rolledBack) == 0 || len(committed) == 0 {
 		t.Fatal("scenario did not exercise both commit and rollback of held-open transactions")
 	}
-	e.checkInvariants(invariantOpts{}) // includes: feed == table, one job per event
+	e.checkInvariants() // includes: feed == table, one job per event
 }
 
-// 11. Two products hammered at the same time never see each other's rows or
-// events, and cross-product attempts made mid-storm are refused.
-func TestConcurrencyCrossProductIsolation(t *testing.T) {
+// 11. Two apps hammered at the same time never see each other's rows or
+// events, and cross-app attempts made mid-storm are refused.
+func TestConcurrencyCrossAppIsolation(t *testing.T) {
 	e := newConcEnv(t, concPoolSize)
-	prods := []uuid.UUID{e.product("ISOA").Product.ID, e.product("ISOB").Product.ID}
-	const perProduct = 8
-	payers := make([][]payer.Payer, 2)
-	for k, pid := range prods {
-		for i := 0; i < perProduct; i++ {
-			// Same external_ref in both products: must still be distinct payers.
-			payers[k] = append(payers[k], e.payer(pid, fmt.Sprintf("shared-%d", i)))
-		}
-	}
+	apps := []uuid.UUID{e.app("ISOA").App.ID, e.app("ISOB").App.ID}
+	const perApp = 8
 
-	errs := storm(2*perProduct, func(g int) error {
+	errs := storm(2*perApp, func(g int) error {
 		k, i := g%2, g/2
-		pid, other := prods[k], prods[1-k]
-		pr, foreign := payers[k][i], payers[1-k][i]
+		aid, other := apps[k], apps[1-k]
+		q := store.New(e.db.App)
 		for j := 0; j < 6; j++ {
-			c, err := e.createReq(pid, pr.ID, fmt.Sprintf("INV-%d-%d", i, j), fmt.Sprintf("k-%d-%d", i, j), 400, nil)
+			// Same reference in both apps: must still be distinct charges.
+			c, err := e.insertCharge(e.ctx, aid, fmt.Sprintf("INV-%d-%d", i, j), fmt.Sprintf("k-%d-%d-%d", k, i, j), 250)
 			if err != nil {
 				return err
 			}
-			if _, _, err := e.payErr(e.ctx, e.ledger, pr, 250, &c.Request.ID, newReceipt()); err != nil {
+			if _, err := e.paymentErr(e.ctx, &aid, &c.ID, 250, newReceipt()); err != nil {
 				return err
 			}
-			// Cross-product attempts, mid-storm.
-			if _, err := e.requests.Get(e.ctx, other, c.Request.ID); !errors.Is(err, paymentrequest.ErrNotFound) {
-				return fmt.Errorf("other product read request: %w", err)
+			// Cross-app attempts, mid-storm.
+			if _, err := q.GetChargeForApp(e.ctx, store.GetChargeForAppParams{AppID: other, ID: c.ID}); !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("other app read charge: %w", err)
 			}
-			if _, err := e.requests.Cancel(e.ctx, audit.Product(other), other, c.Request.ID); !errors.Is(err, paymentrequest.ErrNotFound) {
-				return fmt.Errorf("other product cancelled request: %w", err)
+			if _, err := q.CancelCharge(e.ctx, store.CancelChargeParams{AppID: other, ID: c.ID}); !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("other app cancelled charge: %w", err)
 			}
-			if _, err := e.createReq(other, pr.ID, "X", fmt.Sprintf("x-%d-%d", i, j), 10, nil); !errors.Is(err, paymentrequest.ErrPayerNotFound) {
-				return fmt.Errorf("other product billed payer: %w", err)
-			}
-			// A payment routed to this product but naming the other
-			// product's payer is refused by the composite foreign keys.
-			if _, _, err := e.ledger.RecordAndAllocate(e.ctx, worker, ledger.IncomingPayment{
-				Channel: "mpesa_c2b", Receipt: newReceipt(), Amount: 5, ProductID: &pid, PayerAccountID: &foreign.ID,
-			}); err == nil {
-				return errors.New("payment crossed products")
+			// A payment routed to the other app but naming this app's
+			// charge is refused by the composite foreign key.
+			if _, err := e.paymentErr(e.ctx, &other, &c.ID, 5, newReceipt()); err == nil {
+				return errors.New("payment crossed apps")
 			}
 		}
 		return nil
 	})
 	requireNoErrors(t, "worker", errs)
 
-	for k, pid := range prods {
-		other := prods[1-k]
-		for _, ev := range e.drainFeed(pid, 0, uuid.Nil, nil) {
-			if ev.ProductID != pid {
-				t.Fatalf("product %s feed returned an event of %s", pid, ev.ProductID)
+	for k, aid := range apps {
+		other := apps[1-k]
+		for _, ev := range e.drainFeed(aid, 0, uuid.Nil, nil) {
+			if ev.AppID != aid {
+				t.Fatalf("app %s feed returned an event of %s", aid, ev.AppID)
 			}
 		}
-		for _, tbl := range []string{"payment_requests", "transactions", "allocation_batches", "allocations", "events", "webhook_deliveries"} {
-			n := e.count(`SELECT count(*) FROM `+tbl+` WHERE product_id = $1`, pid)
-			if n == 0 {
-				t.Fatalf("%s: no rows for product %s", tbl, pid)
+		for _, tbl := range []string{"charges", "transactions", "events", "webhook_deliveries"} {
+			if n := e.count(`SELECT count(*) FROM `+tbl+` WHERE app_id = $1`, aid); n == 0 {
+				t.Fatalf("%s: no rows for app %s", tbl, aid)
 			}
 		}
-		e.zero("allocations naming the other product's payer", `SELECT count(*) FROM allocations a
-			JOIN payer_accounts pa ON pa.id = a.payer_account_id WHERE a.product_id = $1 AND pa.product_id = $2`, pid, other)
-		e.zero("requests naming the other product's payer", `SELECT count(*) FROM payment_requests r
-			JOIN payer_accounts pa ON pa.id = r.payer_account_id WHERE r.product_id = $1 AND pa.product_id = $2`, pid, other)
-		e.zero("events about the other product's subjects", `SELECT count(*) FROM events ev
-			WHERE ev.product_id = $1 AND (ev.subject_id IN (SELECT id FROM payment_requests WHERE product_id = $2)
-			   OR ev.subject_id IN (SELECT id FROM transactions WHERE product_id = $2)
-			   OR ev.subject_id IN (SELECT id FROM payer_accounts WHERE product_id = $2))`, pid, other)
-		e.zero("webhook jobs addressed to the wrong product", `SELECT count(*) FROM river_job j JOIN events ev ON ev.id::text = j.args->>'event_id'
-			WHERE j.kind = 'webhook_delivery' AND ev.product_id = $1 AND j.args->>'product_id' <> $1::text`, pid)
+		e.zero("transactions naming the other app's charge", `SELECT count(*) FROM transactions t
+			JOIN charges c ON c.id = t.charge_id WHERE t.app_id = $1 AND c.app_id = $2`, aid, other)
+		e.zero("events about the other app's subjects", `SELECT count(*) FROM events ev
+			WHERE ev.app_id = $1 AND (ev.subject_id IN (SELECT id FROM charges WHERE app_id = $2)
+			   OR ev.subject_id IN (SELECT id FROM transactions WHERE app_id = $2))`, aid, other)
+		e.zero("webhook jobs addressed to the wrong app", `SELECT count(*) FROM river_job j JOIN events ev ON ev.id::text = j.args->>'event_id'
+			WHERE j.kind = 'webhook_delivery' AND ev.app_id = $1 AND j.args->>'app_id' <> $1::text`, aid)
 	}
 	// Identical work on both sides: identical totals.
 	var a, b int64
 	if err := e.db.Owner.QueryRow(e.ctx, `SELECT
-		(SELECT sum(amount) FROM allocations WHERE product_id = $1), (SELECT sum(amount) FROM allocations WHERE product_id = $2)`,
-		prods[0], prods[1]).Scan(&a, &b); err != nil {
+		(SELECT sum(amount) FROM charges WHERE app_id = $1 AND status = 'succeeded'),
+		(SELECT sum(amount) FROM charges WHERE app_id = $2 AND status = 'succeeded')`,
+		apps[0], apps[1]).Scan(&a, &b); err != nil {
 		t.Fatal(err)
 	}
-	if a != b || a != perProduct*6*250 {
-		t.Fatalf("allocated A=%d B=%d, want %d each", a, b, perProduct*6*250)
+	if a != b || a != perApp*6*250 {
+		t.Fatalf("succeeded A=%d B=%d, want %d each", a, b, perApp*6*250)
 	}
-	// Unmatched-to-payer rows from the refused payments must not exist.
-	e.zero("refused cross-product payments left rows", `SELECT count(*) FROM transactions WHERE amount = 5`)
-	e.checkInvariants(invariantOpts{})
+	// The refused cross-app payments must have left no rows.
+	e.zero("refused cross-app payments left rows", `SELECT count(*) FROM transactions WHERE amount = 5`)
+	e.checkInvariants()
 }

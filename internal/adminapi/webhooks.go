@@ -10,8 +10,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/talksasa/talksasa-pay/internal/app"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
-	"github.com/talksasa/talksasa-pay/internal/product"
 	"github.com/talksasa/talksasa-pay/internal/store"
 	"github.com/talksasa/talksasa-pay/internal/webhook"
 )
@@ -22,7 +22,7 @@ import (
 
 type webhookDeliveryJSON struct {
 	EventID        uuid.UUID  `json:"event_id"`
-	ProductID      uuid.UUID  `json:"product_id"`
+	AppID          uuid.UUID  `json:"app_id"`
 	AccountPrefix  string     `json:"account_prefix"`
 	EventType      string     `json:"event_type"`
 	SubjectType    string     `json:"subject_type"`
@@ -37,7 +37,7 @@ type webhookDeliveryJSON struct {
 }
 
 func toWebhookDelivery(d webhook.Delivery) webhookDeliveryJSON {
-	return webhookDeliveryJSON{EventID: d.EventID, ProductID: d.ProductID, AccountPrefix: d.AccountPrefix,
+	return webhookDeliveryJSON{EventID: d.EventID, AppID: d.AppID, AccountPrefix: d.AccountPrefix,
 		EventType: d.EventType, SubjectType: d.SubjectType, SubjectID: d.SubjectID, Status: string(d.Status),
 		Attempts: d.Attempts, LastAttemptAt: d.LastAttemptAt, LastStatusCode: d.LastStatusCode, LastError: d.LastError,
 		DeliveredAt: d.DeliveredAt, CreatedAt: d.CreatedAt}
@@ -100,13 +100,13 @@ func (h *handlers) failWebhook(w http.ResponseWriter, r *http.Request, err error
 
 func (h *handlers) listWebhookDeliveries(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	productID, err := queryUUID(q, "product_id")
+	appID, err := queryUUID(q, "app_id")
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
 	page, err := h.d.Webhooks.List(r.Context(), webhook.Filter{
-		ProductID: productID, Status: q.Get("status"), Cursor: q.Get("cursor"), Limit: queryLimit(q),
+		AppID: appID, Status: q.Get("status"), Cursor: q.Get("cursor"), Limit: queryLimit(q),
 	})
 	if err != nil {
 		h.failWebhook(w, r, err)
@@ -156,19 +156,19 @@ func (h *handlers) setAllowedIPs(w http.ResponseWriter, r *http.Request) {
 	if in.AllowedIPs != nil {
 		list = *in.AllowedIPs
 	}
-	cidrs, err := product.ParseCIDRs(list)
+	cidrs, err := app.ParseCIDRs(list)
 	if err != nil {
 		httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusBadRequest, "invalid_allowed_ips",
 			"allowed_ips must be up to 50 IP addresses or CIDR ranges (e.g. 203.0.113.4 or 203.0.113.0/24), or null/[] for any address."))
 		return
 	}
-	if _, err := h.d.Products.Get(r.Context(), id); err != nil {
+	if _, err := h.d.Apps.Get(r.Context(), id); err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	k, err := h.d.Products.SetAllowedCIDRs(r.Context(), principalFrom(r.Context()).Actor(), id, chi.URLParam(r, "keyID"), cidrs)
+	k, err := h.d.Apps.SetAllowedCIDRs(r.Context(), principalFrom(r.Context()).Actor(), id, chi.URLParam(r, "keyID"), cidrs)
 	if err != nil {
-		if errors.Is(err, product.ErrInvalidCIDRs) {
+		if errors.Is(err, app.ErrInvalidCIDRs) {
 			httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusBadRequest, "invalid_allowed_ips", "Too many allowed IP entries (max 50)."))
 			return
 		}

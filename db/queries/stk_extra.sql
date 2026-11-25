@@ -48,8 +48,8 @@ SELECT * FROM stk_pushes WHERE transaction_id = @transaction_id FOR NO KEY UPDAT
 -- name: GetSTKPushByTransaction :one
 SELECT * FROM stk_pushes WHERE transaction_id = @transaction_id;
 
--- name: LatestSTKPushForRequest :one
+-- name: LatestSTKPushForChargeSince :one
 SELECT * FROM stk_pushes
- WHERE payment_request_id = @payment_request_id AND created_at >= @since::timestamptz
+ WHERE charge_id = @charge_id AND created_at >= @since::timestamptz
  ORDER BY created_at DESC, id DESC
  LIMIT 1;

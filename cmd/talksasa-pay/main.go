@@ -3,7 +3,7 @@
 //	talksasa-pay api                 serve the HTTP API
 //	talksasa-pay worker              run background jobs (webhooks, expiry, retention)
 //	talksasa-pay migrate up|down|version
-//	talksasa-pay admin ...           operator commands (products, API keys, audit)
+//	talksasa-pay admin ...           operator commands (apps, API keys, audit)
 //	talksasa-pay keygen --version N  print a new master keyring line
 //	talksasa-pay healthcheck --url   container health probe
 package main

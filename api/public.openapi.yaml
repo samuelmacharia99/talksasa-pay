@@ -3,20 +3,21 @@ info:
   title: Talksasa Pay public pay-page API
   version: 1.0.0
   description: |
-    Data for the hosted pay page, plus one action: sending an M-Pesa
-    payment prompt (STK push) for the bill's outstanding balance. Called server-side by the pay
-    Next.js app, which forwards the visitor's IP in `X-Talksasa-Client-Ip`
-    (trusted only from TSP_TRUSTED_PROXIES) for per-visitor rate limiting.
+    Data for the hosted checkout page of one charge, plus one action:
+    sending an M-Pesa payment prompt (STK push) for the charge's amount.
+    Called server-side by the pay Next.js app, which forwards the visitor's
+    IP in `X-Talksasa-Client-Ip` (trusted only from TSP_TRUSTED_PROXIES) for
+    per-visitor rate limiting.
 
-    The response deliberately carries no payer name, phone, email or internal
-    ids. Unknown, malformed and suspended-product tokens all return the same
+    The response deliberately carries no phone number, metadata or internal
+    ids. Unknown, malformed and suspended-app tokens all return the same
     404.
 servers:
   - url: /public/v1
 paths:
   /pay/{token}:
     get:
-      summary: The bill behind a hosted payment link
+      summary: The charge behind a hosted payment link
       parameters:
         - { name: token, in: path, required: true, schema: { type: string, pattern: "^[a-z2-7]{52}$" } }
       responses:
@@ -37,10 +38,12 @@ paths:
               schema: { $ref: "#/components/schemas/Problem" }
   /pay/{token}/stk:
     post:
-      summary: Send an M-Pesa payment prompt to a phone for this bill
+      summary: Send an M-Pesa payment prompt to a phone for this charge
       description: |
-        Always the full outstanding balance. Rate limited per visitor, and
-        only one prompt per bill can be live at a time (409 `stk_in_progress`).
+        Always the charge's exact amount. Only pending charges can be
+        prompted (409 `not_payable`). Rate limited per visitor, and only one
+        prompt per charge can be live at a time (409 `stk_in_progress`). A
+        failed prompt does not fail the charge: the customer can try again.
         The page then polls GET /pay/{token} for `status` and `stk_push`.
       parameters:
         - { name: token, in: path, required: true, schema: { type: string, pattern: "^[a-z2-7]{52}$" } }
@@ -66,7 +69,7 @@ paths:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
         "409":
-          description: "Not payable (not_payable), a prompt is already live (stk_in_progress) or balance above KES 250,000 (amount_too_large)"
+          description: "Not payable (not_payable: succeeded, in review, cancelled or expired), a prompt is already live (stk_in_progress) or amount above KES 250,000 (amount_too_large)"
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
@@ -94,7 +97,7 @@ components:
   schemas:
     PayPageSTK:
       type: object
-      description: The latest prompt for this bill, without ids or the phone number.
+      description: The latest prompt for this charge, without ids or the phone number.
       required: [status, message, created_at]
       properties:
         status: { type: string, enum: [initiating, sent, succeeded, failed, needs_review] }
@@ -114,20 +117,22 @@ components:
         request_id: { type: string }
     PayPage:
       type: object
-      required: [product_name, reference, description, currency, amount, amount_paid, outstanding, status, payable, expires_at, paid_at, paybill, stk_available, stk_push]
+      required: [app_name, reference, description, currency, amount, status, payable, expires_at, succeeded_at, paybill, stk_available, stk_push]
       properties:
-        product_name: { type: string }
-        reference: { type: string }
-        description: { type: string }
+        app_name: { type: string, description: Who is collecting the money }
+        reference: { type: string, description: "The app's reference (e.g. invoice number)" }
+        description: { type: [string, "null"] }
         currency: { type: string, enum: [KES] }
         amount: { type: integer }
-        amount_paid: { type: integer }
-        outstanding: { type: integer }
-        status: { type: string, enum: [open, partially_paid, paid, cancelled, expired] }
-        payable: { type: boolean }
-        expires_at: { type: [string, "null"], format: date-time }
-        paid_at: { type: [string, "null"], format: date-time }
+        status:
+          type: string
+          enum: [pending, needs_review, succeeded, expired, cancelled, reversed]
+          description: "A pending charge past its expiry is shown as expired even before the expiry job runs."
+        payable: { type: boolean, description: "True while a prompt may be sent (status pending)" }
+        expires_at: { type: string, format: date-time }
+        succeeded_at: { type: [string, "null"], format: date-time }
         paybill:
+          description: Manual M-Pesa instructions while payable; null otherwise
           oneOf:
             - type: "null"
             - type: object
@@ -135,9 +140,9 @@ components:
               properties:
                 business_number: { type: string }
                 account_number: { type: string }
-        stk_available: { type: boolean, description: "True when M-Pesa prompts can be sent for this bill (M-Pesa on, bill payable, balance <= KES 250,000)" }
+        stk_available: { type: boolean, description: "True when M-Pesa prompts can be sent for this charge (M-Pesa on, charge payable, amount <= KES 250,000)" }
         stk_push:
-          description: The latest prompt for this bill in the last 15 minutes, if any
+          description: The latest prompt for this charge in the last 15 minutes, if any
           oneOf:
             - $ref: "#/components/schemas/PayPageSTK"
             - { type: "null" }

@@ -42,8 +42,8 @@ type sendCall struct {
 }
 
 type latestCall struct {
-	requestID uuid.UUID
-	since     time.Time
+	chargeID uuid.UUID
+	since    time.Time
 }
 
 type storedCallback struct {
@@ -63,17 +63,17 @@ func (f *fakeSTK) Send(_ context.Context, actor audit.Actor, p stk.SendParams) (
 	if f.result != nil {
 		return f.result(p)
 	}
-	return testPush(p.ProductID, p.RequestID, store.StkPushStatusSent, nil), false, nil
+	return testPush(p.AppID, p.ChargeID, store.StkPushStatusSent, nil), false, nil
 }
 
 func (f *fakeSTK) Get(context.Context, uuid.UUID, uuid.UUID) (stk.Push, error) {
 	return stk.Push{}, stk.ErrNotFound
 }
 
-func (f *fakeSTK) LatestForRequest(_ context.Context, requestID uuid.UUID, since time.Time) (*stk.Push, error) {
+func (f *fakeSTK) LatestForCharge(_ context.Context, chargeID uuid.UUID, since time.Time) (*stk.Push, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.latestCalls = append(f.latestCalls, latestCall{requestID, since})
+	f.latestCalls = append(f.latestCalls, latestCall{chargeID, since})
 	return f.latest, f.latestErr
 }
 
@@ -101,12 +101,12 @@ func (f *fakeSTK) storedCallbacks() []storedCallback {
 
 const fullPhone = "254712345678"
 
-func testPush(productID, requestID uuid.UUID, status store.StkPushStatus, resultCode *string) stk.Push {
+func testPush(appID, chargeID uuid.UUID, status store.StkPushStatus, resultCode *string) stk.Push {
 	now := time.Now().UTC()
 	co := "ws_CO_CHECKOUT_" + uuid.NewString()[:8]
 	mr := "MERCHANT_" + uuid.NewString()[:8]
 	return stk.Push{
-		ID: uuid.New(), ProductID: productID, PaymentRequestID: requestID, TransactionID: uuid.New(),
+		ID: uuid.New(), AppID: appID, ChargeID: chargeID, TransactionID: uuid.New(),
 		Source: "pay_page", Phone: fullPhone, Amount: 1500, Status: status, CheckoutRequestID: &co,
 		MerchantRequestID: &mr, ResultCode: resultCode, CreatedAt: now, UpdatedAt: now,
 	}

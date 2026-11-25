@@ -29,10 +29,10 @@ const (
 	QueueMpesa = "mpesa"
 )
 
-// WebhookArgs asks the worker to deliver one event to its product.
+// WebhookArgs asks the worker to deliver one event to its app.
 type WebhookArgs struct {
-	EventID   uuid.UUID `json:"event_id"`
-	ProductID uuid.UUID `json:"product_id"`
+	EventID uuid.UUID `json:"event_id"`
+	AppID   uuid.UUID `json:"app_id"`
 }
 
 // Kind implements river.JobArgs.
@@ -50,14 +50,14 @@ func (WebhookArgs) InsertOpts() river.InsertOpts {
 	}
 }
 
-// ExpireRequestsArgs runs the periodic expiry sweep.
-type ExpireRequestsArgs struct{}
+// ExpireChargesArgs runs the periodic charge expiry sweep.
+type ExpireChargesArgs struct{}
 
 // Kind implements river.JobArgs.
-func (ExpireRequestsArgs) Kind() string { return "expire_payment_requests" }
+func (ExpireChargesArgs) Kind() string { return "expire_charges" }
 
 // InsertOpts implements river.JobArgsWithInsertOpts.
-func (ExpireRequestsArgs) InsertOpts() river.InsertOpts {
+func (ExpireChargesArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{Queue: QueueMaintenance, MaxAttempts: 3, UniqueOpts: river.UniqueOpts{ByPeriod: time.Minute}}
 }
 
@@ -131,7 +131,7 @@ type Enqueuer struct{ c *Client }
 func NewEnqueuer(c *Client) *Enqueuer { return &Enqueuer{c: c} }
 
 // EnqueueWebhook inserts the delivery job in tx: it exists iff tx commits.
-func (e *Enqueuer) EnqueueWebhook(ctx context.Context, tx pgx.Tx, productID, eventID uuid.UUID) error {
-	_, err := e.c.InsertTx(ctx, tx, WebhookArgs{EventID: eventID, ProductID: productID}, nil)
+func (e *Enqueuer) EnqueueWebhook(ctx context.Context, tx pgx.Tx, appID, eventID uuid.UUID) error {
+	_, err := e.c.InsertTx(ctx, tx, WebhookArgs{EventID: eventID, AppID: appID}, nil)
 	return err
 }

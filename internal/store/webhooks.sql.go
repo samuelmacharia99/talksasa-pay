@@ -59,16 +59,16 @@ func (q *Queries) InsertWebhookAttempt(ctx context.Context, arg InsertWebhookAtt
 }
 
 const insertWebhookDelivery = `-- name: InsertWebhookDelivery :exec
-INSERT INTO webhook_deliveries (event_id, product_id) VALUES ($1, $2)
+INSERT INTO webhook_deliveries (event_id, app_id) VALUES ($1, $2)
 `
 
 type InsertWebhookDeliveryParams struct {
-	EventID   uuid.UUID
-	ProductID uuid.UUID
+	EventID uuid.UUID
+	AppID   uuid.UUID
 }
 
 func (q *Queries) InsertWebhookDelivery(ctx context.Context, arg InsertWebhookDeliveryParams) error {
-	_, err := q.db.Exec(ctx, insertWebhookDelivery, arg.EventID, arg.ProductID)
+	_, err := q.db.Exec(ctx, insertWebhookDelivery, arg.EventID, arg.AppID)
 	return err
 }
 
@@ -107,10 +107,10 @@ func (q *Queries) ListWebhookAttempts(ctx context.Context, eventID uuid.UUID) ([
 }
 
 const listWebhookDeliveriesAdmin = `-- name: ListWebhookDeliveriesAdmin :many
-SELECT d.event_id, d.product_id, d.status, d.attempts, d.last_attempt_at, d.last_status_code, d.last_error, d.delivered_at, d.created_at, d.updated_at, e.type AS event_type, e.subject_type, e.subject_id
+SELECT d.event_id, d.app_id, d.status, d.attempts, d.last_attempt_at, d.last_status_code, d.last_error, d.delivered_at, d.created_at, d.updated_at, e.type AS event_type, e.subject_type, e.subject_id
   FROM webhook_deliveries d
   JOIN events e ON e.id = d.event_id
- WHERE ($1::uuid IS NULL OR d.product_id = $1)
+ WHERE ($1::uuid IS NULL OR d.app_id = $1)
    AND ($2::webhook_delivery_status IS NULL OR d.status = $2)
    AND ($3::timestamptz IS NULL
         OR (d.created_at, d.event_id) < ($3::timestamptz, $4::uuid))
@@ -119,16 +119,16 @@ SELECT d.event_id, d.product_id, d.status, d.attempts, d.last_attempt_at, d.last
 `
 
 type ListWebhookDeliveriesAdminParams struct {
-	ProductID *uuid.UUID
-	Status    NullWebhookDeliveryStatus
-	CursorAt  *time.Time
-	CursorID  *uuid.UUID
-	Lim       int32
+	AppID    *uuid.UUID
+	Status   NullWebhookDeliveryStatus
+	CursorAt *time.Time
+	CursorID *uuid.UUID
+	Lim      int32
 }
 
 type ListWebhookDeliveriesAdminRow struct {
 	EventID        uuid.UUID
-	ProductID      uuid.UUID
+	AppID          uuid.UUID
 	Status         WebhookDeliveryStatus
 	Attempts       int32
 	LastAttemptAt  *time.Time
@@ -144,7 +144,7 @@ type ListWebhookDeliveriesAdminRow struct {
 
 func (q *Queries) ListWebhookDeliveriesAdmin(ctx context.Context, arg ListWebhookDeliveriesAdminParams) ([]ListWebhookDeliveriesAdminRow, error) {
 	rows, err := q.db.Query(ctx, listWebhookDeliveriesAdmin,
-		arg.ProductID,
+		arg.AppID,
 		arg.Status,
 		arg.CursorAt,
 		arg.CursorID,
@@ -159,7 +159,7 @@ func (q *Queries) ListWebhookDeliveriesAdmin(ctx context.Context, arg ListWebhoo
 		var i ListWebhookDeliveriesAdminRow
 		if err := rows.Scan(
 			&i.EventID,
-			&i.ProductID,
+			&i.AppID,
 			&i.Status,
 			&i.Attempts,
 			&i.LastAttemptAt,
@@ -183,7 +183,7 @@ func (q *Queries) ListWebhookDeliveriesAdmin(ctx context.Context, arg ListWebhoo
 }
 
 const lockWebhookDelivery = `-- name: LockWebhookDelivery :one
-SELECT event_id, product_id, status, attempts, last_attempt_at, last_status_code, last_error, delivered_at, created_at, updated_at FROM webhook_deliveries WHERE event_id = $1 FOR NO KEY UPDATE
+SELECT event_id, app_id, status, attempts, last_attempt_at, last_status_code, last_error, delivered_at, created_at, updated_at FROM webhook_deliveries WHERE event_id = $1 FOR NO KEY UPDATE
 `
 
 func (q *Queries) LockWebhookDelivery(ctx context.Context, eventID uuid.UUID) (WebhookDelivery, error) {
@@ -191,7 +191,7 @@ func (q *Queries) LockWebhookDelivery(ctx context.Context, eventID uuid.UUID) (W
 	var i WebhookDelivery
 	err := row.Scan(
 		&i.EventID,
-		&i.ProductID,
+		&i.AppID,
 		&i.Status,
 		&i.Attempts,
 		&i.LastAttemptAt,
@@ -210,7 +210,7 @@ UPDATE webhook_deliveries
        last_status_code = $2, last_error = $3,
        delivered_at = CASE WHEN $1::webhook_delivery_status = 'delivered' THEN now() ELSE NULL END
  WHERE event_id = $4
-RETURNING event_id, product_id, status, attempts, last_attempt_at, last_status_code, last_error, delivered_at, created_at, updated_at
+RETURNING event_id, app_id, status, attempts, last_attempt_at, last_status_code, last_error, delivered_at, created_at, updated_at
 `
 
 type RecordWebhookAttemptParams struct {
@@ -231,7 +231,7 @@ func (q *Queries) RecordWebhookAttempt(ctx context.Context, arg RecordWebhookAtt
 	var i WebhookDelivery
 	err := row.Scan(
 		&i.EventID,
-		&i.ProductID,
+		&i.AppID,
 		&i.Status,
 		&i.Attempts,
 		&i.LastAttemptAt,
@@ -247,7 +247,7 @@ func (q *Queries) RecordWebhookAttempt(ctx context.Context, arg RecordWebhookAtt
 const requeueWebhookDelivery = `-- name: RequeueWebhookDelivery :one
 UPDATE webhook_deliveries SET status = 'pending', last_error = NULL
  WHERE event_id = $1 AND status IN ('failed', 'skipped')
-RETURNING event_id, product_id, status, attempts, last_attempt_at, last_status_code, last_error, delivered_at, created_at, updated_at
+RETURNING event_id, app_id, status, attempts, last_attempt_at, last_status_code, last_error, delivered_at, created_at, updated_at
 `
 
 // Admin "redeliver": a failed or skipped delivery goes back to pending.
@@ -256,7 +256,7 @@ func (q *Queries) RequeueWebhookDelivery(ctx context.Context, eventID uuid.UUID)
 	var i WebhookDelivery
 	err := row.Scan(
 		&i.EventID,
-		&i.ProductID,
+		&i.AppID,
 		&i.Status,
 		&i.Attempts,
 		&i.LastAttemptAt,
@@ -279,8 +279,8 @@ type SkipWebhookDeliveryParams struct {
 	EventID uuid.UUID
 }
 
-// No webhook URL configured (or product suspended): nothing to send. The
-// product still sees the event in /v1/events.
+// No webhook URL configured (or app suspended): nothing to send. The
+// app still sees the event in /v1/events.
 func (q *Queries) SkipWebhookDelivery(ctx context.Context, arg SkipWebhookDeliveryParams) error {
 	_, err := q.db.Exec(ctx, skipWebhookDelivery, arg.Reason, arg.EventID)
 	return err

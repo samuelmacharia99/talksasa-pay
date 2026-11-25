@@ -37,10 +37,10 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 		apiSTK = a.stk
 	}
 	handler := httpapi.NewRouter(httpapi.Deps{
-		Logger: a.logger, Pool: a.pool, Products: a.products, Reporting: a.reporting,
+		Logger: a.logger, Pool: a.pool, Apps: a.apps, Reporting: a.reporting,
 		Metrics: metrics.NewHTTP(reg, "api"), MaxBodyBytes: a.cfg.HTTP.MaxBodyBytes, Version: version,
 		TrustedProxies: a.cfg.TrustedProxies, Paybill: a.cfg.Public.Paybill,
-		Payers: a.payers, Requests: a.paymentRequests, View: a.events.View(),
+		Charges: a.charges, View: a.events.View(),
 		KeyLimiter:        httpx.NewRateLimiterPerSecond(a.cfg.API.RatePerKey, a.cfg.API.BurstPerKey),
 		APIRequestTimeout: a.cfg.API.RequestTimeout, APIMaxInFlight: a.cfg.API.MaxInFlight, Readiness: ready,
 		STK: apiSTK, MpesaCallbackToken: a.cfg.Mpesa.CallbackToken, MpesaCallbackCIDRs: a.cfg.Mpesa.CallbackCIDRs,
@@ -50,7 +50,7 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 	// The admin API has its own listener, reachable only from the admin
 	// Next.js server's network. It never shares the public listener.
 	adminHandler := adminapi.NewRouter(adminapi.Deps{
-		Logger: a.logger.With(slog.String("listener", "admin")), Admin: a.admin, Products: a.products, Reporting: a.reporting,
+		Logger: a.logger.With(slog.String("listener", "admin")), Admin: a.admin, Apps: a.apps, Reporting: a.reporting,
 		Metrics: metrics.NewHTTP(reg, "admin"), TrustedProxies: a.cfg.TrustedProxies, MaxBodyBytes: 64 << 10,
 		Webhooks: webhook.NewDeliveries(a.pool, a.river), STK: a.stk,
 	})

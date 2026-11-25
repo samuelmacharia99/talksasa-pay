@@ -38,7 +38,7 @@ type Client interface {
 type STKPushRequest struct {
 	Phone            string // normalised 2547XXXXXXXX / 2541XXXXXXXX
 	Amount           int64  // whole KES, 1..250000
-	AccountReference string // payer account number, e.g. HOST-1042 (max 12 chars per Daraja)
+	AccountReference string // the charge's account number, e.g. HOST-1042 (max 12 chars per Daraja)
 	TransactionDesc  string // short description (max 13 chars per Daraja)
 }
 

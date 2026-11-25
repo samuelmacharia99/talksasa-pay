@@ -40,7 +40,7 @@ func NewMetrics(r *metrics.Registry) *Metrics {
 			Buckets: []float64{.01, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 300},
 		}, []string{"kind"}),
 		expiredN: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "talksasa_pay", Name: "payment_requests_expired_total", Help: "Payment requests closed by the expiry job.",
+			Namespace: "talksasa_pay", Name: "charges_expired_total", Help: "Charges expired by the expiry job.",
 		}),
 		prunedN: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "talksasa_pay", Name: "webhook_attempts_pruned_total", Help: "Webhook attempt log rows deleted by retention.",

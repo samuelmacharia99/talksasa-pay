@@ -10,13 +10,17 @@ UPDATE stk_pushes SET confirm_blocked = @reason WHERE id = @id AND confirm_block
 
 -- name: FindLiveSTKPushesForC2B :many
 -- A paybill (C2B) confirmation may be Safaricom's second notice for an STK
--- payment. Candidates: the payer's prompts still waiting (or in review) for
--- exactly this amount, whose transaction has no receipt yet, not blocked by
--- an anomaly; phone must match when the notice carries a usable one. The
--- caller acts only on exactly one candidate.
+-- payment. Candidates: prompts of this app's live charges with this account
+-- number, still waiting (or in review) for exactly this amount, whose
+-- transaction has no receipt yet, not blocked by an anomaly; phone must
+-- match when the notice carries a usable one. The caller acts only on
+-- exactly one candidate.
 SELECT p.* FROM stk_pushes p
   JOIN transactions t ON t.id = p.transaction_id
- WHERE t.payer_account_id = @payer_account_id
+  JOIN charges c ON c.app_id = p.app_id AND c.id = p.charge_id
+ WHERE p.app_id = @app_id
+   AND c.account_number_norm = @account_number_norm
+   AND c.status IN ('pending', 'needs_review')
    AND p.amount = @amount
    AND p.status IN ('initiating', 'sent', 'unknown')
    AND p.confirm_blocked IS NULL

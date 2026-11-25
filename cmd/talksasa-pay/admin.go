@@ -11,10 +11,10 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/talksasa/talksasa-pay/internal/app"
 	"github.com/talksasa/talksasa-pay/internal/audit"
 	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/platform/crypto"
-	"github.com/talksasa/talksasa-pay/internal/product"
 	"github.com/talksasa/talksasa-pay/internal/store"
 )
 
@@ -23,22 +23,21 @@ const adminUsage = `usage: talksasa-pay admin <command> [flags]
 Every command that changes data needs --actor "<your name>"; it is written to
 the audit log.
 
-  product create   --name NAME --prefix PREFIX [--webhook-url URL] --actor NAME
-  product list
-  product set-webhook --product ID|PREFIX --url URL --actor NAME
-  product rotate-webhook-secret --product ID|PREFIX --actor NAME
-  key issue        --product ID|PREFIX --label LABEL [--expires YYYY-MM-DD] --actor NAME
-  key list         --product ID|PREFIX
-  key revoke       --product ID|PREFIX --key-id KEYID --actor NAME
+  app create   --name NAME --prefix PREFIX [--webhook-url URL] --actor NAME
+  app list
+  app set-webhook --app ID|PREFIX --url URL --actor NAME
+  app rotate-webhook-secret --app ID|PREFIX --actor NAME
+  key issue        --app ID|PREFIX --label LABEL [--expires YYYY-MM-DD] --actor NAME
+  key list         --app ID|PREFIX
+  key revoke       --app ID|PREFIX --key-id KEYID --actor NAME
   user invite      --email EMAIL --name NAME --role viewer|finance|approver|admin --actor NAME
   user list
   user reset       --email EMAIL --actor NAME   (lost 2FA / re-onboard: new setup link)
   user disable     --email EMAIL --actor NAME   (offboarding)
   audit verify     check the audit log hash chain
-  ledger check     check cached balances against allocation lines
   mpesa register-urls --actor NAME   register the paybill's C2B callback URLs with Safaricom
   mpesa status     M-Pesa configuration (no secrets) and STK/callback counts to watch
-  seed demo        --actor NAME   development only: demo products, payers, bills, payments
+  seed demo        --actor NAME   development only: demo apps (and, later, charges and payments)
 `
 
 func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -55,11 +54,11 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 
 	fs := flag.NewFlagSet("admin "+cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	name := fs.String("name", "", "product name")
+	name := fs.String("name", "", "app name")
 	prefix := fs.String("prefix", "", "account prefix (2-6 uppercase letters)")
-	webhookURL := fs.String("webhook-url", "", "product webhook URL")
+	webhookURL := fs.String("webhook-url", "", "app webhook URL")
 	urlFlag := fs.String("url", "", "URL")
-	productRef := fs.String("product", "", "product id or account prefix")
+	appRef := fs.String("app", "", "app id or account prefix")
 	label := fs.String("label", "", "API key label")
 	expires := fs.String("expires", "", "API key expiry date (YYYY-MM-DD, UTC)")
 	keyID := fs.String("key-id", "", "API key id")
@@ -84,21 +83,21 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	defer a.close()
 
 	switch cmd {
-	case "product create":
+	case "app create":
 		if err := needActor(); err != nil {
 			return err
 		}
-		c, err := a.products.Create(ctx, actor, productCreateParams(*name, *prefix, *webhookURL))
+		c, err := a.apps.Create(ctx, actor, appCreateParams(*name, *prefix, *webhookURL))
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "Product created\n  id:             %s\n  name:           %s\n  account prefix: %s\n  webhook url:    %s\n\n",
-			c.Product.ID, c.Product.Name, c.Product.AccountPrefix, orNone(c.Product.WebhookURL))
+		fmt.Fprintf(stdout, "App created\n  id:             %s\n  name:           %s\n  account prefix: %s\n  webhook url:    %s\n\n",
+			c.App.ID, c.App.Name, c.App.AccountPrefix, orNone(c.App.WebhookURL))
 		printSecretOnce(stdout, "Webhook signing secret", c.WebhookSecret)
 		return nil
 
-	case "product list":
-		ps, err := a.products.List(ctx)
+	case "app list":
+		ps, err := a.apps.List(ctx)
 		if err != nil {
 			return err
 		}
@@ -109,30 +108,30 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		}
 		return tw.Flush()
 
-	case "product set-webhook":
+	case "app set-webhook":
 		if err := needActor(); err != nil {
 			return err
 		}
-		p, err := a.products.Resolve(ctx, *productRef)
+		p, err := a.apps.Resolve(ctx, *appRef)
 		if err != nil {
 			return err
 		}
-		p, err = a.products.SetWebhookURL(ctx, actor, p.ID, *urlFlag)
+		p, err = a.apps.SetWebhookURL(ctx, actor, p.ID, *urlFlag)
 		if err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "Webhook URL for %s set to %s\n", p.AccountPrefix, orNone(p.WebhookURL))
 		return nil
 
-	case "product rotate-webhook-secret":
+	case "app rotate-webhook-secret":
 		if err := needActor(); err != nil {
 			return err
 		}
-		p, err := a.products.Resolve(ctx, *productRef)
+		p, err := a.apps.Resolve(ctx, *appRef)
 		if err != nil {
 			return err
 		}
-		secret, err := a.products.RotateWebhookSecret(ctx, actor, p.ID)
+		secret, err := a.apps.RotateWebhookSecret(ctx, actor, p.ID)
 		if err != nil {
 			return err
 		}
@@ -143,7 +142,7 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		if err := needActor(); err != nil {
 			return err
 		}
-		p, err := a.products.Resolve(ctx, *productRef)
+		p, err := a.apps.Resolve(ctx, *appRef)
 		if err != nil {
 			return err
 		}
@@ -155,7 +154,7 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 			}
 			exp = &t
 		}
-		k, err := a.products.IssueAPIKey(ctx, actor, p.ID, *label, exp)
+		k, err := a.apps.IssueAPIKey(ctx, actor, p.ID, *label, exp)
 		if err != nil {
 			return err
 		}
@@ -164,11 +163,11 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return nil
 
 	case "key list":
-		p, err := a.products.Resolve(ctx, *productRef)
+		p, err := a.apps.Resolve(ctx, *appRef)
 		if err != nil {
 			return err
 		}
-		keys, err := a.products.ListAPIKeys(ctx, p.ID)
+		keys, err := a.apps.ListAPIKeys(ctx, p.ID)
 		if err != nil {
 			return err
 		}
@@ -184,11 +183,11 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		if err := needActor(); err != nil {
 			return err
 		}
-		p, err := a.products.Resolve(ctx, *productRef)
+		p, err := a.apps.Resolve(ctx, *appRef)
 		if err != nil {
 			return err
 		}
-		if err := a.products.RevokeAPIKey(ctx, actor, p.ID, *keyID); err != nil {
+		if err := a.apps.RevokeAPIKey(ctx, actor, p.ID, *keyID); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "API key %s revoked\n", *keyID)
@@ -273,19 +272,6 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	case "mpesa status":
 		return printMpesaStatus(ctx, a.cfg, store.New(a.pool), stdout)
 
-	case "ledger check":
-		drift, err := store.New(a.pool).FindBalanceDrift(ctx)
-		if err != nil {
-			return err
-		}
-		if len(drift) > 0 {
-			for _, d := range drift {
-				fmt.Fprintf(stdout, "DRIFT %s %s cached=%d actual=%d\n", d.Kind, d.ID, d.Cached, d.Actual)
-			}
-			return errors.New("ledger cached balances disagree with allocations")
-		}
-		fmt.Fprintln(stdout, "Ledger balances verified: OK")
-		return nil
 	}
 	return usageError{adminUsage}
 }
@@ -296,7 +282,7 @@ func printSetupLink(w io.Writer, url string, expires time.Time) {
 }
 
 func printSecretOnce(w io.Writer, what, secret string) {
-	fmt.Fprintf(w, "%s (shown ONCE; store it in the product's secret manager now):\n\n    %s\n\n", what, secret)
+	fmt.Fprintf(w, "%s (shown ONCE; store it in the app's secret manager now):\n\n    %s\n\n", what, secret)
 }
 
 func orNone(s string) string {
@@ -350,6 +336,6 @@ func runHealthcheck(args []string) error {
 	return nil
 }
 
-func productCreateParams(name, prefix, webhookURL string) product.CreateParams {
-	return product.CreateParams{Name: name, AccountPrefix: prefix, WebhookURL: webhookURL}
+func appCreateParams(name, prefix, webhookURL string) app.CreateParams {
+	return app.CreateParams{Name: name, AccountPrefix: prefix, WebhookURL: webhookURL}
 }

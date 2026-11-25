@@ -1,5 +1,5 @@
 // Package httpapi wires HTTP routes to services. Handlers stay thin:
-// decode, call a service, encode. Product-scoped routes take the product id
+// decode, call a service, encode. App-scoped routes take the app id
 // ONLY from the authenticated API key, never from the request.
 package httpapi
 
@@ -15,14 +15,13 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/talksasa/talksasa-pay/internal/apiview"
+	"github.com/talksasa/talksasa-pay/internal/app"
+	"github.com/talksasa/talksasa-pay/internal/appapi"
+	"github.com/talksasa/talksasa-pay/internal/charge"
 	"github.com/talksasa/talksasa-pay/internal/config"
-	"github.com/talksasa/talksasa-pay/internal/payer"
-	"github.com/talksasa/talksasa-pay/internal/paymentrequest"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 	"github.com/talksasa/talksasa-pay/internal/platform/metrics"
-	"github.com/talksasa/talksasa-pay/internal/product"
-	"github.com/talksasa/talksasa-pay/internal/productapi"
 	"github.com/talksasa/talksasa-pay/internal/reporting"
 )
 
@@ -30,7 +29,7 @@ import (
 type Deps struct {
 	Logger       *slog.Logger
 	Pool         *db.Pool
-	Products     *product.Service
+	Apps         *app.Service
 	Reporting    *reporting.Service
 	Metrics      *metrics.HTTP
 	MaxBodyBytes int64
@@ -61,18 +60,17 @@ type Deps struct {
 	// nil = DefaultCallbackPerMinute / DefaultCallbackBurst.
 	MpesaCallbackLimiter *httpx.RateLimiter
 
-	// Product API (/v1).
-	Payers            *payer.Service
-	Requests          *paymentrequest.Service
+	// App API (/v1).
+	Charges           *charge.Service
 	View              apiview.View
-	KeyLimiter        *httpx.RateLimiter // per API key; nil = productapi default
-	APIRequestTimeout time.Duration      // 0 = productapi default
+	KeyLimiter        *httpx.RateLimiter // per API key; nil = appapi default
+	APIRequestTimeout time.Duration      // 0 = appapi default
 	APIMaxInFlight    int                // concurrent /v1 requests before shedding; 0 = 512
 	// Readiness flips /readyz to 503 while the server drains on shutdown.
 	Readiness *httpx.Readiness
 }
 
-// hostedTokenRe matches payment_requests.hosted_token (32 random bytes,
+// hostedTokenRe matches charges.hosted_token (32 random bytes,
 // lowercase unpadded base32). Anything else is rejected before the database.
 var hostedTokenRe = regexp.MustCompile(`^[a-z2-7]{52}$`)
 
@@ -136,14 +134,14 @@ func NewRouter(d Deps) http.Handler {
 		pub.With(httpx.LimitByIP(d.PaySTKLimiter, "pay-stk")).Post("/pay/{token}/stk", payPageSTKPush(d))
 	})
 
-	// Safaricom callbacks: no product-API auth; the secret path token and
+	// Safaricom callbacks: no app-API auth; the secret path token and
 	// the source-IP allow-list decide. Absent entirely while M-Pesa is off.
 	if d.STK != nil && d.STK.Available() {
 		r.Route("/cb/mpesa/{token}", newCallbacks(d).routes)
 	}
 
-	// Product integration API: auth (key -> IP allow-list -> per-key rate
-	// limit), strict JSON, every query scoped to the key's product.
+	// App integration API: auth (key -> IP allow-list -> per-key rate
+	// limit), strict JSON, every query scoped to the key's app.
 	// Timeout outside LoadShed: a slot is held until the handler really
 	// returns, so MaxInFlight truly bounds concurrent database work.
 	maxInFlight := d.APIMaxInFlight
@@ -152,18 +150,18 @@ func NewRouter(d Deps) http.Handler {
 	}
 	apiTimeout := d.APIRequestTimeout
 	if apiTimeout <= 0 {
-		apiTimeout = productapi.DefaultRequestTimeout
+		apiTimeout = appapi.DefaultRequestTimeout
 	}
-	r.With(httpx.Timeout(apiTimeout+2*time.Second), httpx.LoadShed(maxInFlight)).Mount("/v1", productapi.NewRouter(productapi.Deps{
-		Logger: d.Logger, Pool: d.Pool, Products: d.Products, Payers: d.Payers, Requests: d.Requests,
-		View: d.View, KeyLimiter: d.KeyLimiter, RequestTimeout: d.APIRequestTimeout, STK: productSTK(d.STK),
+	r.With(httpx.Timeout(apiTimeout+2*time.Second), httpx.LoadShed(maxInFlight)).Mount("/v1", appapi.NewRouter(appapi.Deps{
+		Logger: d.Logger, Pool: d.Pool, Apps: d.Apps, Charges: d.Charges,
+		View: d.View, KeyLimiter: d.KeyLimiter, RequestTimeout: d.APIRequestTimeout, STK: appSTK(d.STK),
 	}))
 	return r
 }
 
-// productSTK keeps a nil STK a nil productapi.STKService (not a non-nil
+// appSTK keeps a nil STK a nil appapi.STKService (not a non-nil
 // interface holding nil).
-func productSTK(s STKService) productapi.STKService {
+func appSTK(s STKService) appapi.STKService {
 	if s == nil {
 		return nil
 	}
@@ -182,23 +180,21 @@ type paybillJSON struct {
 }
 
 type payPageJSON struct {
-	ProductName  string       `json:"product_name"`
+	AppName      string       `json:"app_name"`
 	Reference    string       `json:"reference"`
-	Description  string       `json:"description"`
+	Description  *string      `json:"description"`
 	Currency     string       `json:"currency"`
 	Amount       int64        `json:"amount"`
-	AmountPaid   int64        `json:"amount_paid"`
-	Outstanding  int64        `json:"outstanding"`
 	Status       string       `json:"status"`
 	Payable      bool         `json:"payable"`
-	ExpiresAt    *time.Time   `json:"expires_at"`
-	PaidAt       *time.Time   `json:"paid_at"`
+	ExpiresAt    time.Time    `json:"expires_at"`
+	SucceededAt  *time.Time   `json:"succeeded_at"`
 	Paybill      *paybillJSON `json:"paybill"`
 	STKAvailable bool         `json:"stk_available"`
 	STKPush      *payPageSTK  `json:"stk_push"`
 }
 
-// payPageSTK is the latest prompt for a bill (no ids, no phone).
+// payPageSTK is the latest prompt for a charge (no ids, no phone).
 type payPageSTK struct {
 	Status    string    `json:"status"`
 	Message   *string   `json:"message"`
@@ -206,9 +202,9 @@ type payPageSTK struct {
 }
 
 // payPage serves the hosted pay page's data. The token is the only key;
-// unknown, malformed and suspended-product tokens all get the same 404 so
+// unknown, malformed and suspended-app tokens all get the same 404 so
 // the endpoint cannot be used to probe for valid tokens. It returns only
-// what the payer needs to pay: no name, phone, email or internal ids.
+// what the customer needs to pay: no phone, metadata or internal ids.
 func payPage(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, ok := lookupPayPage(d, w, r)
@@ -216,9 +212,9 @@ func payPage(d Deps) http.HandlerFunc {
 			return
 		}
 		out := payPageJSON{
-			ProductName: p.ProductName, Reference: p.ProductReference, Description: p.Description, Currency: "KES",
-			Amount: p.Amount, AmountPaid: p.AmountPaid, Outstanding: p.Amount - p.AmountPaid, Status: string(p.Status),
-			Payable: p.Payable, ExpiresAt: p.ExpiresAt, PaidAt: p.PaidAt,
+			AppName: p.AppName, Reference: p.Reference, Description: p.Description, Currency: p.Currency,
+			Amount: p.Amount, Status: string(p.Status), Payable: p.Payable,
+			ExpiresAt: p.ExpiresAt.UTC(), SucceededAt: p.SucceededAt,
 			STKAvailable: stkAvailable(d, p),
 			STKPush:      latestSTK(d, r, p),
 		}
@@ -234,7 +230,7 @@ func payLinkNotFound(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusNotFound, "not_found", "This payment link is not valid."))
 }
 
-// lookupPayPage resolves {token}. Malformed, unknown and suspended-product
+// lookupPayPage resolves {token}. Malformed, unknown and suspended-app
 // tokens all get the same 404 (written here; ok is then false).
 func lookupPayPage(d Deps, w http.ResponseWriter, r *http.Request) (reporting.PayPage, bool) {
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")

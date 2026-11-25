@@ -89,7 +89,7 @@ func MaskPhone(p string) string {
 type ctxKey struct{}
 
 // WithAttrs returns a context whose log records carry the given attributes
-// (request_id, product_id, transaction_id, job_id, ...).
+// (request_id, app_id, transaction_id, job_id, ...).
 func WithAttrs(ctx context.Context, attrs ...slog.Attr) context.Context {
 	existing, _ := ctx.Value(ctxKey{}).([]slog.Attr)
 	merged := make([]slog.Attr, 0, len(existing)+len(attrs))

@@ -15,9 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 
-	"github.com/talksasa/talksasa-pay/internal/allocation"
 	"github.com/talksasa/talksasa-pay/internal/audit"
 	"github.com/talksasa/talksasa-pay/internal/money"
 	"github.com/talksasa/talksasa-pay/internal/phone"
@@ -30,7 +28,7 @@ var (
 	ErrMissingReceipt  = errors.New("ledger: a succeeded M-Pesa payment needs its receipt number")
 	ErrInvalidReceipt  = errors.New("ledger: receipt must be 1-64 letters or digits")
 	ErrPayloadNotJSON  = errors.New("ledger: raw payload must be a JSON object")
-	ErrNotReversible   = errors.New("ledger: only allocated incoming payments can be reversed")
+	ErrNotReversible   = errors.New("ledger: only succeeded incoming payments can be reversed")
 	ErrAlreadyReversed = errors.New("ledger: transaction has already been reversed")
 	ErrReasonRequired  = errors.New("ledger: a reason of at least 3 characters is required")
 	ErrActorRequired   = errors.New("ledger: corrections must be made by a named person")
@@ -42,17 +40,16 @@ var (
 
 // IncomingPayment is a confirmed payment as reported by a provider.
 type IncomingPayment struct {
-	Channel          store.TxnChannel // mpesa_stk | mpesa_c2b
-	Receipt          string           // M-Pesa receipt, e.g. SKL4ABCD12
-	ProviderRequest  string           // CheckoutRequestID (STK), empty for C2B
-	Amount           money.KES
-	Phone            string // raw; normalised here (C2B may send a masked/hashed value: pass "")
-	BillRef          string // account reference as typed
-	ProductID        *uuid.UUID
-	PayerAccountID   *uuid.UUID
-	PaymentRequestID *uuid.UUID // target request (STK / hosted page)
-	OccurredAt       *time.Time
-	RawPayload       json.RawMessage // provider payload, already free of secrets
+	Channel         store.TxnChannel // mpesa_stk | mpesa_c2b
+	Receipt         string           // M-Pesa receipt, e.g. SKL4ABCD12
+	ProviderRequest string           // CheckoutRequestID (STK), empty for C2B
+	Amount          money.KES
+	Phone           string     // raw; normalised here (C2B may send a masked/hashed value: pass "")
+	AccountNumber   string     // account reference as typed / sent with the prompt
+	AppID           *uuid.UUID // nil: unmatched (unknown prefix)
+	ChargeID        *uuid.UUID // the charge the money was for, when known
+	OccurredAt      *time.Time
+	RawPayload      json.RawMessage // provider payload, already free of secrets
 }
 
 // Transaction is the service-level view of a ledger row.
@@ -92,12 +89,11 @@ func RecordIncoming(ctx context.Context, q *store.Queries, in IncomingPayment) (
 	}
 	now := time.Now()
 	row, err := q.InsertTransaction(ctx, store.InsertTransactionParams{
-		ID: id, ProductID: in.ProductID, Direction: store.TxnDirectionIn, Kind: store.TxnKindPayment,
+		ID: id, AppID: in.AppID, ChargeID: in.ChargeID, Direction: store.TxnDirectionIn, Kind: store.TxnKindPayment,
 		Channel: in.Channel, Provider: "mpesa", Status: store.TxnStatusSucceeded, Amount: int64(in.Amount),
 		ProviderTransactionID: &receipt, ProviderRequestID: optStr(in.ProviderRequest), Phone: ph,
-		BillRef: optStr(truncate(strings.TrimSpace(in.BillRef), 64)), PayerAccountID: in.PayerAccountID,
-		PaymentRequestID: in.PaymentRequestID, RawPayload: in.RawPayload, OccurredAt: in.OccurredAt,
-		CompletedAt: &now,
+		AccountNumber: optStr(truncate(strings.TrimSpace(in.AccountNumber), 64)), RawPayload: in.RawPayload,
+		OccurredAt: in.OccurredAt, CompletedAt: &now,
 	})
 	if db.IsNotFound(err) {
 		existing, gerr := q.GetTransactionByReceipt(ctx, store.GetTransactionByReceiptParams{Provider: "mpesa", ProviderTransactionID: &receipt})
@@ -117,142 +113,76 @@ func RecordIncoming(ctx context.Context, q *store.Queries, in IncomingPayment) (
 	return row, true, nil
 }
 
+// ErrNotImplemented marks the gateway-core stubs below.
+// TODO(gateway-core): remove once SucceedCharge and Reverse are implemented.
+var ErrNotImplemented = errors.New("ledger: not implemented yet (gateway-core)")
+
+// SucceedResult says what SucceedCharge did with a payment.
+type SucceedResult struct {
+	// Charge is the charge after the call.
+	Charge store.Charge
+	// Succeeded: this payment made the charge succeeded (emit
+	// charge.succeeded). False when the charge had already succeeded with
+	// another transaction: the payment is a duplicate (emit
+	// payment.received with duplicate_of_charge = Charge.ID).
+	Succeeded bool
+}
+
+// SucceedCharge applies a succeeded, receipted payment (txnID, whose
+// charge_id is chargeID) to its charge under a row lock, in q's transaction.
+// Money rules 3 and 6: a pending, needs_review, expired or cancelled charge
+// becomes succeeded; an already succeeded (or reversed) charge is left alone
+// and the payment is reported as a duplicate. The charges_guard trigger
+// re-checks app, charge, receipt and exact amount.
+func SucceedCharge(ctx context.Context, q *store.Queries, chargeID, txnID uuid.UUID) (SucceedResult, error) {
+	// TODO(gateway-core): LockChargeInternal, check txn (succeeded, receipt,
+	// same app/charge, exact amount), MarkChargeSucceeded or report duplicate.
+	return SucceedResult{}, ErrNotImplemented
+}
+
 // Service performs ledger operations that need their own database transaction.
 type Service struct {
 	pool   *db.Pool
-	alloc  *allocation.Service
 	logger *slog.Logger
 }
 
 // NewService builds a ledger service.
-func NewService(pool *db.Pool, alloc *allocation.Service, logger *slog.Logger) *Service {
-	return &Service{pool: pool, alloc: alloc, logger: logger}
+func NewService(pool *db.Pool, logger *slog.Logger) *Service {
+	return &Service{pool: pool, logger: logger}
 }
 
-// RecordAndAllocate records an incoming payment matched to a payer and
-// allocates it, atomically. Duplicate receipts return the original
-// allocation with Duplicate=true.
-func (s *Service) RecordAndAllocate(ctx context.Context, actor audit.Actor, in IncomingPayment) (Transaction, allocation.Result, error) {
-	var (
-		txn Transaction
-		res allocation.Result
-	)
-	err := db.WithTx(ctx, s.pool, actor.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
-		var err error
-		var created bool
-		txn, created, err = RecordIncoming(ctx, q, in)
-		if err != nil {
-			return err
-		}
-		if txn.PayerAccountID == nil {
-			return nil // unmatched: suspense handles it
-		}
-		res, err = s.alloc.AllocateTransaction(ctx, q, actor, txn.ID)
-		if err != nil {
-			return err
-		}
-		if !created {
-			res.Duplicate = true
-		}
-		return nil
-	})
-	if err != nil {
-		return Transaction{}, allocation.Result{}, err
-	}
-	if res.Duplicate {
-		s.logger.InfoContext(ctx, "duplicate receipt ignored", slog.String("transaction_id", txn.ID.String()),
-			slog.String("channel", string(txn.Channel)))
-	}
-	return txn, res, nil
-}
-
-// ReverseParams describes a correction of a recorded payment, e.g. after
-// Safaricom reverses a transaction.
+// ReverseParams describes a staff reversal of a recorded payment (money
+// rule 9), e.g. after Safaricom reverses a transaction.
 type ReverseParams struct {
 	OriginalID      uuid.UUID
 	Reason          string
 	ProviderReceipt string // Safaricom's reversal receipt; required for M-Pesa payments
 }
 
-// Reverse records a reversal of an allocated incoming payment and undoes its
-// allocations. Only a named person (admin or CLI operator) may do this.
-func (s *Service) Reverse(ctx context.Context, actor audit.Actor, p ReverseParams) (Transaction, allocation.Result, error) {
+// ReverseResult is what Reverse recorded.
+type ReverseResult struct {
+	Reversal Transaction
+	// Charge is the charge the original payment paid (now reversed), if any.
+	Charge *store.Charge
+}
+
+// Reverse records a reversal transaction against a succeeded incoming
+// payment. If that payment paid a charge, the charge becomes reversed. The
+// app gets transaction.reversed; the action is audited. Admin (or CLI
+// operator) only, with a reason. There is no credit or reopening logic.
+func (s *Service) Reverse(ctx context.Context, actor audit.Actor, p ReverseParams) (ReverseResult, error) {
 	if actor.Type != store.AuditActorTypeAdmin && actor.Type != store.AuditActorTypeCli {
-		return Transaction{}, allocation.Result{}, ErrActorRequired
+		return ReverseResult{}, ErrActorRequired
 	}
 	reason := strings.TrimSpace(p.Reason)
 	if len(reason) < 3 || len(reason) > 500 {
-		return Transaction{}, allocation.Result{}, ErrReasonRequired
+		return ReverseResult{}, ErrReasonRequired
 	}
-	var (
-		rev Transaction
-		res allocation.Result
-	)
-	err := db.WithTx(ctx, s.pool, actor.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
-		orig, err := q.LockTransactionInternal(ctx, p.OriginalID)
-		if err != nil {
-			return fmt.Errorf("ledger: load original: %w", err)
-		}
-		if orig.Kind != store.TxnKindPayment || orig.Status != store.TxnStatusSucceeded || orig.PayerAccountID == nil {
-			return ErrNotReversible
-		}
-		if _, err := q.GetReversalOf(ctx, &orig.ID); err == nil {
-			return ErrAlreadyReversed
-		} else if !db.IsNotFound(err) {
-			return err
-		}
-		batch, err := q.GetPaymentBatchForTransaction(ctx, &orig.ID)
-		if db.IsNotFound(err) {
-			return ErrNotReversible
-		}
-		if err != nil {
-			return err
-		}
-
-		id, err := uuid.NewV7()
-		if err != nil {
-			return err
-		}
-		var receipt *string
-		if r := strings.ToUpper(strings.TrimSpace(p.ProviderReceipt)); r != "" {
-			if !validReceipt(r) {
-				return ErrInvalidReceipt
-			}
-			receipt = &r
-		} else if orig.Provider != "manual" {
-			return ErrReversalReceipt
-		}
-		createdBy := actor.String()
-		now := time.Now()
-		rev, err = q.InsertTransaction(ctx, store.InsertTransactionParams{
-			ID: id, ProductID: orig.ProductID, Direction: store.TxnDirectionOut, Kind: store.TxnKindReversal,
-			Channel: orig.Channel, Provider: orig.Provider, Status: store.TxnStatusSucceeded, Amount: orig.Amount,
-			ProviderTransactionID: receipt, Phone: orig.Phone, PayerAccountID: orig.PayerAccountID,
-			PaymentRequestID: orig.PaymentRequestID, ReversesTransactionID: &orig.ID,
-			Reason: &reason, CreatedBy: &createdBy, CompletedAt: &now,
-		})
-		if db.IsNotFound(err) {
-			return ErrReceiptConflict
-		}
-		if err != nil {
-			return fmt.Errorf("ledger: insert reversal: %w", err)
-		}
-		res, err = s.alloc.ReverseBatch(ctx, q, actor, rev.ID, batch, reason)
-		if err != nil {
-			return err
-		}
-		return audit.Record(ctx, q, audit.Entry{
-			Actor: actor, Action: "transaction.reversed", EntityType: "transaction", EntityID: orig.ID.String(),
-			ProductID: orig.ProductID,
-			Details:   map[string]any{"reversal_id": rev.ID.String(), "amount": orig.Amount, "reason": reason},
-		})
-	})
-	if err != nil {
-		return Transaction{}, allocation.Result{}, err
-	}
-	s.logger.WarnContext(ctx, "payment reversed", slog.String("original_id", p.OriginalID.String()),
-		slog.String("reversal_id", rev.ID.String()), slog.Int64("amount", rev.Amount), slog.String("actor", actor.String()))
-	return rev, res, nil
+	// TODO(gateway-core): in one db.WithTx: LockTransactionInternal, check
+	// reversible (GetReversalOf), InsertTransaction kind=reversal (receipt
+	// rule: ErrReversalReceipt for M-Pesa), MarkChargeReversed when
+	// charges.transaction_id = original, emit transaction.reversed, audit.
+	return ReverseResult{}, ErrNotImplemented
 }
 
 func validReceipt(r string) bool {

@@ -7,7 +7,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// endpoints tracks, per product (= per webhook endpoint), a circuit breaker
+// endpoints tracks, per app (= per webhook endpoint), a circuit breaker
 // and the number of in-flight deliveries. State is in memory, per worker
 // process: it only decides when to *try*, never whether an event is
 // delivered, so losing it on restart is harmless.

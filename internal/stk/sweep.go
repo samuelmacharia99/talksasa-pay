@@ -103,7 +103,7 @@ func (s *Service) Sweep(ctx context.Context, limit int) (SweepResult, error) {
 
 func (s *Service) sweepOne(ctx context.Context, p Push) (SweepResult, error) {
 	now := s.o.Now()
-	attrs := []any{slog.String("stk_push_id", p.ID.String()), slog.String("payment_request_id", p.PaymentRequestID.String())}
+	attrs := []any{slog.String("stk_push_id", p.ID.String()), slog.String("charge_id", p.ChargeID.String())}
 	switch p.Status {
 	case store.StkPushStatusInitiating:
 		if now.Sub(p.CreatedAt) < s.o.InitiatingTimeout {

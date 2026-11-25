@@ -22,7 +22,7 @@ UPDATE transactions
        raw_payload = coalesce(raw_payload, $4),
        completed_at = now()
  WHERE id = $5 AND status IN ('pending', 'needs_review')
-RETURNING id, product_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, bill_ref, payer_account_id, payment_request_id, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at
+RETURNING id, app_id, charge_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, account_number, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at
 `
 
 type CompletePendingTransactionParams struct {
@@ -45,7 +45,8 @@ func (q *Queries) CompletePendingTransaction(ctx context.Context, arg CompletePe
 	var i Transaction
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.Direction,
 		&i.Kind,
 		&i.Channel,
@@ -56,9 +57,7 @@ func (q *Queries) CompletePendingTransaction(ctx context.Context, arg CompletePe
 		&i.ProviderTransactionID,
 		&i.ProviderRequestID,
 		&i.Phone,
-		&i.BillRef,
-		&i.PayerAccountID,
-		&i.PaymentRequestID,
+		&i.AccountNumber,
 		&i.ReversesTransactionID,
 		&i.FailureCode,
 		&i.FailureReason,
@@ -81,7 +80,7 @@ UPDATE transactions
        raw_payload = coalesce(raw_payload, $3),
        completed_at = now()
  WHERE id = $4 AND status IN ('pending', 'needs_review')
-RETURNING id, product_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, bill_ref, payer_account_id, payment_request_id, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at
+RETURNING id, app_id, charge_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, account_number, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at
 `
 
 type FailPendingTransactionParams struct {
@@ -102,7 +101,8 @@ func (q *Queries) FailPendingTransaction(ctx context.Context, arg FailPendingTra
 	var i Transaction
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.Direction,
 		&i.Kind,
 		&i.Channel,
@@ -113,9 +113,7 @@ func (q *Queries) FailPendingTransaction(ctx context.Context, arg FailPendingTra
 		&i.ProviderTransactionID,
 		&i.ProviderRequestID,
 		&i.Phone,
-		&i.BillRef,
-		&i.PayerAccountID,
-		&i.PaymentRequestID,
+		&i.AccountNumber,
 		&i.ReversesTransactionID,
 		&i.FailureCode,
 		&i.FailureReason,
@@ -131,7 +129,7 @@ func (q *Queries) FailPendingTransaction(ctx context.Context, arg FailPendingTra
 }
 
 const findOrphanSTKPush = `-- name: FindOrphanSTKPush :many
-SELECT id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes
+SELECT id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes
  WHERE checkout_request_id IS NULL AND phone = $1 AND amount = $2
    AND created_at > now() - interval '1 hour'
  ORDER BY created_at DESC
@@ -156,8 +154,8 @@ func (q *Queries) FindOrphanSTKPush(ctx context.Context, arg FindOrphanSTKPushPa
 		var i StkPush
 		if err := rows.Scan(
 			&i.ID,
-			&i.ProductID,
-			&i.PaymentRequestID,
+			&i.AppID,
+			&i.ChargeID,
 			&i.TransactionID,
 			&i.Source,
 			&i.Phone,
@@ -192,7 +190,7 @@ UPDATE stk_pushes
    SET status = $1, result_code = $2, result_desc = $3,
        completed_at = coalesce(completed_at, now()), next_query_at = NULL
  WHERE id = $4
-RETURNING id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked
+RETURNING id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked
 `
 
 type FinishSTKPushParams struct {
@@ -214,8 +212,8 @@ func (q *Queries) FinishSTKPush(ctx context.Context, arg FinishSTKPushParams) (S
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,
@@ -238,17 +236,17 @@ func (q *Queries) FinishSTKPush(ctx context.Context, arg FinishSTKPushParams) (S
 	return i, err
 }
 
-const getLiveSTKPushForRequest = `-- name: GetLiveSTKPushForRequest :one
-SELECT id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE payment_request_id = $1 AND status IN ('initiating', 'sent')
+const getLiveSTKPushForCharge = `-- name: GetLiveSTKPushForCharge :one
+SELECT id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE charge_id = $1 AND status IN ('initiating', 'sent')
 `
 
-func (q *Queries) GetLiveSTKPushForRequest(ctx context.Context, paymentRequestID uuid.UUID) (StkPush, error) {
-	row := q.db.QueryRow(ctx, getLiveSTKPushForRequest, paymentRequestID)
+func (q *Queries) GetLiveSTKPushForCharge(ctx context.Context, chargeID uuid.UUID) (StkPush, error) {
+	row := q.db.QueryRow(ctx, getLiveSTKPushForCharge, chargeID)
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,
@@ -272,21 +270,21 @@ func (q *Queries) GetLiveSTKPushForRequest(ctx context.Context, paymentRequestID
 }
 
 const getSTKPushByIdempotencyKey = `-- name: GetSTKPushByIdempotencyKey :one
-SELECT id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE product_id = $1 AND idempotency_key = $2
+SELECT id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE app_id = $1 AND idempotency_key = $2
 `
 
 type GetSTKPushByIdempotencyKeyParams struct {
-	ProductID      uuid.UUID
+	AppID          uuid.UUID
 	IdempotencyKey *string
 }
 
 func (q *Queries) GetSTKPushByIdempotencyKey(ctx context.Context, arg GetSTKPushByIdempotencyKeyParams) (StkPush, error) {
-	row := q.db.QueryRow(ctx, getSTKPushByIdempotencyKey, arg.ProductID, arg.IdempotencyKey)
+	row := q.db.QueryRow(ctx, getSTKPushByIdempotencyKey, arg.AppID, arg.IdempotencyKey)
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,
@@ -309,22 +307,22 @@ func (q *Queries) GetSTKPushByIdempotencyKey(ctx context.Context, arg GetSTKPush
 	return i, err
 }
 
-const getSTKPushForProduct = `-- name: GetSTKPushForProduct :one
-SELECT id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE product_id = $1 AND id = $2
+const getSTKPushForApp = `-- name: GetSTKPushForApp :one
+SELECT id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE app_id = $1 AND id = $2
 `
 
-type GetSTKPushForProductParams struct {
-	ProductID uuid.UUID
-	ID        uuid.UUID
+type GetSTKPushForAppParams struct {
+	AppID uuid.UUID
+	ID    uuid.UUID
 }
 
-func (q *Queries) GetSTKPushForProduct(ctx context.Context, arg GetSTKPushForProductParams) (StkPush, error) {
-	row := q.db.QueryRow(ctx, getSTKPushForProduct, arg.ProductID, arg.ID)
+func (q *Queries) GetSTKPushForApp(ctx context.Context, arg GetSTKPushForAppParams) (StkPush, error) {
+	row := q.db.QueryRow(ctx, getSTKPushForApp, arg.AppID, arg.ID)
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,
@@ -348,7 +346,7 @@ func (q *Queries) GetSTKPushForProduct(ctx context.Context, arg GetSTKPushForPro
 }
 
 const getSTKPushInternal = `-- name: GetSTKPushInternal :one
-SELECT id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE id = $1
+SELECT id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE id = $1
 `
 
 func (q *Queries) GetSTKPushInternal(ctx context.Context, id uuid.UUID) (StkPush, error) {
@@ -356,8 +354,8 @@ func (q *Queries) GetSTKPushInternal(ctx context.Context, id uuid.UUID) (StkPush
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,
@@ -381,7 +379,7 @@ func (q *Queries) GetSTKPushInternal(ctx context.Context, id uuid.UUID) (StkPush
 }
 
 const getTransactionByProviderRequest = `-- name: GetTransactionByProviderRequest :one
-SELECT id, product_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, bill_ref, payer_account_id, payment_request_id, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at FROM transactions WHERE channel = $1 AND provider_request_id = $2
+SELECT id, app_id, charge_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, account_number, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at FROM transactions WHERE channel = $1 AND provider_request_id = $2
 `
 
 type GetTransactionByProviderRequestParams struct {
@@ -394,7 +392,8 @@ func (q *Queries) GetTransactionByProviderRequest(ctx context.Context, arg GetTr
 	var i Transaction
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.Direction,
 		&i.Kind,
 		&i.Channel,
@@ -405,9 +404,7 @@ func (q *Queries) GetTransactionByProviderRequest(ctx context.Context, arg GetTr
 		&i.ProviderTransactionID,
 		&i.ProviderRequestID,
 		&i.Phone,
-		&i.BillRef,
-		&i.PayerAccountID,
-		&i.PaymentRequestID,
+		&i.AccountNumber,
 		&i.ReversesTransactionID,
 		&i.FailureCode,
 		&i.FailureReason,
@@ -464,21 +461,20 @@ func (q *Queries) InsertMpesaCallback(ctx context.Context, arg InsertMpesaCallba
 const insertPendingSTKTransaction = `-- name: InsertPendingSTKTransaction :one
 
 
-INSERT INTO transactions (id, product_id, direction, kind, channel, provider, status, amount,
-                          phone, bill_ref, payer_account_id, payment_request_id)
-VALUES ($1, $2, 'in', 'payment', 'mpesa_stk', 'mpesa', 'pending', $3,
-        $4, $5, $6, $7)
-RETURNING id, product_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, bill_ref, payer_account_id, payment_request_id, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at
+INSERT INTO transactions (id, app_id, charge_id, direction, kind, channel, provider, status, amount,
+                          phone, account_number)
+VALUES ($1, $2, $3, 'in', 'payment', 'mpesa_stk', 'mpesa', 'pending', $4,
+        $5, $6)
+RETURNING id, app_id, charge_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, account_number, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at
 `
 
 type InsertPendingSTKTransactionParams struct {
-	ID               uuid.UUID
-	ProductID        *uuid.UUID
-	Amount           int64
-	Phone            *string
-	BillRef          *string
-	PayerAccountID   *uuid.UUID
-	PaymentRequestID *uuid.UUID
+	ID            uuid.UUID
+	AppID         *uuid.UUID
+	ChargeID      *uuid.UUID
+	Amount        int64
+	Phone         *string
+	AccountNumber *string
 }
 
 // Phase 2: M-Pesa (Daraja) STK pushes, callback inbox, pending transactions.
@@ -489,17 +485,17 @@ type InsertPendingSTKTransactionParams struct {
 func (q *Queries) InsertPendingSTKTransaction(ctx context.Context, arg InsertPendingSTKTransactionParams) (Transaction, error) {
 	row := q.db.QueryRow(ctx, insertPendingSTKTransaction,
 		arg.ID,
-		arg.ProductID,
+		arg.AppID,
+		arg.ChargeID,
 		arg.Amount,
 		arg.Phone,
-		arg.BillRef,
-		arg.PayerAccountID,
-		arg.PaymentRequestID,
+		arg.AccountNumber,
 	)
 	var i Transaction
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.Direction,
 		&i.Kind,
 		&i.Channel,
@@ -510,9 +506,7 @@ func (q *Queries) InsertPendingSTKTransaction(ctx context.Context, arg InsertPen
 		&i.ProviderTransactionID,
 		&i.ProviderRequestID,
 		&i.Phone,
-		&i.BillRef,
-		&i.PayerAccountID,
-		&i.PaymentRequestID,
+		&i.AccountNumber,
 		&i.ReversesTransactionID,
 		&i.FailureCode,
 		&i.FailureReason,
@@ -529,24 +523,24 @@ func (q *Queries) InsertPendingSTKTransaction(ctx context.Context, arg InsertPen
 
 const insertSTKPush = `-- name: InsertSTKPush :one
 
-INSERT INTO stk_pushes (id, product_id, payment_request_id, transaction_id, source, phone, amount,
+INSERT INTO stk_pushes (id, app_id, charge_id, transaction_id, source, phone, amount,
                         idempotency_key, request_hash, next_query_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7,
         $8, $9, $10)
-RETURNING id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked
+RETURNING id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked
 `
 
 type InsertSTKPushParams struct {
-	ID               uuid.UUID
-	ProductID        uuid.UUID
-	PaymentRequestID uuid.UUID
-	TransactionID    uuid.UUID
-	Source           string
-	Phone            string
-	Amount           int64
-	IdempotencyKey   *string
-	RequestHash      []byte
-	NextQueryAt      *time.Time
+	ID             uuid.UUID
+	AppID          uuid.UUID
+	ChargeID       uuid.UUID
+	TransactionID  uuid.UUID
+	Source         string
+	Phone          string
+	Amount         int64
+	IdempotencyKey *string
+	RequestHash    []byte
+	NextQueryAt    *time.Time
 }
 
 // ---------------------------------------------------------------------------
@@ -555,8 +549,8 @@ type InsertSTKPushParams struct {
 func (q *Queries) InsertSTKPush(ctx context.Context, arg InsertSTKPushParams) (StkPush, error) {
 	row := q.db.QueryRow(ctx, insertSTKPush,
 		arg.ID,
-		arg.ProductID,
-		arg.PaymentRequestID,
+		arg.AppID,
+		arg.ChargeID,
 		arg.TransactionID,
 		arg.Source,
 		arg.Phone,
@@ -568,8 +562,8 @@ func (q *Queries) InsertSTKPush(ctx context.Context, arg InsertSTKPushParams) (S
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,
@@ -593,7 +587,7 @@ func (q *Queries) InsertSTKPush(ctx context.Context, arg InsertSTKPushParams) (S
 }
 
 const listDueSTKPushes = `-- name: ListDueSTKPushes :many
-SELECT id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes
+SELECT id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes
  WHERE status IN ('initiating', 'sent') AND next_query_at <= now()
  ORDER BY next_query_at
  LIMIT $1
@@ -613,8 +607,8 @@ func (q *Queries) ListDueSTKPushes(ctx context.Context, lim int32) ([]StkPush, e
 		var i StkPush
 		if err := rows.Scan(
 			&i.ID,
-			&i.ProductID,
-			&i.PaymentRequestID,
+			&i.AppID,
+			&i.ChargeID,
 			&i.TransactionID,
 			&i.Source,
 			&i.Phone,
@@ -706,57 +700,6 @@ func (q *Queries) ListMpesaCallbacksAdmin(ctx context.Context, arg ListMpesaCall
 	return items, nil
 }
 
-const listSTKPushesForRequest = `-- name: ListSTKPushesForRequest :many
-SELECT id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE payment_request_id = $1 ORDER BY created_at DESC LIMIT $2
-`
-
-type ListSTKPushesForRequestParams struct {
-	PaymentRequestID uuid.UUID
-	Lim              int32
-}
-
-func (q *Queries) ListSTKPushesForRequest(ctx context.Context, arg ListSTKPushesForRequestParams) ([]StkPush, error) {
-	rows, err := q.db.Query(ctx, listSTKPushesForRequest, arg.PaymentRequestID, arg.Lim)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []StkPush
-	for rows.Next() {
-		var i StkPush
-		if err := rows.Scan(
-			&i.ID,
-			&i.ProductID,
-			&i.PaymentRequestID,
-			&i.TransactionID,
-			&i.Source,
-			&i.Phone,
-			&i.Amount,
-			&i.IdempotencyKey,
-			&i.RequestHash,
-			&i.MerchantRequestID,
-			&i.CheckoutRequestID,
-			&i.Status,
-			&i.ResultCode,
-			&i.ResultDesc,
-			&i.QueryAttempts,
-			&i.NextQueryAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.CompletedAt,
-			&i.PaidTransactionID,
-			&i.ConfirmBlocked,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const lockMpesaCallback = `-- name: LockMpesaCallback :one
 SELECT id, kind, remote_ip, raw, received_at, processed_at, error, attempts, transaction_id FROM mpesa_callbacks WHERE id = $1 FOR NO KEY UPDATE
 `
@@ -779,7 +722,7 @@ func (q *Queries) LockMpesaCallback(ctx context.Context, id uuid.UUID) (MpesaCal
 }
 
 const lockSTKPush = `-- name: LockSTKPush :one
-SELECT id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE id = $1 FOR NO KEY UPDATE
+SELECT id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE id = $1 FOR NO KEY UPDATE
 `
 
 func (q *Queries) LockSTKPush(ctx context.Context, id uuid.UUID) (StkPush, error) {
@@ -787,8 +730,8 @@ func (q *Queries) LockSTKPush(ctx context.Context, id uuid.UUID) (StkPush, error
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,
@@ -812,7 +755,7 @@ func (q *Queries) LockSTKPush(ctx context.Context, id uuid.UUID) (StkPush, error
 }
 
 const lockSTKPushByCheckout = `-- name: LockSTKPushByCheckout :one
-SELECT id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE checkout_request_id = $1 FOR NO KEY UPDATE
+SELECT id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked FROM stk_pushes WHERE checkout_request_id = $1 FOR NO KEY UPDATE
 `
 
 func (q *Queries) LockSTKPushByCheckout(ctx context.Context, checkoutRequestID *string) (StkPush, error) {
@@ -820,8 +763,8 @@ func (q *Queries) LockSTKPushByCheckout(ctx context.Context, checkoutRequestID *
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,
@@ -867,7 +810,7 @@ UPDATE stk_pushes
    SET status = 'sent', merchant_request_id = $1,
        checkout_request_id = $2, next_query_at = $3
  WHERE id = $4 AND status = 'initiating'
-RETURNING id, product_id, payment_request_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked
+RETURNING id, app_id, charge_id, transaction_id, source, phone, amount, idempotency_key, request_hash, merchant_request_id, checkout_request_id, status, result_code, result_desc, query_attempts, next_query_at, created_at, updated_at, completed_at, paid_transaction_id, confirm_blocked
 `
 
 type MarkSTKPushSentParams struct {
@@ -887,8 +830,8 @@ func (q *Queries) MarkSTKPushSent(ctx context.Context, arg MarkSTKPushSentParams
 	var i StkPush
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.PaymentRequestID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.TransactionID,
 		&i.Source,
 		&i.Phone,
@@ -917,7 +860,7 @@ UPDATE transactions
        failure_code = coalesce(failure_code, $1),
        failure_reason = coalesce(failure_reason, $2)
  WHERE id = $3 AND status = 'pending'
-RETURNING id, product_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, bill_ref, payer_account_id, payment_request_id, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at
+RETURNING id, app_id, charge_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, account_number, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at
 `
 
 type MarkTransactionNeedsReviewParams struct {
@@ -931,7 +874,8 @@ func (q *Queries) MarkTransactionNeedsReview(ctx context.Context, arg MarkTransa
 	var i Transaction
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.Direction,
 		&i.Kind,
 		&i.Channel,
@@ -942,9 +886,7 @@ func (q *Queries) MarkTransactionNeedsReview(ctx context.Context, arg MarkTransa
 		&i.ProviderTransactionID,
 		&i.ProviderRequestID,
 		&i.Phone,
-		&i.BillRef,
-		&i.PayerAccountID,
-		&i.PaymentRequestID,
+		&i.AccountNumber,
 		&i.ReversesTransactionID,
 		&i.FailureCode,
 		&i.FailureReason,

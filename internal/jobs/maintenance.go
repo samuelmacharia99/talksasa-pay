@@ -35,31 +35,28 @@ var (
 	retentionActor = audit.System("retention-job")
 )
 
-// ExpiryWorker closes open payment requests whose expires_at has passed.
+// ExpiryWorker expires pending charges whose expires_at has passed.
 //
 // Money rules:
-//   - Only fully unpaid `open` requests expire. A partially paid request
-//     stays payable (the query's status = 'open' predicate, and the
-//     payment_requests guard trigger, both enforce it).
-//   - Each request's payment_request.expired event is written in the same
+//   - Only pending charges expire (never needs_review: staff are checking).
+//     Late money still succeeds an expired charge (rule 6).
+//   - Each charge's charge.expired event is written in the same
 //     transaction as its status change.
 //   - Race-safe with payments: the batch is selected FOR NO KEY UPDATE SKIP
-//     LOCKED. A request an allocation has locked is skipped (and picked up by
-//     a later sweep if it is still open); a request the sweep has locked
-//     makes the allocation wait, after which it re-reads the row, sees
-//     `expired` and leaves it alone. Whichever commits first wins, so a
-//     request is never both paid and expired.
+//     LOCKED. A charge being paid is skipped (and picked up by a later sweep
+//     if it is still pending).
 //
 // Idempotent: re-running finds nothing more to do; concurrent sweeps skip
 // each other's rows.
 //
-// Audit: one audit_log row per product per batch ("payment_requests.expired",
-// with the count and ids), not one per request. Expiry is a routine
-// scheduled effect, each request already gets its own immutable event row,
-// and the audit chain is serialised by a global lock, so per-request audit
-// rows would add contention and noise for no extra traceability.
+// Audit: one audit_log row per app per batch ("charges.expired", with the
+// count and ids), not one per charge. Expiry is a routine scheduled
+// effect, each charge already gets its own immutable event row, and the
+// audit chain is serialised by a global lock.
+//
+// TODO(gateway-core): this sweep and charge.Service.Expire overlap; keep one.
 type ExpiryWorker struct {
-	river.WorkerDefaults[queue.ExpireRequestsArgs]
+	river.WorkerDefaults[queue.ExpireChargesArgs]
 	pool      db.Beginner
 	events    *events.Emitter
 	logger    *slog.Logger
@@ -68,18 +65,18 @@ type ExpiryWorker struct {
 }
 
 // Work implements river.Worker.
-func (w *ExpiryWorker) Work(ctx context.Context, _ *river.Job[queue.ExpireRequestsArgs]) error {
+func (w *ExpiryWorker) Work(ctx context.Context, _ *river.Job[queue.ExpireChargesArgs]) error {
 	_, err := w.Sweep(ctx)
 	return err
 }
 
 // Timeout implements river.Worker.
-func (w *ExpiryWorker) Timeout(*river.Job[queue.ExpireRequestsArgs]) time.Duration {
+func (w *ExpiryWorker) Timeout(*river.Job[queue.ExpireChargesArgs]) time.Duration {
 	return maintenanceTimeout
 }
 
-// Sweep expires due requests batch by batch until a batch comes back short
-// or ctx ends. It returns how many requests it expired (all committed, even
+// Sweep expires due charges batch by batch until a batch comes back short
+// or ctx ends. It returns how many charges it expired (all committed, even
 // when it also returns an error).
 func (w *ExpiryWorker) Sweep(ctx context.Context) (int, error) {
 	total := 0
@@ -98,7 +95,7 @@ func (w *ExpiryWorker) Sweep(ctx context.Context) (int, error) {
 		}
 	}
 	if total > 0 {
-		w.logger.InfoContext(ctx, "payment requests expired", slog.Int("count", total))
+		w.logger.InfoContext(ctx, "charges expired", slog.Int("count", total))
 	}
 	return total, nil
 }
@@ -106,34 +103,34 @@ func (w *ExpiryWorker) Sweep(ctx context.Context) (int, error) {
 func (w *ExpiryWorker) expireBatch(ctx context.Context) (int, error) {
 	var n int
 	err := db.WithTx(ctx, w.pool, expiryActor.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
-		rows, err := q.ExpireDuePaymentRequests(ctx, int32(w.batchSize))
+		rows, err := q.ExpireDueCharges(ctx, int32(w.batchSize))
 		if err != nil {
-			return fmt.Errorf("jobs: expire requests: %w", err)
+			return fmt.Errorf("jobs: expire charges: %w", err)
 		}
 		// RETURNING order is unspecified; emit in expiry order so the event
 		// feed reads naturally.
-		slices.SortFunc(rows, func(a, b store.PaymentRequest) int {
-			if c := a.ExpiresAt.Compare(*b.ExpiresAt); c != 0 {
+		slices.SortFunc(rows, func(a, b store.Charge) int {
+			if c := a.ExpiresAt.Compare(b.ExpiresAt); c != 0 {
 				return c
 			}
 			return cmp.Compare(a.ID.String(), b.ID.String())
 		})
-		byProduct := map[uuid.UUID][]string{}
-		var products []uuid.UUID
+		byApp := map[uuid.UUID][]string{}
+		var apps []uuid.UUID
 		for _, r := range rows {
-			if err := w.events.EmitPaymentRequest(ctx, q, r.ProductID, r.ID, events.PaymentRequestExpired); err != nil {
+			if err := w.events.EmitCharge(ctx, q, r.AppID, r.ID, events.ChargeExpired); err != nil {
 				return err
 			}
-			if _, ok := byProduct[r.ProductID]; !ok {
-				products = append(products, r.ProductID)
+			if _, ok := byApp[r.AppID]; !ok {
+				apps = append(apps, r.AppID)
 			}
-			byProduct[r.ProductID] = append(byProduct[r.ProductID], r.ID.String())
+			byApp[r.AppID] = append(byApp[r.AppID], r.ID.String())
 		}
-		for _, pid := range products {
-			ids := byProduct[pid]
+		for _, pid := range apps {
+			ids := byApp[pid]
 			if err := audit.Record(ctx, q, audit.Entry{
-				Actor: expiryActor, Action: "payment_requests.expired", EntityType: "payment_request", ProductID: &pid,
-				Details: map[string]any{"count": len(ids), "payment_request_ids": ids},
+				Actor: expiryActor, Action: "charges.expired", EntityType: "charge", AppID: &pid,
+				Details: map[string]any{"count": len(ids), "charge_ids": ids},
 			}); err != nil {
 				return err
 			}

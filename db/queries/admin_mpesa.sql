@@ -4,7 +4,7 @@
 -- Callback inbox for the admin panel. attention_only keeps callbacks that
 -- need a look: not processed yet, or processed with an error and no money
 -- recorded. (Notes on callbacks that did record money — duplicate receipt,
--- held in suspense — are not failures; those payments surface elsewhere.)
+-- held unmatched — are not failures; those payments surface elsewhere.)
 SELECT id, kind, remote_ip, received_at, processed_at, error, attempts, transaction_id
   FROM mpesa_callbacks
  WHERE (NOT @attention_only::boolean OR processed_at IS NULL OR (error IS NOT NULL AND transaction_id IS NULL))

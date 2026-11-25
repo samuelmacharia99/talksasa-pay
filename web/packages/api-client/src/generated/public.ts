@@ -11,7 +11,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The bill behind a hosted payment link */
+        /** The charge behind a hosted payment link */
         get: {
             parameters: {
                 query?: never;
@@ -70,9 +70,11 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Send an M-Pesa payment prompt to a phone for this bill
-         * @description Always the full outstanding balance. Rate limited per visitor, and
-         *     only one prompt per bill can be live at a time (409 `stk_in_progress`).
+         * Send an M-Pesa payment prompt to a phone for this charge
+         * @description Always the charge's exact amount. Only pending charges can be
+         *     prompted (409 `not_payable`). Rate limited per visitor, and only one
+         *     prompt per charge can be live at a time (409 `stk_in_progress`). A
+         *     failed prompt does not fail the charge: the customer can try again.
          *     The page then polls GET /pay/{token} for `status` and `stk_push`.
          */
         post: {
@@ -111,7 +113,7 @@ export interface paths {
                         "application/problem+json": components["schemas"]["Problem"];
                     };
                 };
-                /** @description Not payable (not_payable), a prompt is already live (stk_in_progress) or balance above KES 250,000 (amount_too_large) */
+                /** @description Not payable (not_payable: succeeded, in review, cancelled or expired), a prompt is already live (stk_in_progress) or amount above KES 250,000 (amount_too_large) */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -168,7 +170,7 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** @description The latest prompt for this bill, without ids or the phone number. */
+        /** @description The latest prompt for this charge, without ids or the phone number. */
         PayPageSTK: {
             /** @enum {string} */
             status: "initiating" | "sent" | "succeeded" | "failed" | "needs_review";
@@ -186,28 +188,33 @@ export interface components {
             request_id?: string;
         };
         PayPage: {
-            product_name: string;
+            /** @description Who is collecting the money */
+            app_name: string;
+            /** @description The app's reference (e.g. invoice number) */
             reference: string;
-            description: string;
+            description: string | null;
             /** @enum {string} */
             currency: "KES";
             amount: number;
-            amount_paid: number;
-            outstanding: number;
-            /** @enum {string} */
-            status: "open" | "partially_paid" | "paid" | "cancelled" | "expired";
+            /**
+             * @description A pending charge past its expiry is shown as expired even before the expiry job runs.
+             * @enum {string}
+             */
+            status: "pending" | "needs_review" | "succeeded" | "expired" | "cancelled" | "reversed";
+            /** @description True while a prompt may be sent (status pending) */
             payable: boolean;
             /** Format: date-time */
-            expires_at: string | null;
+            expires_at: string;
             /** Format: date-time */
-            paid_at: string | null;
+            succeeded_at: string | null;
+            /** @description Manual M-Pesa instructions while payable; null otherwise */
             paybill: null | {
                 business_number: string;
                 account_number: string;
             };
-            /** @description True when M-Pesa prompts can be sent for this bill (M-Pesa on, bill payable, balance <= KES 250,000) */
+            /** @description True when M-Pesa prompts can be sent for this charge (M-Pesa on, charge payable, amount <= KES 250,000) */
             stk_available: boolean;
-            /** @description The latest prompt for this bill in the last 15 minutes, if any */
+            /** @description The latest prompt for this charge in the last 15 minutes, if any */
             stk_push: components["schemas"]["PayPageSTK"] | null;
         };
     };

@@ -19,20 +19,16 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 
-	"github.com/talksasa/talksasa-pay/internal/allocation"
 	"github.com/talksasa/talksasa-pay/internal/apiview"
+	"github.com/talksasa/talksasa-pay/internal/app"
 	"github.com/talksasa/talksasa-pay/internal/audit"
 	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/jobs"
-	"github.com/talksasa/talksasa-pay/internal/ledger"
-	"github.com/talksasa/talksasa-pay/internal/money"
-	"github.com/talksasa/talksasa-pay/internal/payer"
-	"github.com/talksasa/talksasa-pay/internal/paymentrequest"
 	"github.com/talksasa/talksasa-pay/internal/platform/crypto"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
-	"github.com/talksasa/talksasa-pay/internal/product"
 	"github.com/talksasa/talksasa-pay/internal/queue"
 	"github.com/talksasa/talksasa-pay/internal/store"
+	"github.com/talksasa/talksasa-pay/internal/testutil/seed"
 	"github.com/talksasa/talksasa-pay/internal/testutil/testdb"
 )
 
@@ -42,15 +38,14 @@ var (
 )
 
 type env struct {
-	t        *testing.T
-	ctx      context.Context
-	db       *testdb.DB
-	logger   *slog.Logger
-	products *product.Service
-	payers   *payer.Service
-	requests *paymentrequest.Service
-	ledger   *ledger.Service
-	events   *events.Emitter
+	t      *testing.T
+	ctx    context.Context
+	db     *testdb.DB
+	logger *slog.Logger
+	apps   *app.Service
+	events *events.Emitter
+	// prefixes by app id (seeded charges need the app's prefix).
+	prefixes map[uuid.UUID]string
 }
 
 func newEnv(t *testing.T) *env {
@@ -70,16 +65,13 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	ev := events.NewEmitter(apiview.View{PayBaseURL: "https://pay.test/", Paybill: "174379"}, queue.NewEnqueuer(rc))
-	alloc := allocation.NewService(logger, ev)
 	return &env{
 		t: t, ctx: context.Background(), db: d, logger: logger,
-		products: product.NewService(product.Options{
+		apps: app.NewService(app.Options{
 			Pool: d.App, Keyring: kr, APIKeyPepper: []byte(strings.Repeat("p", 40)), AllowHTTPHooks: true, Logger: logger,
 		}),
-		payers:   payer.NewService(d.App, logger),
-		requests: paymentrequest.NewService(d.App, alloc, ev, logger),
-		ledger:   ledger.NewService(d.App, alloc, logger),
 		events:   ev,
+		prefixes: map[uuid.UUID]string{},
 	}
 }
 
@@ -87,86 +79,31 @@ func (e *env) deps(batch int) jobs.Deps {
 	return jobs.Deps{Pool: e.db.App, Events: e.events, Logger: e.logger, AttemptRetention: 90 * 24 * time.Hour, BatchSize: batch}
 }
 
-func (e *env) product(prefix string) uuid.UUID {
+func (e *env) app(prefix string) uuid.UUID {
 	e.t.Helper()
-	c, err := e.products.Create(e.ctx, operator, product.CreateParams{
-		Name: prefix + " product", AccountPrefix: prefix, WebhookURL: "https://" + strings.ToLower(prefix) + ".example.com/hooks",
+	c, err := e.apps.Create(e.ctx, operator, app.CreateParams{
+		Name: prefix + " app", AccountPrefix: prefix, WebhookURL: "https://" + strings.ToLower(prefix) + ".example.com/hooks",
 	})
 	if err != nil {
-		e.t.Fatalf("create product %s: %v", prefix, err)
+		e.t.Fatalf("create app %s: %v", prefix, err)
 	}
-	return c.Product.ID
+	e.prefixes[c.App.ID] = prefix
+	return c.App.ID
 }
 
-var seq atomic.Int64
-
-func (e *env) payer(productID uuid.UUID) payer.Payer {
+// charge seeds a pending charge expiring at expiresAt (zero = in 24 h).
+func (e *env) charge(appID uuid.UUID, amount int64, expiresAt time.Time) store.Charge {
 	e.t.Helper()
-	ref := fmt.Sprintf("C%d", seq.Add(1))
-	p, _, err := e.payers.Upsert(e.ctx, operator, productID, payer.UpsertParams{
-		ExternalRef: ref, DisplayName: "Customer " + ref, Email: "c" + ref + "@example.com", Phones: []string{"0712345678"},
-	})
-	if err != nil {
-		e.t.Fatalf("create payer: %v", err)
-	}
-	return p
+	return seed.Charge(e.t, e.ctx, e.db.App, appID, e.prefixes[appID], amount, seed.ChargeOpts{ExpiresAt: expiresAt})
 }
 
-// request creates an open request. expiry: nil = never expires; otherwise
-// the request is created with a future expiry and then backdated by the
-// owner role to expiry (the API rejects past expiries).
-func (e *env) request(pr payer.Payer, amount int64, expiry *time.Time) uuid.UUID {
+func (e *env) state(id uuid.UUID) store.ChargeStatus {
 	e.t.Helper()
-	n := seq.Add(1)
-	p := paymentrequest.CreateParams{
-		PayerAccountID: pr.ID, ProductReference: fmt.Sprintf("INV-%d", n), Description: "Invoice",
-		Amount: amount, IdempotencyKey: fmt.Sprintf("idem-%d", n),
-	}
-	if expiry != nil {
-		future := time.Now().Add(time.Hour)
-		p.ExpiresAt = &future
-	}
-	c, err := e.requests.Create(e.ctx, audit.Product(pr.ProductID), pr.ProductID, p)
-	if err != nil {
-		e.t.Fatalf("create request: %v", err)
-	}
-	if expiry != nil {
-		e.setExpiry(c.Request.ID, *expiry)
-	}
-	return c.Request.ID
-}
-
-func (e *env) setExpiry(id uuid.UUID, at time.Time) {
-	e.t.Helper()
-	if _, err := e.db.Owner.Exec(e.ctx, `UPDATE payment_requests SET expires_at = $2 WHERE id = $1`, id, at); err != nil {
-		e.t.Fatalf("backdate expiry: %v", err)
-	}
-}
-
-var receiptSeq atomic.Int64
-
-func (e *env) pay(pr payer.Payer, amount money.KES, target *uuid.UUID) error {
-	ch := store.TxnChannelMpesaC2b
-	if target != nil {
-		ch = store.TxnChannelMpesaStk
-	}
-	receipt := fmt.Sprintf("TST%07d", receiptSeq.Add(1))
-	_, _, err := e.ledger.RecordAndAllocate(e.ctx, payWorker, ledger.IncomingPayment{
-		Channel: ch, Receipt: receipt, Amount: amount, Phone: "254712345678", BillRef: pr.AccountNumber,
-		ProductID: &pr.ProductID, PayerAccountID: &pr.ID, PaymentRequestID: target,
-		RawPayload: []byte(`{"TransID":"` + receipt + `"}`),
-	})
-	return err
-}
-
-func (e *env) state(id uuid.UUID) (store.PaymentRequestStatus, int64) {
-	e.t.Helper()
-	var st store.PaymentRequestStatus
-	var paid int64
-	if err := e.db.App.QueryRow(e.ctx, `SELECT status, amount_paid FROM payment_requests WHERE id = $1`, id).Scan(&st, &paid); err != nil {
+	var st store.ChargeStatus
+	if err := e.db.App.QueryRow(e.ctx, `SELECT status FROM charges WHERE id = $1`, id).Scan(&st); err != nil {
 		e.t.Fatal(err)
 	}
-	return st, paid
+	return st
 }
 
 func (e *env) eventCount(id uuid.UUID, typ string) int {
@@ -180,15 +117,7 @@ func (e *env) eventCount(id uuid.UUID, typ string) int {
 
 func (e *env) assertIntegrity() {
 	e.t.Helper()
-	q := store.New(e.db.App)
-	drift, err := q.FindBalanceDrift(e.ctx)
-	if err != nil {
-		e.t.Fatal(err)
-	}
-	if len(drift) != 0 {
-		e.t.Fatalf("balance drift: %+v", drift)
-	}
-	bad, err := q.VerifyAuditChain(e.ctx)
+	bad, err := store.New(e.db.App).VerifyAuditChain(e.ctx)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -197,37 +126,30 @@ func (e *env) assertIntegrity() {
 	}
 }
 
-func ago(d time.Duration) *time.Time { t := time.Now().Add(-d); return &t }
+func ago(d time.Duration) time.Time { return time.Now().Add(-d) }
 
-func TestExpirySweepOnlyExpiresDueOpenRequests(t *testing.T) {
+func TestExpirySweepOnlyExpiresDuePendingCharges(t *testing.T) {
 	e := newEnv(t)
-	pid := e.product("EXPA")
-	pr := e.payer(pid)
+	pid := e.app("EXPA")
+	q := store.New(e.db.App)
 
 	var due []uuid.UUID
 	for range 5 {
-		due = append(due, e.request(pr, 1000, ago(time.Minute)))
+		due = append(due, e.charge(pid, 1000, ago(time.Minute)).ID)
 	}
-	future := e.request(pr, 1000, nil)
-	e.setExpiry(future, time.Now().Add(time.Hour))
-	noExpiry := e.request(pr, 1000, nil)
+	future := e.charge(pid, 1000, time.Now().Add(time.Hour)).ID
 
-	// Paid and partially paid, then made "due": they must not expire.
-	partial := e.request(pr, 1000, nil)
-	if err := e.pay(pr, 400, &partial); err != nil {
+	// Succeeded, cancelled and in review, all past expiry: they must not expire.
+	paid := e.charge(pid, 1000, ago(time.Minute))
+	seed.PayCharge(t, e.ctx, e.db.App, paid)
+	cancelled := e.charge(pid, 1000, ago(time.Minute))
+	if _, err := q.CancelCharge(e.ctx, store.CancelChargeParams{AppID: pid, ID: cancelled.ID}); err != nil {
 		t.Fatal(err)
 	}
-	e.setExpiry(partial, *ago(time.Minute))
-	paid := e.request(pr, 1000, nil)
-	if err := e.pay(pr, 1000, &paid); err != nil {
+	review := e.charge(pid, 1000, ago(time.Minute))
+	if _, err := q.MarkChargeNeedsReview(e.ctx, review.ID); err != nil {
 		t.Fatal(err)
 	}
-	e.setExpiry(paid, *ago(time.Minute))
-	cancelled := e.request(pr, 1000, nil)
-	if _, err := e.requests.Cancel(e.ctx, operator, pid, cancelled); err != nil {
-		t.Fatal(err)
-	}
-	e.setExpiry(cancelled, *ago(time.Minute))
 
 	// Batch size 2 so the sweep loops (2 + 2 + 1).
 	w := jobs.NewExpiryWorker(e.deps(2))
@@ -239,43 +161,42 @@ func TestExpirySweepOnlyExpiresDueOpenRequests(t *testing.T) {
 		t.Fatalf("expired %d, want %d", n, len(due))
 	}
 	for _, id := range due {
-		if st, _ := e.state(id); st != store.PaymentRequestStatusExpired {
-			t.Fatalf("due request %s is %s", id, st)
+		if st := e.state(id); st != store.ChargeStatusExpired {
+			t.Fatalf("due charge %s is %s", id, st)
 		}
-		if c := e.eventCount(id, events.PaymentRequestExpired); c != 1 {
-			t.Fatalf("request %s has %d expired events", id, c)
+		if c := e.eventCount(id, events.ChargeExpired); c != 1 {
+			t.Fatalf("charge %s has %d expired events", id, c)
 		}
 	}
-	for id, want := range map[uuid.UUID]store.PaymentRequestStatus{
-		future: store.PaymentRequestStatusOpen, noExpiry: store.PaymentRequestStatusOpen,
-		partial: store.PaymentRequestStatusPartiallyPaid, paid: store.PaymentRequestStatusPaid,
-		cancelled: store.PaymentRequestStatusCancelled,
+	for id, want := range map[uuid.UUID]store.ChargeStatus{
+		future: store.ChargeStatusPending, paid.ID: store.ChargeStatusSucceeded,
+		cancelled.ID: store.ChargeStatusCancelled, review.ID: store.ChargeStatusNeedsReview,
 	} {
-		if st, _ := e.state(id); st != want {
-			t.Fatalf("request %s is %s, want %s", id, st, want)
+		if st := e.state(id); st != want {
+			t.Fatalf("charge %s is %s, want %s", id, st, want)
 		}
-		if c := e.eventCount(id, events.PaymentRequestExpired); c != 0 {
-			t.Fatalf("request %s (%s) got an expired event", id, want)
+		if c := e.eventCount(id, events.ChargeExpired); c != 0 {
+			t.Fatalf("charge %s (%s) got an expired event", id, want)
 		}
 	}
 
-	// The event carries the request's new state and has a webhook delivery.
-	var status string
+	// The event carries the charge's new state and has a webhook delivery.
+	var status, object string
 	var deliveries int
 	if err := e.db.App.QueryRow(e.ctx, `
-SELECT e.data->>'status', (SELECT count(*) FROM webhook_deliveries d WHERE d.event_id = e.id)
-  FROM events e WHERE e.subject_id = $1 AND e.type = $2`, due[0], events.PaymentRequestExpired).Scan(&status, &deliveries); err != nil {
+SELECT e.data->>'status', e.data->>'object', (SELECT count(*) FROM webhook_deliveries d WHERE d.event_id = e.id)
+  FROM events e WHERE e.subject_id = $1 AND e.type = $2`, due[0], events.ChargeExpired).Scan(&status, &object, &deliveries); err != nil {
 		t.Fatal(err)
 	}
-	if status != "expired" || deliveries != 1 {
-		t.Fatalf("expired event: status=%q deliveries=%d", status, deliveries)
+	if status != "expired" || object != "charge" || deliveries != 1 {
+		t.Fatalf("expired event: status=%q object=%q deliveries=%d", status, object, deliveries)
 	}
 
-	// Audit: one row per product per batch, counts adding up, system actor.
+	// Audit: one row per app per batch, counts adding up, system actor.
 	var rows, total int
 	if err := e.db.App.QueryRow(e.ctx, `
 SELECT count(*), coalesce(sum((details->>'count')::int), 0) FROM audit_log
- WHERE action = 'payment_requests.expired' AND actor_type = 'system' AND actor_id = 'expiry-job' AND product_id = $1`, pid).Scan(&rows, &total); err != nil {
+ WHERE action = 'charges.expired' AND actor_type = 'system' AND actor_id = 'expiry-job' AND app_id = $1`, pid).Scan(&rows, &total); err != nil {
 		t.Fatal(err)
 	}
 	if rows != 3 || total != len(due) {
@@ -288,8 +209,8 @@ SELECT count(*), coalesce(sum((details->>'count')::int), 0) FROM audit_log
 		t.Fatalf("second sweep: n=%d err=%v", n, err)
 	}
 	for _, id := range due {
-		if c := e.eventCount(id, events.PaymentRequestExpired); c != 1 {
-			t.Fatalf("request %s has %d expired events after rerun", id, c)
+		if c := e.eventCount(id, events.ChargeExpired); c != 1 {
+			t.Fatalf("charge %s has %d expired events after rerun", id, c)
 		}
 	}
 	e.assertIntegrity()
@@ -299,10 +220,9 @@ func TestExpiryConcurrentSweepsNeverDoubleExpire(t *testing.T) {
 	e := newEnv(t)
 	var ids []uuid.UUID
 	for _, prefix := range []string{"EXPB", "EXPC"} {
-		pid := e.product(prefix)
-		pr := e.payer(pid)
+		pid := e.app(prefix)
 		for range 30 {
-			ids = append(ids, e.request(pr, 500, ago(time.Minute)))
+			ids = append(ids, e.charge(pid, 500, ago(time.Minute)).ID)
 		}
 	}
 
@@ -334,36 +254,34 @@ func TestExpiryConcurrentSweepsNeverDoubleExpire(t *testing.T) {
 		t.Fatalf("sweepers expired %d in total, want %d", total.Load(), len(ids))
 	}
 	for _, id := range ids {
-		if st, _ := e.state(id); st != store.PaymentRequestStatusExpired {
-			t.Fatalf("request %s is %s", id, st)
+		if st := e.state(id); st != store.ChargeStatusExpired {
+			t.Fatalf("charge %s is %s", id, st)
 		}
-		if c := e.eventCount(id, events.PaymentRequestExpired); c != 1 {
-			t.Fatalf("request %s has %d expired events", id, c)
+		if c := e.eventCount(id, events.ChargeExpired); c != 1 {
+			t.Fatalf("charge %s has %d expired events", id, c)
 		}
 	}
 	e.assertIntegrity()
 }
 
-func TestExpiryRacingPaymentNeverBothPaidAndExpired(t *testing.T) {
+// Late money is never dropped (rule 6): whichever of the payment and the
+// sweep commits first, the charge ends succeeded, and expires at most once.
+func TestExpiryRacingPaymentAlwaysEndsSucceeded(t *testing.T) {
 	e := newEnv(t)
-	pid := e.product("EXPD")
+	pid := e.app("EXPD")
 	w := jobs.NewExpiryWorker(e.deps(jobs.DefaultBatchSize))
 
-	outcomes := map[store.PaymentRequestStatus]int{}
+	expiredFirst := 0
 	for i := range 20 {
-		pr := e.payer(pid)
-		id := e.request(pr, 1000, ago(time.Second))
-
+		c := e.charge(pid, 1000, ago(time.Second))
 		var wg sync.WaitGroup
 		start := make(chan struct{})
-		var payErr, sweepErr error
+		var sweepErr error
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
 			<-start
-			// Unaddressed C2B: allocation picks the oldest payable request, or
-			// credits the payer if the request already expired.
-			payErr = e.pay(pr, 1000, nil)
+			seed.PayCharge(t, e.ctx, e.db.App, c)
 		}()
 		go func() {
 			defer wg.Done()
@@ -374,41 +292,32 @@ func TestExpiryRacingPaymentNeverBothPaidAndExpired(t *testing.T) {
 		}()
 		close(start)
 		wg.Wait()
-		if payErr != nil || sweepErr != nil {
-			t.Fatalf("round %d: pay=%v sweep=%v", i, payErr, sweepErr)
+		if sweepErr != nil {
+			t.Fatalf("round %d: sweep=%v", i, sweepErr)
 		}
-
-		st, amountPaid := e.state(id)
-		p, err := e.payers.Get(e.ctx, pid, pr.ID)
-		if err != nil {
-			t.Fatal(err)
+		if st := e.state(c.ID); st != store.ChargeStatusSucceeded {
+			t.Fatalf("round %d: charge ended %s", i, st)
 		}
-		expired, paidEv := e.eventCount(id, events.PaymentRequestExpired), e.eventCount(id, events.PaymentRequestPaid)
-		switch st {
-		case store.PaymentRequestStatusPaid:
-			if amountPaid != 1000 || p.CreditBalance != 0 || expired != 0 || paidEv != 1 {
-				t.Fatalf("round %d paid: amount_paid=%d credit=%d expired_events=%d paid_events=%d", i, amountPaid, p.CreditBalance, expired, paidEv)
-			}
-		case store.PaymentRequestStatusExpired:
-			if amountPaid != 0 || p.CreditBalance != 1000 || expired != 1 || paidEv != 0 {
-				t.Fatalf("round %d expired: amount_paid=%d credit=%d expired_events=%d paid_events=%d", i, amountPaid, p.CreditBalance, expired, paidEv)
-			}
-		default:
-			t.Fatalf("round %d: request ended %s", i, st)
+		n := e.eventCount(c.ID, events.ChargeExpired)
+		if n > 1 {
+			t.Fatalf("round %d: %d expired events", i, n)
 		}
-		outcomes[st]++
+		expiredFirst += n
 	}
-	t.Logf("race outcomes: %v", outcomes)
+	t.Logf("expired before the payment in %d of 20 rounds", expiredFirst)
 	e.assertIntegrity()
 }
 
 func TestRetentionDeletesOnlyOldAttempts(t *testing.T) {
 	e := newEnv(t)
-	pid := e.product("RETA")
-	pr := e.payer(pid)
-	reqID := e.request(pr, 1000, nil)
+	pid := e.app("RETA")
+	c := e.charge(pid, 1000, time.Time{})
 	var eventID uuid.UUID
-	if err := e.db.App.QueryRow(e.ctx, `SELECT id FROM events WHERE subject_id = $1 LIMIT 1`, reqID).Scan(&eventID); err != nil {
+	if err := db.WithTx(e.ctx, e.db.App, "system:test", func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
+		var err error
+		eventID, err = e.events.Emit(ctx, q, pid, events.ChargeCancelled, events.SubjectCharge, c.ID, map[string]any{"id": c.ID})
+		return err
+	}); err != nil {
 		t.Fatal(err)
 	}
 	ages := []time.Duration{
@@ -541,7 +450,7 @@ func startRunner(t *testing.T, e *env, hook *fakeWebhook, shutdown time.Duration
 
 func insertWebhookJob(t *testing.T, e *env, client *queue.Client, hook *fakeWebhook) int64 {
 	t.Helper()
-	res, err := client.Insert(e.ctx, queue.WebhookArgs{EventID: uuid.New(), ProductID: uuid.New()}, nil)
+	res, err := client.Insert(e.ctx, queue.WebhookArgs{EventID: uuid.New(), AppID: uuid.New()}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

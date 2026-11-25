@@ -14,7 +14,7 @@ import (
 
 const collectionsByDay = `-- name: CollectionsByDay :many
 SELECT ((t.completed_at AT TIME ZONE 'Africa/Nairobi')::date)::text AS day,
-       coalesce(t.product_id, '00000000-0000-0000-0000-000000000000'::uuid)::uuid AS product_id,
+       coalesce(t.app_id, '00000000-0000-0000-0000-000000000000'::uuid)::uuid AS app_id,
        sum(t.amount)::bigint AS total, count(*)::bigint AS payments
   FROM transactions t
  WHERE t.direction = 'in' AND t.kind = 'payment' AND t.status = 'succeeded'
@@ -24,15 +24,15 @@ SELECT ((t.completed_at AT TIME ZONE 'Africa/Nairobi')::date)::text AS day,
 `
 
 type CollectionsByDayRow struct {
-	Day       string
-	ProductID uuid.UUID
-	Total     int64
-	Payments  int64
+	Day      string
+	AppID    uuid.UUID
+	Total    int64
+	Payments int64
 }
 
-// Successful incoming payments per Nairobi calendar day and product.
-// Unrouted (suspense) money is still collected revenue: it is reported under
-// the nil UUID ("unassigned") rather than dropped.
+// Successful incoming payments per Nairobi calendar day and app.
+// Unmatched money is still collected revenue: it is reported under the nil
+// UUID ("unassigned") rather than dropped.
 func (q *Queries) CollectionsByDay(ctx context.Context, since time.Time) ([]CollectionsByDayRow, error) {
 	rows, err := q.db.Query(ctx, collectionsByDay, since)
 	if err != nil {
@@ -44,7 +44,7 @@ func (q *Queries) CollectionsByDay(ctx context.Context, since time.Time) ([]Coll
 		var i CollectionsByDayRow
 		if err := rows.Scan(
 			&i.Day,
-			&i.ProductID,
+			&i.AppID,
 			&i.Total,
 			&i.Payments,
 		); err != nil {
@@ -60,15 +60,19 @@ func (q *Queries) CollectionsByDay(ctx context.Context, since time.Time) ([]Coll
 
 const dashboardCounts = `-- name: DashboardCounts :one
 SELECT
-  (SELECT count(*) FROM payment_requests WHERE status IN ('open', 'partially_paid'))::bigint AS open_requests,
-  (SELECT coalesce(sum(amount - amount_paid), 0) FROM payment_requests WHERE status IN ('open', 'partially_paid'))::bigint AS outstanding,
-  (SELECT count(*) FROM transactions WHERE payer_account_id IS NULL AND direction = 'in' AND status = 'succeeded')::bigint AS suspense_count,
-  (SELECT coalesce(sum(amount), 0) FROM transactions WHERE payer_account_id IS NULL AND direction = 'in' AND status = 'succeeded')::bigint AS suspense_amount,
-  (SELECT count(*) FROM transactions WHERE status = 'needs_review')::bigint AS needs_review,
-  (SELECT count(*) FROM transactions WHERE status = 'pending')::bigint AS pending,
-  (SELECT coalesce(sum(credit_balance), 0) FROM payer_accounts)::bigint AS credit_held,
-  (SELECT count(*) FROM payer_accounts)::bigint AS payers,
-  (SELECT count(*) FROM payment_requests WHERE duplicate_reference AND status IN ('open', 'partially_paid'))::bigint AS duplicate_references,
+  (SELECT count(*) FROM charges WHERE status = 'pending')::bigint AS charges_pending,
+  -- "Today" is the Nairobi calendar day.
+  (SELECT count(*) FROM charges
+    WHERE status = 'succeeded'
+      AND succeeded_at >= (date_trunc('day', now() AT TIME ZONE 'Africa/Nairobi') AT TIME ZONE 'Africa/Nairobi'))::bigint AS charges_succeeded_today,
+  (SELECT coalesce(sum(amount), 0) FROM charges
+    WHERE status = 'succeeded'
+      AND succeeded_at >= (date_trunc('day', now() AT TIME ZONE 'Africa/Nairobi') AT TIME ZONE 'Africa/Nairobi'))::bigint AS charges_succeeded_today_amount,
+  (SELECT count(*) FROM charges WHERE status = 'needs_review')::bigint AS charges_needs_review,
+  (SELECT count(*) FROM transactions WHERE status = 'needs_review')::bigint AS transactions_needs_review,
+  (SELECT count(*) FROM transactions WHERE app_id IS NULL AND direction = 'in' AND status = 'succeeded')::bigint AS unmatched_count,
+  (SELECT coalesce(sum(amount), 0) FROM transactions WHERE app_id IS NULL AND direction = 'in' AND status = 'succeeded')::bigint AS unmatched_amount,
+  (SELECT count(*) FROM transactions WHERE status = 'pending')::bigint AS pending_transactions,
   -- STK pushes a status check said succeeded but no receipt arrived: their
   -- transactions wait in needs_review for staff to enter the receipt.
   (SELECT count(*) FROM stk_pushes WHERE status = 'unknown')::bigint AS unknown_stk_pushes,
@@ -76,222 +80,131 @@ SELECT
   -- (the worker is down or keeps failing), or processed with an error in
   -- the last 7 days that recorded no money (malformed body, foreign
   -- shortcode, ...). Notes on callbacks that did record money (duplicate,
-  -- held in suspense) are not failures.
+  -- held unmatched) are not failures.
   (SELECT count(*) FROM mpesa_callbacks
     WHERE (processed_at IS NULL AND received_at < now() - interval '5 minutes')
        OR (error IS NOT NULL AND transaction_id IS NULL AND received_at > now() - interval '7 days'))::bigint AS unprocessed_callbacks,
-  -- Money received in the last 30 days for a product that is not active or
-  -- a payer account that is closed. It was still applied to their bills
-  -- (money rule), but staff should follow up.
+  -- Money received in the last 30 days for an app that is not active. It
+  -- was still recorded and forwarded (money rule 8), but staff should
+  -- follow up.
   (SELECT count(*) FROM transactions t
-     LEFT JOIN products p ON p.id = t.product_id
-     LEFT JOIN payer_accounts pa ON pa.id = t.payer_account_id
+     JOIN apps a ON a.id = t.app_id
     WHERE t.direction = 'in' AND t.status = 'succeeded'
       AND coalesce(t.completed_at, t.created_at) > now() - interval '30 days'
-      AND (p.status <> 'active' OR pa.status <> 'active'))::bigint AS inactive_product_payments
+      AND a.status <> 'active')::bigint AS inactive_app_payments
 `
 
 type DashboardCountsRow struct {
-	OpenRequests            int64
-	Outstanding             int64
-	SuspenseCount           int64
-	SuspenseAmount          int64
-	NeedsReview             int64
-	Pending                 int64
-	CreditHeld              int64
-	Payers                  int64
-	DuplicateReferences     int64
-	UnknownStkPushes        int64
-	UnprocessedCallbacks    int64
-	InactiveProductPayments int64
+	ChargesPending              int64
+	ChargesSucceededToday       int64
+	ChargesSucceededTodayAmount int64
+	ChargesNeedsReview          int64
+	TransactionsNeedsReview     int64
+	UnmatchedCount              int64
+	UnmatchedAmount             int64
+	PendingTransactions         int64
+	UnknownStkPushes            int64
+	UnprocessedCallbacks        int64
+	InactiveAppPayments         int64
 }
 
 func (q *Queries) DashboardCounts(ctx context.Context) (DashboardCountsRow, error) {
 	row := q.db.QueryRow(ctx, dashboardCounts)
 	var i DashboardCountsRow
 	err := row.Scan(
-		&i.OpenRequests,
-		&i.Outstanding,
-		&i.SuspenseCount,
-		&i.SuspenseAmount,
-		&i.NeedsReview,
-		&i.Pending,
-		&i.CreditHeld,
-		&i.Payers,
-		&i.DuplicateReferences,
+		&i.ChargesPending,
+		&i.ChargesSucceededToday,
+		&i.ChargesSucceededTodayAmount,
+		&i.ChargesNeedsReview,
+		&i.TransactionsNeedsReview,
+		&i.UnmatchedCount,
+		&i.UnmatchedAmount,
+		&i.PendingTransactions,
 		&i.UnknownStkPushes,
 		&i.UnprocessedCallbacks,
-		&i.InactiveProductPayments,
+		&i.InactiveAppPayments,
 	)
 	return i, err
 }
 
-const getPayerAdmin = `-- name: GetPayerAdmin :one
-SELECT pa.id, pa.product_id, pa.external_ref, pa.account_number, pa.account_number_norm, pa.display_name, pa.email, pa.status, pa.credit_balance, pa.created_at, pa.updated_at, p.account_prefix, p.name AS product_name
-  FROM payer_accounts pa
-  JOIN products p ON p.id = pa.product_id
- WHERE pa.id = $1
+const getChargeAdmin = `-- name: GetChargeAdmin :one
+SELECT c.id, c.app_id, c.reference, c.description, c.currency, c.amount, c.metadata, c.account_number, c.account_number_norm, c.account_generated, c.phone, c.status, c.hosted_token, c.idempotency_key, c.request_hash, c.expires_at, c.transaction_id, c.succeeded_at, c.closed_at, c.created_at, c.updated_at, a.account_prefix, a.name AS app_name, a.status AS app_status
+  FROM charges c
+  JOIN apps a ON a.id = c.app_id
+ WHERE c.id = $1
 `
 
-type GetPayerAdminRow struct {
+type GetChargeAdminRow struct {
 	ID                uuid.UUID
-	ProductID         uuid.UUID
-	ExternalRef       string
+	AppID             uuid.UUID
+	Reference         string
+	Description       *string
+	Currency          string
+	Amount            int64
+	Metadata          []byte
 	AccountNumber     string
 	AccountNumberNorm string
-	DisplayName       string
-	Email             *string
-	Status            PayerStatus
-	CreditBalance     int64
+	AccountGenerated  bool
+	Phone             *string
+	Status            ChargeStatus
+	HostedToken       string
+	IdempotencyKey    string
+	RequestHash       []byte
+	ExpiresAt         time.Time
+	TransactionID     *uuid.UUID
+	SucceededAt       *time.Time
+	ClosedAt          *time.Time
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 	AccountPrefix     string
-	ProductName       string
+	AppName           string
+	AppStatus         AppStatus
 }
 
-func (q *Queries) GetPayerAdmin(ctx context.Context, id uuid.UUID) (GetPayerAdminRow, error) {
-	row := q.db.QueryRow(ctx, getPayerAdmin, id)
-	var i GetPayerAdminRow
+func (q *Queries) GetChargeAdmin(ctx context.Context, id uuid.UUID) (GetChargeAdminRow, error) {
+	row := q.db.QueryRow(ctx, getChargeAdmin, id)
+	var i GetChargeAdminRow
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
-		&i.ExternalRef,
-		&i.AccountNumber,
-		&i.AccountNumberNorm,
-		&i.DisplayName,
-		&i.Email,
-		&i.Status,
-		&i.CreditBalance,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.AccountPrefix,
-		&i.ProductName,
-	)
-	return i, err
-}
-
-const getPaymentRequestAdmin = `-- name: GetPaymentRequestAdmin :one
-SELECT pr.id, pr.product_id, pr.payer_account_id, pr.product_reference, pr.description, pr.currency, pr.amount, pr.amount_paid, pr.status, pr.expires_at, pr.hosted_token, pr.idempotency_key, pr.created_at, pr.updated_at, pr.paid_at, pr.closed_at, pr.duplicate_reference, p.account_prefix, p.name AS product_name, pa.account_number, pa.display_name
-  FROM payment_requests pr
-  JOIN payer_accounts pa ON pa.id = pr.payer_account_id
-  JOIN products p ON p.id = pr.product_id
- WHERE pr.id = $1
-`
-
-type GetPaymentRequestAdminRow struct {
-	ID                 uuid.UUID
-	ProductID          uuid.UUID
-	PayerAccountID     uuid.UUID
-	ProductReference   string
-	Description        string
-	Currency           string
-	Amount             int64
-	AmountPaid         int64
-	Status             PaymentRequestStatus
-	ExpiresAt          *time.Time
-	HostedToken        string
-	IdempotencyKey     string
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	PaidAt             *time.Time
-	ClosedAt           *time.Time
-	DuplicateReference bool
-	AccountPrefix      string
-	ProductName        string
-	AccountNumber      string
-	DisplayName        string
-}
-
-func (q *Queries) GetPaymentRequestAdmin(ctx context.Context, id uuid.UUID) (GetPaymentRequestAdminRow, error) {
-	row := q.db.QueryRow(ctx, getPaymentRequestAdmin, id)
-	var i GetPaymentRequestAdminRow
-	err := row.Scan(
-		&i.ID,
-		&i.ProductID,
-		&i.PayerAccountID,
-		&i.ProductReference,
+		&i.AppID,
+		&i.Reference,
 		&i.Description,
 		&i.Currency,
 		&i.Amount,
-		&i.AmountPaid,
+		&i.Metadata,
+		&i.AccountNumber,
+		&i.AccountNumberNorm,
+		&i.AccountGenerated,
+		&i.Phone,
 		&i.Status,
-		&i.ExpiresAt,
 		&i.HostedToken,
 		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.ExpiresAt,
+		&i.TransactionID,
+		&i.SucceededAt,
+		&i.ClosedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.PaidAt,
-		&i.ClosedAt,
-		&i.DuplicateReference,
 		&i.AccountPrefix,
-		&i.ProductName,
-		&i.AccountNumber,
-		&i.DisplayName,
-	)
-	return i, err
-}
-
-const getPaymentRequestByHostedToken = `-- name: GetPaymentRequestByHostedToken :one
-SELECT pr.id, pr.product_id, p.name AS product_name, p.account_prefix, p.status AS product_status,
-       pa.account_number, pr.product_reference, pr.description, pr.amount, pr.amount_paid, pr.status,
-       pr.expires_at, pr.created_at, pr.paid_at
-  FROM payment_requests pr
-  JOIN products p ON p.id = pr.product_id
-  JOIN payer_accounts pa ON pa.id = pr.payer_account_id
- WHERE pr.hosted_token = $1
-`
-
-type GetPaymentRequestByHostedTokenRow struct {
-	ID               uuid.UUID
-	ProductID        uuid.UUID
-	ProductName      string
-	AccountPrefix    string
-	ProductStatus    ProductStatus
-	AccountNumber    string
-	ProductReference string
-	Description      string
-	Amount           int64
-	AmountPaid       int64
-	Status           PaymentRequestStatus
-	ExpiresAt        *time.Time
-	CreatedAt        time.Time
-	PaidAt           *time.Time
-}
-
-func (q *Queries) GetPaymentRequestByHostedToken(ctx context.Context, hostedToken string) (GetPaymentRequestByHostedTokenRow, error) {
-	row := q.db.QueryRow(ctx, getPaymentRequestByHostedToken, hostedToken)
-	var i GetPaymentRequestByHostedTokenRow
-	err := row.Scan(
-		&i.ID,
-		&i.ProductID,
-		&i.ProductName,
-		&i.AccountPrefix,
-		&i.ProductStatus,
-		&i.AccountNumber,
-		&i.ProductReference,
-		&i.Description,
-		&i.Amount,
-		&i.AmountPaid,
-		&i.Status,
-		&i.ExpiresAt,
-		&i.CreatedAt,
-		&i.PaidAt,
+		&i.AppName,
+		&i.AppStatus,
 	)
 	return i, err
 }
 
 const getTransactionAdmin = `-- name: GetTransactionAdmin :one
-SELECT t.id, t.product_id, t.direction, t.kind, t.channel, t.provider, t.status, t.amount, t.currency, t.provider_transaction_id, t.provider_request_id, t.phone, t.bill_ref, t.payer_account_id, t.payment_request_id, t.reverses_transaction_id, t.failure_code, t.failure_reason, t.reason, t.created_by, t.raw_payload, t.occurred_at, t.created_at, t.updated_at, t.completed_at, p.account_prefix, pa.account_number, pa.display_name AS payer_name, pr.product_reference
+SELECT t.id, t.app_id, t.charge_id, t.direction, t.kind, t.channel, t.provider, t.status, t.amount, t.currency, t.provider_transaction_id, t.provider_request_id, t.phone, t.account_number, t.reverses_transaction_id, t.failure_code, t.failure_reason, t.reason, t.created_by, t.raw_payload, t.occurred_at, t.created_at, t.updated_at, t.completed_at, a.account_prefix, a.name AS app_name, c.reference AS charge_reference
   FROM transactions t
-  LEFT JOIN products p ON p.id = t.product_id
-  LEFT JOIN payer_accounts pa ON pa.id = t.payer_account_id
-  LEFT JOIN payment_requests pr ON pr.id = t.payment_request_id
+  LEFT JOIN apps a ON a.id = t.app_id
+  LEFT JOIN charges c ON c.id = t.charge_id
  WHERE t.id = $1
 `
 
 type GetTransactionAdminRow struct {
 	ID                    uuid.UUID
-	ProductID             *uuid.UUID
+	AppID                 *uuid.UUID
+	ChargeID              *uuid.UUID
 	Direction             TxnDirection
 	Kind                  TxnKind
 	Channel               TxnChannel
@@ -302,9 +215,7 @@ type GetTransactionAdminRow struct {
 	ProviderTransactionID *string
 	ProviderRequestID     *string
 	Phone                 *string
-	BillRef               *string
-	PayerAccountID        *uuid.UUID
-	PaymentRequestID      *uuid.UUID
+	AccountNumber         *string
 	ReversesTransactionID *uuid.UUID
 	FailureCode           *string
 	FailureReason         *string
@@ -316,9 +227,8 @@ type GetTransactionAdminRow struct {
 	UpdatedAt             time.Time
 	CompletedAt           *time.Time
 	AccountPrefix         *string
-	AccountNumber         *string
-	PayerName             *string
-	ProductReference      *string
+	AppName               *string
+	ChargeReference       *string
 }
 
 func (q *Queries) GetTransactionAdmin(ctx context.Context, id uuid.UUID) (GetTransactionAdminRow, error) {
@@ -326,7 +236,8 @@ func (q *Queries) GetTransactionAdmin(ctx context.Context, id uuid.UUID) (GetTra
 	var i GetTransactionAdminRow
 	err := row.Scan(
 		&i.ID,
-		&i.ProductID,
+		&i.AppID,
+		&i.ChargeID,
 		&i.Direction,
 		&i.Kind,
 		&i.Channel,
@@ -337,9 +248,7 @@ func (q *Queries) GetTransactionAdmin(ctx context.Context, id uuid.UUID) (GetTra
 		&i.ProviderTransactionID,
 		&i.ProviderRequestID,
 		&i.Phone,
-		&i.BillRef,
-		&i.PayerAccountID,
-		&i.PaymentRequestID,
+		&i.AccountNumber,
 		&i.ReversesTransactionID,
 		&i.FailureCode,
 		&i.FailureReason,
@@ -351,118 +260,18 @@ func (q *Queries) GetTransactionAdmin(ctx context.Context, id uuid.UUID) (GetTra
 		&i.UpdatedAt,
 		&i.CompletedAt,
 		&i.AccountPrefix,
-		&i.AccountNumber,
-		&i.PayerName,
-		&i.ProductReference,
+		&i.AppName,
+		&i.ChargeReference,
 	)
 	return i, err
 }
 
-const listAllocationsForRequestAdmin = `-- name: ListAllocationsForRequestAdmin :many
-SELECT a.id, a.batch_id, b.kind AS batch_kind, b.transaction_id, t.provider_transaction_id, a.amount, a.created_at
-  FROM allocations a
-  JOIN allocation_batches b ON b.id = a.batch_id
-  LEFT JOIN transactions t ON t.id = b.transaction_id
- WHERE a.payment_request_id = $1
- ORDER BY a.id
-`
-
-type ListAllocationsForRequestAdminRow struct {
-	ID                    int64
-	BatchID               uuid.UUID
-	BatchKind             AllocationBatchKind
-	TransactionID         *uuid.UUID
-	ProviderTransactionID *string
-	Amount                int64
-	CreatedAt             time.Time
-}
-
-func (q *Queries) ListAllocationsForRequestAdmin(ctx context.Context, paymentRequestID *uuid.UUID) ([]ListAllocationsForRequestAdminRow, error) {
-	rows, err := q.db.Query(ctx, listAllocationsForRequestAdmin, paymentRequestID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListAllocationsForRequestAdminRow
-	for rows.Next() {
-		var i ListAllocationsForRequestAdminRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.BatchID,
-			&i.BatchKind,
-			&i.TransactionID,
-			&i.ProviderTransactionID,
-			&i.Amount,
-			&i.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listAllocationsForTransactionAdmin = `-- name: ListAllocationsForTransactionAdmin :many
-SELECT a.id, a.batch_id, b.kind AS batch_kind, a.line_no, a.payment_request_id, pr.product_reference,
-       a.amount, a.created_at
-  FROM allocation_batches b
-  JOIN allocations a ON a.batch_id = b.id
-  LEFT JOIN payment_requests pr ON pr.id = a.payment_request_id
- WHERE b.transaction_id = $1
- ORDER BY a.created_at, a.batch_id, a.line_no
-`
-
-type ListAllocationsForTransactionAdminRow struct {
-	ID               int64
-	BatchID          uuid.UUID
-	BatchKind        AllocationBatchKind
-	LineNo           int32
-	PaymentRequestID *uuid.UUID
-	ProductReference *string
-	Amount           int64
-	CreatedAt        time.Time
-}
-
-// Every allocation line that came from this transaction (its payment batch
-// and, if reversed, the reversal batch).
-func (q *Queries) ListAllocationsForTransactionAdmin(ctx context.Context, transactionID *uuid.UUID) ([]ListAllocationsForTransactionAdminRow, error) {
-	rows, err := q.db.Query(ctx, listAllocationsForTransactionAdmin, transactionID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListAllocationsForTransactionAdminRow
-	for rows.Next() {
-		var i ListAllocationsForTransactionAdminRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.BatchID,
-			&i.BatchKind,
-			&i.LineNo,
-			&i.PaymentRequestID,
-			&i.ProductReference,
-			&i.Amount,
-			&i.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listAuditAdmin = `-- name: ListAuditAdmin :many
-SELECT a.id, a.occurred_at, a.actor_type, a.actor_id, a.action, a.entity_type, a.entity_id, a.product_id,
-       p.account_prefix, a.details
+SELECT a.id, a.occurred_at, a.actor_type, a.actor_id, a.action, a.entity_type, a.entity_id, a.app_id,
+       ap.account_prefix, a.details
   FROM audit_log a
-  LEFT JOIN products p ON p.id = a.product_id
- WHERE ($1::uuid IS NULL OR a.product_id = $1)
+  LEFT JOIN apps ap ON ap.id = a.app_id
+ WHERE ($1::uuid IS NULL OR a.app_id = $1)
    AND ($2::text IS NULL OR a.action LIKE $2)
    AND ($3::text IS NULL OR a.actor_id = $3)
    AND ($4::text IS NULL OR a.entity_id = $4)
@@ -473,7 +282,7 @@ SELECT a.id, a.occurred_at, a.actor_type, a.actor_id, a.action, a.entity_type, a
 `
 
 type ListAuditAdminParams struct {
-	ProductID    *uuid.UUID
+	AppID        *uuid.UUID
 	ActionPrefix *string
 	ActorID      *string
 	EntityID     *string
@@ -490,14 +299,14 @@ type ListAuditAdminRow struct {
 	Action        string
 	EntityType    string
 	EntityID      *string
-	ProductID     *uuid.UUID
+	AppID         *uuid.UUID
 	AccountPrefix *string
 	Details       []byte
 }
 
 func (q *Queries) ListAuditAdmin(ctx context.Context, arg ListAuditAdminParams) ([]ListAuditAdminRow, error) {
 	rows, err := q.db.Query(ctx, listAuditAdmin,
-		arg.ProductID,
+		arg.AppID,
 		arg.ActionPrefix,
 		arg.ActorID,
 		arg.EntityID,
@@ -520,7 +329,7 @@ func (q *Queries) ListAuditAdmin(ctx context.Context, arg ListAuditAdminParams) 
 			&i.Action,
 			&i.EntityType,
 			&i.EntityID,
-			&i.ProductID,
+			&i.AppID,
 			&i.AccountPrefix,
 			&i.Details,
 		); err != nil {
@@ -534,235 +343,72 @@ func (q *Queries) ListAuditAdmin(ctx context.Context, arg ListAuditAdminParams) 
 	return items, nil
 }
 
-const listCreditMovementsAdmin = `-- name: ListCreditMovementsAdmin :many
-SELECT a.id, a.batch_id, b.kind AS batch_kind, b.transaction_id, b.payment_request_id, a.amount, a.created_at
-  FROM allocations a
-  JOIN allocation_batches b ON b.id = a.batch_id
- WHERE a.payer_account_id = $1 AND a.payment_request_id IS NULL
- ORDER BY a.id DESC
- LIMIT $2
+const listChargesAdmin = `-- name: ListChargesAdmin :many
+
+SELECT c.id, c.app_id, a.account_prefix, a.name AS app_name, c.reference, c.description, c.amount,
+       c.currency, c.account_number, c.phone, c.status, c.expires_at, c.succeeded_at, c.transaction_id,
+       c.closed_at, c.created_at
+  FROM charges c
+  JOIN apps a ON a.id = c.app_id
+ WHERE ($1::uuid IS NULL OR c.app_id = $1)
+   AND ($2::charge_status IS NULL OR c.status = $2)
+   AND ($3::text IS NULL
+        OR c.account_number_norm = $4::text
+        OR lower(c.reference) LIKE $3
+        OR lower(c.description) LIKE $3)
+   AND ($5::timestamptz IS NULL OR c.created_at >= $5)
+   AND ($6::timestamptz IS NULL OR c.created_at < $6)
+   AND ($7::timestamptz IS NULL
+        OR (c.created_at, c.id) < ($7::timestamptz, $8::uuid))
+ ORDER BY c.created_at DESC, c.id DESC
+ LIMIT $9
 `
 
-type ListCreditMovementsAdminParams struct {
-	PayerAccountID uuid.UUID
-	Lim            int32
-}
-
-type ListCreditMovementsAdminRow struct {
-	ID               int64
-	BatchID          uuid.UUID
-	BatchKind        AllocationBatchKind
-	TransactionID    *uuid.UUID
-	PaymentRequestID *uuid.UUID
-	Amount           int64
-	CreatedAt        time.Time
-}
-
-// Lines that moved money in or out of a payer's credit balance.
-func (q *Queries) ListCreditMovementsAdmin(ctx context.Context, arg ListCreditMovementsAdminParams) ([]ListCreditMovementsAdminRow, error) {
-	rows, err := q.db.Query(ctx, listCreditMovementsAdmin, arg.PayerAccountID, arg.Lim)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListCreditMovementsAdminRow
-	for rows.Next() {
-		var i ListCreditMovementsAdminRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.BatchID,
-			&i.BatchKind,
-			&i.TransactionID,
-			&i.PaymentRequestID,
-			&i.Amount,
-			&i.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listPayerPhonesAdmin = `-- name: ListPayerPhonesAdmin :many
-SELECT phone, is_primary FROM payer_phones WHERE payer_account_id = $1
- ORDER BY is_primary DESC, created_at
-`
-
-type ListPayerPhonesAdminRow struct {
-	Phone     string
-	IsPrimary bool
-}
-
-func (q *Queries) ListPayerPhonesAdmin(ctx context.Context, payerAccountID uuid.UUID) ([]ListPayerPhonesAdminRow, error) {
-	rows, err := q.db.Query(ctx, listPayerPhonesAdmin, payerAccountID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListPayerPhonesAdminRow
-	for rows.Next() {
-		var i ListPayerPhonesAdminRow
-		if err := rows.Scan(&i.Phone, &i.IsPrimary); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listPayersAdmin = `-- name: ListPayersAdmin :many
-
-SELECT pa.id, pa.product_id, p.account_prefix, pa.external_ref, pa.account_number, pa.display_name,
-       pa.email, pa.status, pa.credit_balance, pa.created_at
-  FROM payer_accounts pa
-  JOIN products p ON p.id = pa.product_id
- WHERE ($1::uuid IS NULL OR pa.product_id = $1)
-   AND ($2::text IS NULL
-        OR pa.account_number_norm = $3::text
-        OR lower(pa.display_name) LIKE $2
-        OR lower(pa.external_ref) LIKE $2
-        OR EXISTS (SELECT 1 FROM payer_phones ph WHERE ph.payer_account_id = pa.id AND ph.phone = $4::text))
-   AND ($5::timestamptz IS NULL
-        OR (pa.created_at, pa.id) < ($5::timestamptz, $6::uuid))
- ORDER BY pa.created_at DESC, pa.id DESC
- LIMIT $7
-`
-
-type ListPayersAdminParams struct {
-	ProductID   *uuid.UUID
+type ListChargesAdminParams struct {
+	AppID       *uuid.UUID
+	Status      NullChargeStatus
 	Pattern     *string
 	AccountNorm *string
-	Phone       *string
+	CreatedFrom *time.Time
+	CreatedTo   *time.Time
 	CursorAt    *time.Time
 	CursorID    *uuid.UUID
 	Lim         int32
 }
 
-type ListPayersAdminRow struct {
+type ListChargesAdminRow struct {
 	ID            uuid.UUID
-	ProductID     uuid.UUID
+	AppID         uuid.UUID
 	AccountPrefix string
-	ExternalRef   string
+	AppName       string
+	Reference     string
+	Description   *string
+	Amount        int64
+	Currency      string
 	AccountNumber string
-	DisplayName   string
-	Email         *string
-	Status        PayerStatus
-	CreditBalance int64
+	Phone         *string
+	Status        ChargeStatus
+	ExpiresAt     time.Time
+	SucceededAt   *time.Time
+	TransactionID *uuid.UUID
+	ClosedAt      *time.Time
 	CreatedAt     time.Time
 }
 
-// Read-only queries for the admin panel and the hosted pay page.
+// Read-only queries for the admin panel.
 //
 // Lists use keyset pagination on (created_at, id) DESC: pass the last row's
 // values as cursor_at / cursor_id to get the next page. Every filter is
 // optional (NULL = no filter). Search patterns arrive already lower-cased and
 // LIKE-escaped from Go (reporting.likePattern).
-func (q *Queries) ListPayersAdmin(ctx context.Context, arg ListPayersAdminParams) ([]ListPayersAdminRow, error) {
-	rows, err := q.db.Query(ctx, listPayersAdmin,
-		arg.ProductID,
-		arg.Pattern,
-		arg.AccountNorm,
-		arg.Phone,
-		arg.CursorAt,
-		arg.CursorID,
-		arg.Lim,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListPayersAdminRow
-	for rows.Next() {
-		var i ListPayersAdminRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.ProductID,
-			&i.AccountPrefix,
-			&i.ExternalRef,
-			&i.AccountNumber,
-			&i.DisplayName,
-			&i.Email,
-			&i.Status,
-			&i.CreditBalance,
-			&i.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listPaymentRequestsAdmin = `-- name: ListPaymentRequestsAdmin :many
-SELECT pr.id, pr.product_id, p.account_prefix, pr.payer_account_id, pa.account_number, pa.display_name,
-       pr.product_reference, pr.description, pr.amount, pr.amount_paid, pr.status, pr.expires_at,
-       pr.created_at, pr.paid_at, pr.closed_at, pr.duplicate_reference
-  FROM payment_requests pr
-  JOIN payer_accounts pa ON pa.id = pr.payer_account_id
-  JOIN products p ON p.id = pr.product_id
- WHERE ($1::uuid IS NULL OR pr.product_id = $1)
-   AND (NOT $2::boolean OR (pr.duplicate_reference AND pr.status IN ('open', 'partially_paid')))
-   AND ($3::uuid IS NULL OR pr.payer_account_id = $3)
-   AND ($4::payment_request_status IS NULL OR pr.status = $4)
-   AND ($5::text IS NULL
-        OR pa.account_number_norm = $6::text
-        OR lower(pr.product_reference) LIKE $5
-        OR lower(pr.description) LIKE $5)
-   AND ($7::timestamptz IS NULL
-        OR (pr.created_at, pr.id) < ($7::timestamptz, $8::uuid))
- ORDER BY pr.created_at DESC, pr.id DESC
- LIMIT $9
-`
-
-type ListPaymentRequestsAdminParams struct {
-	ProductID      *uuid.UUID
-	DuplicatesOnly bool
-	PayerID        *uuid.UUID
-	Status         NullPaymentRequestStatus
-	Pattern        *string
-	AccountNorm    *string
-	CursorAt       *time.Time
-	CursorID       *uuid.UUID
-	Lim            int32
-}
-
-type ListPaymentRequestsAdminRow struct {
-	ID                 uuid.UUID
-	ProductID          uuid.UUID
-	AccountPrefix      string
-	PayerAccountID     uuid.UUID
-	AccountNumber      string
-	DisplayName        string
-	ProductReference   string
-	Description        string
-	Amount             int64
-	AmountPaid         int64
-	Status             PaymentRequestStatus
-	ExpiresAt          *time.Time
-	CreatedAt          time.Time
-	PaidAt             *time.Time
-	ClosedAt           *time.Time
-	DuplicateReference bool
-}
-
-func (q *Queries) ListPaymentRequestsAdmin(ctx context.Context, arg ListPaymentRequestsAdminParams) ([]ListPaymentRequestsAdminRow, error) {
-	rows, err := q.db.Query(ctx, listPaymentRequestsAdmin,
-		arg.ProductID,
-		arg.DuplicatesOnly,
-		arg.PayerID,
+func (q *Queries) ListChargesAdmin(ctx context.Context, arg ListChargesAdminParams) ([]ListChargesAdminRow, error) {
+	rows, err := q.db.Query(ctx, listChargesAdmin,
+		arg.AppID,
 		arg.Status,
 		arg.Pattern,
 		arg.AccountNorm,
+		arg.CreatedFrom,
+		arg.CreatedTo,
 		arg.CursorAt,
 		arg.CursorID,
 		arg.Lim,
@@ -771,26 +417,26 @@ func (q *Queries) ListPaymentRequestsAdmin(ctx context.Context, arg ListPaymentR
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListPaymentRequestsAdminRow
+	var items []ListChargesAdminRow
 	for rows.Next() {
-		var i ListPaymentRequestsAdminRow
+		var i ListChargesAdminRow
 		if err := rows.Scan(
 			&i.ID,
-			&i.ProductID,
+			&i.AppID,
 			&i.AccountPrefix,
-			&i.PayerAccountID,
-			&i.AccountNumber,
-			&i.DisplayName,
-			&i.ProductReference,
+			&i.AppName,
+			&i.Reference,
 			&i.Description,
 			&i.Amount,
-			&i.AmountPaid,
+			&i.Currency,
+			&i.AccountNumber,
+			&i.Phone,
 			&i.Status,
 			&i.ExpiresAt,
-			&i.CreatedAt,
-			&i.PaidAt,
+			&i.SucceededAt,
+			&i.TransactionID,
 			&i.ClosedAt,
-			&i.DuplicateReference,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -834,51 +480,51 @@ func (q *Queries) ListTransactionEvents(ctx context.Context, transactionID uuid.
 }
 
 const listTransactionsAdmin = `-- name: ListTransactionsAdmin :many
-SELECT t.id, t.product_id, p.account_prefix, t.direction, t.kind, t.channel, t.status, t.amount,
-       t.provider_transaction_id, t.phone, t.bill_ref, t.payer_account_id, pa.account_number,
-       t.payment_request_id, t.failure_reason, t.created_at, t.completed_at
+SELECT t.id, t.app_id, a.account_prefix, t.charge_id, c.reference AS charge_reference, t.direction,
+       t.kind, t.channel, t.status, t.amount, t.provider_transaction_id, t.phone, t.account_number,
+       t.failure_reason, t.created_at, t.completed_at
   FROM transactions t
-  LEFT JOIN products p ON p.id = t.product_id
-  LEFT JOIN payer_accounts pa ON pa.id = t.payer_account_id
- WHERE ($1::uuid IS NULL OR t.product_id = $1)
-   AND ($2::uuid IS NULL OR t.payer_account_id = $2)
-   AND ($3::uuid IS NULL OR t.payment_request_id = $3)
-   AND ($4::txn_channel IS NULL OR t.channel = $4)
-   AND ($5::txn_status IS NULL OR t.status = $5)
-   AND ($6::txn_direction IS NULL OR t.direction = $6)
-   AND ($7::text IS NULL OR t.provider_transaction_id = $7)
-   AND ($8::text IS NULL OR t.phone = $8)
-   AND ($9::timestamptz IS NULL OR t.created_at >= $9)
-   AND ($10::timestamptz IS NULL OR t.created_at < $10)
-   AND (NOT $11::boolean
-        OR (t.payer_account_id IS NULL AND t.direction = 'in' AND t.status = 'succeeded'))
-   AND ($12::timestamptz IS NULL
-        OR (t.created_at, t.id) < ($12::timestamptz, $13::uuid))
+  LEFT JOIN apps a ON a.id = t.app_id
+  LEFT JOIN charges c ON c.id = t.charge_id
+ WHERE ($1::uuid IS NULL OR t.app_id = $1)
+   AND ($2::uuid IS NULL OR t.charge_id = $2)
+   AND ($3::txn_channel IS NULL OR t.channel = $3)
+   AND ($4::txn_status IS NULL OR t.status = $4)
+   AND ($5::txn_direction IS NULL OR t.direction = $5)
+   AND ($6::text IS NULL OR t.provider_transaction_id = $6)
+   AND ($7::text IS NULL OR t.phone = $7)
+   AND ($8::timestamptz IS NULL OR t.created_at >= $8)
+   AND ($9::timestamptz IS NULL OR t.created_at < $9)
+   AND (NOT $10::boolean
+        OR (t.app_id IS NULL AND t.direction = 'in' AND t.status = 'succeeded'))
+   AND ($11::timestamptz IS NULL
+        OR (t.created_at, t.id) < ($11::timestamptz, $12::uuid))
  ORDER BY t.created_at DESC, t.id DESC
- LIMIT $14
+ LIMIT $13
 `
 
 type ListTransactionsAdminParams struct {
-	ProductID    *uuid.UUID
-	PayerID      *uuid.UUID
-	RequestID    *uuid.UUID
-	Channel      NullTxnChannel
-	Status       NullTxnStatus
-	Direction    NullTxnDirection
-	Receipt      *string
-	Phone        *string
-	CreatedFrom  *time.Time
-	CreatedTo    *time.Time
-	SuspenseOnly bool
-	CursorAt     *time.Time
-	CursorID     *uuid.UUID
-	Lim          int32
+	AppID         *uuid.UUID
+	ChargeID      *uuid.UUID
+	Channel       NullTxnChannel
+	Status        NullTxnStatus
+	Direction     NullTxnDirection
+	Receipt       *string
+	Phone         *string
+	CreatedFrom   *time.Time
+	CreatedTo     *time.Time
+	UnmatchedOnly bool
+	CursorAt      *time.Time
+	CursorID      *uuid.UUID
+	Lim           int32
 }
 
 type ListTransactionsAdminRow struct {
 	ID                    uuid.UUID
-	ProductID             *uuid.UUID
+	AppID                 *uuid.UUID
 	AccountPrefix         *string
+	ChargeID              *uuid.UUID
+	ChargeReference       *string
 	Direction             TxnDirection
 	Kind                  TxnKind
 	Channel               TxnChannel
@@ -886,10 +532,7 @@ type ListTransactionsAdminRow struct {
 	Amount                int64
 	ProviderTransactionID *string
 	Phone                 *string
-	BillRef               *string
-	PayerAccountID        *uuid.UUID
 	AccountNumber         *string
-	PaymentRequestID      *uuid.UUID
 	FailureReason         *string
 	CreatedAt             time.Time
 	CompletedAt           *time.Time
@@ -897,9 +540,8 @@ type ListTransactionsAdminRow struct {
 
 func (q *Queries) ListTransactionsAdmin(ctx context.Context, arg ListTransactionsAdminParams) ([]ListTransactionsAdminRow, error) {
 	rows, err := q.db.Query(ctx, listTransactionsAdmin,
-		arg.ProductID,
-		arg.PayerID,
-		arg.RequestID,
+		arg.AppID,
+		arg.ChargeID,
 		arg.Channel,
 		arg.Status,
 		arg.Direction,
@@ -907,7 +549,7 @@ func (q *Queries) ListTransactionsAdmin(ctx context.Context, arg ListTransaction
 		arg.Phone,
 		arg.CreatedFrom,
 		arg.CreatedTo,
-		arg.SuspenseOnly,
+		arg.UnmatchedOnly,
 		arg.CursorAt,
 		arg.CursorID,
 		arg.Lim,
@@ -921,8 +563,10 @@ func (q *Queries) ListTransactionsAdmin(ctx context.Context, arg ListTransaction
 		var i ListTransactionsAdminRow
 		if err := rows.Scan(
 			&i.ID,
-			&i.ProductID,
+			&i.AppID,
 			&i.AccountPrefix,
+			&i.ChargeID,
+			&i.ChargeReference,
 			&i.Direction,
 			&i.Kind,
 			&i.Channel,
@@ -930,11 +574,121 @@ func (q *Queries) ListTransactionsAdmin(ctx context.Context, arg ListTransaction
 			&i.Amount,
 			&i.ProviderTransactionID,
 			&i.Phone,
-			&i.BillRef,
-			&i.PayerAccountID,
 			&i.AccountNumber,
-			&i.PaymentRequestID,
 			&i.FailureReason,
+			&i.CreatedAt,
+			&i.CompletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTransactionsForChargeAdmin = `-- name: ListTransactionsForChargeAdmin :many
+SELECT id, app_id, charge_id, direction, kind, channel, provider, status, amount, currency, provider_transaction_id, provider_request_id, phone, account_number, reverses_transaction_id, failure_code, failure_reason, reason, created_by, raw_payload, occurred_at, created_at, updated_at, completed_at FROM transactions WHERE charge_id = $1 ORDER BY created_at, id
+`
+
+// Every transaction naming this charge: the one that paid it, duplicates,
+// failed prompts and a reversal.
+func (q *Queries) ListTransactionsForChargeAdmin(ctx context.Context, chargeID *uuid.UUID) ([]Transaction, error) {
+	rows, err := q.db.Query(ctx, listTransactionsForChargeAdmin, chargeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Transaction
+	for rows.Next() {
+		var i Transaction
+		if err := rows.Scan(
+			&i.ID,
+			&i.AppID,
+			&i.ChargeID,
+			&i.Direction,
+			&i.Kind,
+			&i.Channel,
+			&i.Provider,
+			&i.Status,
+			&i.Amount,
+			&i.Currency,
+			&i.ProviderTransactionID,
+			&i.ProviderRequestID,
+			&i.Phone,
+			&i.AccountNumber,
+			&i.ReversesTransactionID,
+			&i.FailureCode,
+			&i.FailureReason,
+			&i.Reason,
+			&i.CreatedBy,
+			&i.RawPayload,
+			&i.OccurredAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CompletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnmatchedTransactionsAdmin = `-- name: ListUnmatchedTransactionsAdmin :many
+SELECT t.id, t.channel, t.status, t.amount, t.provider_transaction_id, t.phone, t.account_number,
+       t.occurred_at, t.created_at, t.completed_at
+  FROM transactions t
+ WHERE t.app_id IS NULL AND t.direction = 'in' AND t.status = 'succeeded'
+   AND ($1::timestamptz IS NULL
+        OR (t.created_at, t.id) < ($1::timestamptz, $2::uuid))
+ ORDER BY t.created_at DESC, t.id DESC
+ LIMIT $3
+`
+
+type ListUnmatchedTransactionsAdminParams struct {
+	CursorAt *time.Time
+	CursorID *uuid.UUID
+	Lim      int32
+}
+
+type ListUnmatchedTransactionsAdminRow struct {
+	ID                    uuid.UUID
+	Channel               TxnChannel
+	Status                TxnStatus
+	Amount                int64
+	ProviderTransactionID *string
+	Phone                 *string
+	AccountNumber         *string
+	OccurredAt            *time.Time
+	CreatedAt             time.Time
+	CompletedAt           *time.Time
+}
+
+// Money that could not be routed to an app (unknown account prefix).
+func (q *Queries) ListUnmatchedTransactionsAdmin(ctx context.Context, arg ListUnmatchedTransactionsAdminParams) ([]ListUnmatchedTransactionsAdminRow, error) {
+	rows, err := q.db.Query(ctx, listUnmatchedTransactionsAdmin, arg.CursorAt, arg.CursorID, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUnmatchedTransactionsAdminRow
+	for rows.Next() {
+		var i ListUnmatchedTransactionsAdminRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Channel,
+			&i.Status,
+			&i.Amount,
+			&i.ProviderTransactionID,
+			&i.Phone,
+			&i.AccountNumber,
+			&i.OccurredAt,
 			&i.CreatedAt,
 			&i.CompletedAt,
 		); err != nil {

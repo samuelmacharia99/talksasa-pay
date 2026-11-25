@@ -196,74 +196,71 @@ func AllAdminUserStatusValues() []AdminUserStatus {
 	}
 }
 
-type AllocationBatchKind string
+type AppStatus string
 
 const (
-	AllocationBatchKindPayment           AllocationBatchKind = "payment"
-	AllocationBatchKindCreditApplication AllocationBatchKind = "credit_application"
-	AllocationBatchKindReversal          AllocationBatchKind = "reversal"
+	AppStatusActive    AppStatus = "active"
+	AppStatusSuspended AppStatus = "suspended"
 )
 
-func (e *AllocationBatchKind) Scan(src interface{}) error {
+func (e *AppStatus) Scan(src interface{}) error {
 	switch s := src.(type) {
 	case []byte:
-		*e = AllocationBatchKind(s)
+		*e = AppStatus(s)
 	case string:
-		*e = AllocationBatchKind(s)
+		*e = AppStatus(s)
 	default:
-		return fmt.Errorf("unsupported scan type for AllocationBatchKind: %T", src)
+		return fmt.Errorf("unsupported scan type for AppStatus: %T", src)
 	}
 	return nil
 }
 
-type NullAllocationBatchKind struct {
-	AllocationBatchKind AllocationBatchKind
-	Valid               bool // Valid is true if AllocationBatchKind is not NULL
+type NullAppStatus struct {
+	AppStatus AppStatus
+	Valid     bool // Valid is true if AppStatus is not NULL
 }
 
 // Scan implements the Scanner interface.
-func (ns *NullAllocationBatchKind) Scan(value interface{}) error {
+func (ns *NullAppStatus) Scan(value interface{}) error {
 	if value == nil {
-		ns.AllocationBatchKind, ns.Valid = "", false
+		ns.AppStatus, ns.Valid = "", false
 		return nil
 	}
 	ns.Valid = true
-	return ns.AllocationBatchKind.Scan(value)
+	return ns.AppStatus.Scan(value)
 }
 
 // Value implements the driver Valuer interface.
-func (ns NullAllocationBatchKind) Value() (driver.Value, error) {
+func (ns NullAppStatus) Value() (driver.Value, error) {
 	if !ns.Valid {
 		return nil, nil
 	}
-	return string(ns.AllocationBatchKind), nil
+	return string(ns.AppStatus), nil
 }
 
-func (e AllocationBatchKind) Valid() bool {
+func (e AppStatus) Valid() bool {
 	switch e {
-	case AllocationBatchKindPayment,
-		AllocationBatchKindCreditApplication,
-		AllocationBatchKindReversal:
+	case AppStatusActive,
+		AppStatusSuspended:
 		return true
 	}
 	return false
 }
 
-func AllAllocationBatchKindValues() []AllocationBatchKind {
-	return []AllocationBatchKind{
-		AllocationBatchKindPayment,
-		AllocationBatchKindCreditApplication,
-		AllocationBatchKindReversal,
+func AllAppStatusValues() []AppStatus {
+	return []AppStatus{
+		AppStatusActive,
+		AppStatusSuspended,
 	}
 }
 
 type AuditActorType string
 
 const (
-	AuditActorTypeSystem  AuditActorType = "system"
-	AuditActorTypeAdmin   AuditActorType = "admin"
-	AuditActorTypeCli     AuditActorType = "cli"
-	AuditActorTypeProduct AuditActorType = "product"
+	AuditActorTypeSystem AuditActorType = "system"
+	AuditActorTypeAdmin  AuditActorType = "admin"
+	AuditActorTypeCli    AuditActorType = "cli"
+	AuditActorTypeApp    AuditActorType = "app"
 )
 
 func (e *AuditActorType) Scan(src interface{}) error {
@@ -306,7 +303,7 @@ func (e AuditActorType) Valid() bool {
 	case AuditActorTypeSystem,
 		AuditActorTypeAdmin,
 		AuditActorTypeCli,
-		AuditActorTypeProduct:
+		AuditActorTypeApp:
 		return true
 	}
 	return false
@@ -317,7 +314,77 @@ func AllAuditActorTypeValues() []AuditActorType {
 		AuditActorTypeSystem,
 		AuditActorTypeAdmin,
 		AuditActorTypeCli,
-		AuditActorTypeProduct,
+		AuditActorTypeApp,
+	}
+}
+
+type ChargeStatus string
+
+const (
+	ChargeStatusPending     ChargeStatus = "pending"
+	ChargeStatusNeedsReview ChargeStatus = "needs_review"
+	ChargeStatusSucceeded   ChargeStatus = "succeeded"
+	ChargeStatusExpired     ChargeStatus = "expired"
+	ChargeStatusCancelled   ChargeStatus = "cancelled"
+	ChargeStatusReversed    ChargeStatus = "reversed"
+)
+
+func (e *ChargeStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ChargeStatus(s)
+	case string:
+		*e = ChargeStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ChargeStatus: %T", src)
+	}
+	return nil
+}
+
+type NullChargeStatus struct {
+	ChargeStatus ChargeStatus
+	Valid        bool // Valid is true if ChargeStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullChargeStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.ChargeStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ChargeStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullChargeStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ChargeStatus), nil
+}
+
+func (e ChargeStatus) Valid() bool {
+	switch e {
+	case ChargeStatusPending,
+		ChargeStatusNeedsReview,
+		ChargeStatusSucceeded,
+		ChargeStatusExpired,
+		ChargeStatusCancelled,
+		ChargeStatusReversed:
+		return true
+	}
+	return false
+}
+
+func AllChargeStatusValues() []ChargeStatus {
+	return []ChargeStatus{
+		ChargeStatusPending,
+		ChargeStatusNeedsReview,
+		ChargeStatusSucceeded,
+		ChargeStatusExpired,
+		ChargeStatusCancelled,
+		ChargeStatusReversed,
 	}
 }
 
@@ -376,189 +443,6 @@ func AllMpesaCallbackKindValues() []MpesaCallbackKind {
 	return []MpesaCallbackKind{
 		MpesaCallbackKindStk,
 		MpesaCallbackKindC2bConfirmation,
-	}
-}
-
-type PayerStatus string
-
-const (
-	PayerStatusActive PayerStatus = "active"
-	PayerStatusClosed PayerStatus = "closed"
-)
-
-func (e *PayerStatus) Scan(src interface{}) error {
-	switch s := src.(type) {
-	case []byte:
-		*e = PayerStatus(s)
-	case string:
-		*e = PayerStatus(s)
-	default:
-		return fmt.Errorf("unsupported scan type for PayerStatus: %T", src)
-	}
-	return nil
-}
-
-type NullPayerStatus struct {
-	PayerStatus PayerStatus
-	Valid       bool // Valid is true if PayerStatus is not NULL
-}
-
-// Scan implements the Scanner interface.
-func (ns *NullPayerStatus) Scan(value interface{}) error {
-	if value == nil {
-		ns.PayerStatus, ns.Valid = "", false
-		return nil
-	}
-	ns.Valid = true
-	return ns.PayerStatus.Scan(value)
-}
-
-// Value implements the driver Valuer interface.
-func (ns NullPayerStatus) Value() (driver.Value, error) {
-	if !ns.Valid {
-		return nil, nil
-	}
-	return string(ns.PayerStatus), nil
-}
-
-func (e PayerStatus) Valid() bool {
-	switch e {
-	case PayerStatusActive,
-		PayerStatusClosed:
-		return true
-	}
-	return false
-}
-
-func AllPayerStatusValues() []PayerStatus {
-	return []PayerStatus{
-		PayerStatusActive,
-		PayerStatusClosed,
-	}
-}
-
-type PaymentRequestStatus string
-
-const (
-	PaymentRequestStatusOpen          PaymentRequestStatus = "open"
-	PaymentRequestStatusPartiallyPaid PaymentRequestStatus = "partially_paid"
-	PaymentRequestStatusPaid          PaymentRequestStatus = "paid"
-	PaymentRequestStatusCancelled     PaymentRequestStatus = "cancelled"
-	PaymentRequestStatusExpired       PaymentRequestStatus = "expired"
-)
-
-func (e *PaymentRequestStatus) Scan(src interface{}) error {
-	switch s := src.(type) {
-	case []byte:
-		*e = PaymentRequestStatus(s)
-	case string:
-		*e = PaymentRequestStatus(s)
-	default:
-		return fmt.Errorf("unsupported scan type for PaymentRequestStatus: %T", src)
-	}
-	return nil
-}
-
-type NullPaymentRequestStatus struct {
-	PaymentRequestStatus PaymentRequestStatus
-	Valid                bool // Valid is true if PaymentRequestStatus is not NULL
-}
-
-// Scan implements the Scanner interface.
-func (ns *NullPaymentRequestStatus) Scan(value interface{}) error {
-	if value == nil {
-		ns.PaymentRequestStatus, ns.Valid = "", false
-		return nil
-	}
-	ns.Valid = true
-	return ns.PaymentRequestStatus.Scan(value)
-}
-
-// Value implements the driver Valuer interface.
-func (ns NullPaymentRequestStatus) Value() (driver.Value, error) {
-	if !ns.Valid {
-		return nil, nil
-	}
-	return string(ns.PaymentRequestStatus), nil
-}
-
-func (e PaymentRequestStatus) Valid() bool {
-	switch e {
-	case PaymentRequestStatusOpen,
-		PaymentRequestStatusPartiallyPaid,
-		PaymentRequestStatusPaid,
-		PaymentRequestStatusCancelled,
-		PaymentRequestStatusExpired:
-		return true
-	}
-	return false
-}
-
-func AllPaymentRequestStatusValues() []PaymentRequestStatus {
-	return []PaymentRequestStatus{
-		PaymentRequestStatusOpen,
-		PaymentRequestStatusPartiallyPaid,
-		PaymentRequestStatusPaid,
-		PaymentRequestStatusCancelled,
-		PaymentRequestStatusExpired,
-	}
-}
-
-type ProductStatus string
-
-const (
-	ProductStatusActive    ProductStatus = "active"
-	ProductStatusSuspended ProductStatus = "suspended"
-)
-
-func (e *ProductStatus) Scan(src interface{}) error {
-	switch s := src.(type) {
-	case []byte:
-		*e = ProductStatus(s)
-	case string:
-		*e = ProductStatus(s)
-	default:
-		return fmt.Errorf("unsupported scan type for ProductStatus: %T", src)
-	}
-	return nil
-}
-
-type NullProductStatus struct {
-	ProductStatus ProductStatus
-	Valid         bool // Valid is true if ProductStatus is not NULL
-}
-
-// Scan implements the Scanner interface.
-func (ns *NullProductStatus) Scan(value interface{}) error {
-	if value == nil {
-		ns.ProductStatus, ns.Valid = "", false
-		return nil
-	}
-	ns.Valid = true
-	return ns.ProductStatus.Scan(value)
-}
-
-// Value implements the driver Valuer interface.
-func (ns NullProductStatus) Value() (driver.Value, error) {
-	if !ns.Valid {
-		return nil, nil
-	}
-	return string(ns.ProductStatus), nil
-}
-
-func (e ProductStatus) Valid() bool {
-	switch e {
-	case ProductStatusActive,
-		ProductStatusSuspended:
-		return true
-	}
-	return false
-}
-
-func AllProductStatusValues() []ProductStatus {
-	return []ProductStatus{
-		ProductStatusActive,
-		ProductStatusSuspended,
 	}
 }
 
@@ -993,36 +877,67 @@ type AdminUser struct {
 	DisabledBy        *string
 }
 
-type Allocation struct {
-	ID               int64
-	BatchID          uuid.UUID
-	LineNo           int32
-	ProductID        uuid.UUID
-	PayerAccountID   uuid.UUID
-	PaymentRequestID *uuid.UUID
-	Amount           int64
-	CreatedAt        time.Time
+// Systems that collect money through the gateway (API keys, webhook). The gateway holds no data about their customers.
+type App struct {
+	ID                          uuid.UUID
+	Name                        string
+	AccountPrefix               string
+	WebhookUrl                  *string
+	WebhookSecretCiphertext     []byte
+	WebhookSecretKeyVersion     int32
+	WebhookSecretPrevCiphertext []byte
+	WebhookSecretPrevKeyVersion *int32
+	WebhookSecretPrevExpiresAt  *time.Time
+	Status                      AppStatus
+	CreatedAt                   time.Time
+	UpdatedAt                   time.Time
 }
 
-type AllocationBatch struct {
-	ID               uuid.UUID
-	ProductID        uuid.UUID
-	PayerAccountID   uuid.UUID
-	Kind             AllocationBatchKind
-	TransactionID    *uuid.UUID
-	PaymentRequestID *uuid.UUID
-	ReversesBatchID  *uuid.UUID
-	ExpectedTotal    int64
-	CreatedBy        string
-	Reason           *string
-	CreatedAt        time.Time
+type AppApiKey struct {
+	ID           uuid.UUID
+	AppID        uuid.UUID
+	KeyID        string
+	SecretHash   []byte
+	Label        string
+	AllowedCidrs []netip.Prefix
+	CreatedBy    string
+	CreatedAt    time.Time
+	ExpiresAt    *time.Time
+	RevokedAt    *time.Time
+	RevokedBy    *string
+	LastUsedAt   *time.Time
 }
 
-// Append-only outbox of product-visible changes. Written in the same transaction as the change.
+// A request by an app to collect an exact amount. Paid only by a receipted transaction.
+type Charge struct {
+	ID                uuid.UUID
+	AppID             uuid.UUID
+	Reference         string
+	Description       *string
+	Currency          string
+	Amount            int64
+	Metadata          []byte
+	AccountNumber     string
+	AccountNumberNorm string
+	AccountGenerated  bool
+	Phone             *string
+	Status            ChargeStatus
+	HostedToken       string
+	IdempotencyKey    string
+	RequestHash       []byte
+	ExpiresAt         time.Time
+	TransactionID     *uuid.UUID
+	SucceededAt       *time.Time
+	ClosedAt          *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+// Append-only outbox of app-visible changes. Written in the same transaction as the change.
 type Event struct {
 	ID          uuid.UUID
 	Txid        int64
-	ProductID   uuid.UUID
+	AppID       uuid.UUID
 	Type        string
 	SubjectType string
 	SubjectID   uuid.UUID
@@ -1043,88 +958,11 @@ type MpesaCallback struct {
 	TransactionID *uuid.UUID
 }
 
-type PayerAccount struct {
-	ID                uuid.UUID
-	ProductID         uuid.UUID
-	ExternalRef       string
-	AccountNumber     string
-	AccountNumberNorm string
-	DisplayName       string
-	Email             *string
-	Status            PayerStatus
-	// Cache of the sum of credit allocations. Maintained only by the allocations trigger.
-	CreditBalance int64
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-}
-
-type PayerPhone struct {
-	ProductID      uuid.UUID
-	PayerAccountID uuid.UUID
-	Phone          string
-	IsPrimary      bool
-	CreatedAt      time.Time
-}
-
-type PaymentRequest struct {
-	ID               uuid.UUID
-	ProductID        uuid.UUID
-	PayerAccountID   uuid.UUID
-	ProductReference string
-	Description      string
-	Currency         string
-	Amount           int64
-	// Cache of the sum of allocations to this request. Maintained only by the allocations trigger.
-	AmountPaid     int64
-	Status         PaymentRequestStatus
-	ExpiresAt      *time.Time
-	HostedToken    string
-	IdempotencyKey string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	PaidAt         *time.Time
-	ClosedAt       *time.Time
-	// Set by a reversal that reopened this request while another live request had the same product_reference. Maintained only by the allocations trigger.
-	DuplicateReference bool
-}
-
-// Talksasa's own products. There is deliberately no payout/settlement configuration: all money collected is Talksasa revenue.
-type Product struct {
-	ID                          uuid.UUID
-	Name                        string
-	AccountPrefix               string
-	WebhookUrl                  *string
-	WebhookSecretCiphertext     []byte
-	WebhookSecretKeyVersion     int32
-	Status                      ProductStatus
-	CreatedAt                   time.Time
-	UpdatedAt                   time.Time
-	WebhookSecretPrevCiphertext []byte
-	WebhookSecretPrevKeyVersion *int32
-	WebhookSecretPrevExpiresAt  *time.Time
-}
-
-type ProductApiKey struct {
-	ID         uuid.UUID
-	ProductID  uuid.UUID
-	KeyID      string
-	SecretHash []byte
-	Label      string
-	CreatedBy  string
-	CreatedAt  time.Time
-	ExpiresAt  *time.Time
-	RevokedAt  *time.Time
-	RevokedBy  *string
-	LastUsedAt *time.Time
-	// NULL = any address. Otherwise requests must come from one of these networks.
-	AllowedCidrs []netip.Prefix
-}
-
 // STK push prompts sent through Daraja. Owns the pending mpesa_stk transaction the callback completes.
 type StkPush struct {
 	ID                uuid.UUID
-	ProductID         uuid.UUID
-	PaymentRequestID  uuid.UUID
+	AppID             uuid.UUID
+	ChargeID          uuid.UUID
 	TransactionID     uuid.UUID
 	Source            string
 	Phone             string
@@ -1141,15 +979,15 @@ type StkPush struct {
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 	CompletedAt       *time.Time
-	// Set once when the payment was recorded on a different transaction than transaction_id (late success after the push was failed).
 	PaidTransactionID *uuid.UUID
 	ConfirmBlocked    *string
 }
 
-// Append-only ledger of money movements. Amounts are never changed and rows are never deleted; corrections are new reversal/adjustment rows.
+// Append-only ledger of money movements. Amounts are never changed and rows are never deleted; corrections are new reversal rows.
 type Transaction struct {
 	ID                    uuid.UUID
-	ProductID             *uuid.UUID
+	AppID                 *uuid.UUID
+	ChargeID              *uuid.UUID
 	Direction             TxnDirection
 	Kind                  TxnKind
 	Channel               TxnChannel
@@ -1160,9 +998,7 @@ type Transaction struct {
 	ProviderTransactionID *string
 	ProviderRequestID     *string
 	Phone                 *string
-	BillRef               *string
-	PayerAccountID        *uuid.UUID
-	PaymentRequestID      *uuid.UUID
+	AccountNumber         *string
 	ReversesTransactionID *uuid.UUID
 	FailureCode           *string
 	FailureReason         *string
@@ -1198,7 +1034,7 @@ type WebhookAttempt struct {
 
 type WebhookDelivery struct {
 	EventID        uuid.UUID
-	ProductID      uuid.UUID
+	AppID          uuid.UUID
 	Status         WebhookDeliveryStatus
 	Attempts       int32
 	LastAttemptAt  *time.Time

@@ -45,7 +45,7 @@ func NewDeliveries(pool *db.Pool, river *queue.Client) *Deliveries {
 // Delivery is one delivery summary row.
 type Delivery struct {
 	EventID        uuid.UUID
-	ProductID      uuid.UUID
+	AppID          uuid.UUID
 	AccountPrefix  string
 	EventType      string
 	SubjectType    string
@@ -69,10 +69,10 @@ type Detail struct {
 
 // Filter selects deliveries for the admin list.
 type Filter struct {
-	ProductID *uuid.UUID
-	Status    string // "" = any
-	Cursor    string
-	Limit     int // default 50, max 200
+	AppID  *uuid.UUID
+	Status string // "" = any
+	Cursor string
+	Limit  int // default 50, max 200
 }
 
 // List returns deliveries newest first, keyset-paginated.
@@ -96,8 +96,8 @@ func (s *Deliveries) List(ctx context.Context, f Filter) (reporting.Page[Deliver
 	case f.Limit > 0:
 		lim = int32(f.Limit)
 	}
-	rows, err := store.New(s.pool).ListWebhookDeliveriesWithProduct(ctx, store.ListWebhookDeliveriesWithProductParams{
-		ProductID: f.ProductID, Status: st, CursorAt: at, CursorID: id, Lim: lim + 1,
+	rows, err := store.New(s.pool).ListWebhookDeliveriesWithApp(ctx, store.ListWebhookDeliveriesWithAppParams{
+		AppID: f.AppID, Status: st, CursorAt: at, CursorID: id, Lim: lim + 1,
 	})
 	if err != nil {
 		return out, err
@@ -133,7 +133,7 @@ func getDetail(ctx context.Context, q *store.Queries, eventID uuid.UUID) (Detail
 	}
 	return Detail{
 		Delivery: Delivery{
-			EventID: r.EventID, ProductID: r.ProductID, AccountPrefix: r.AccountPrefix, EventType: r.EventType,
+			EventID: r.EventID, AppID: r.AppID, AccountPrefix: r.AccountPrefix, EventType: r.EventType,
 			SubjectType: r.SubjectType, SubjectID: r.SubjectID, Status: r.Status, Attempts: r.Attempts,
 			LastAttemptAt: r.LastAttemptAt, LastStatusCode: r.LastStatusCode, LastError: r.LastError,
 			DeliveredAt: r.DeliveredAt, CreatedAt: r.CreatedAt,
@@ -179,7 +179,7 @@ func (s *Deliveries) Redeliver(ctx context.Context, actor audit.Actor, eventID u
 			return fmt.Errorf("webhook: requeue: %w", err)
 		}
 		if _, err := s.river.InsertTx(ctx, tx, redeliveryArgs{
-			WebhookArgs: queue.WebhookArgs{EventID: eventID, ProductID: cur.ProductID}, Redelivery: nonce,
+			WebhookArgs: queue.WebhookArgs{EventID: eventID, AppID: cur.AppID}, Redelivery: nonce,
 		}, nil); err != nil {
 			return fmt.Errorf("webhook: insert job: %w", err)
 		}
@@ -188,9 +188,9 @@ func (s *Deliveries) Redeliver(ctx context.Context, actor audit.Actor, eventID u
 			return err
 		}
 		out = d.Delivery
-		pid := cur.ProductID
+		pid := cur.AppID
 		return audit.Record(ctx, q, audit.Entry{
-			Actor: actor, Action: "webhook.redelivered", EntityType: "webhook_delivery", EntityID: eventID.String(), ProductID: &pid,
+			Actor: actor, Action: "webhook.redelivered", EntityType: "webhook_delivery", EntityID: eventID.String(), AppID: &pid,
 			Details: map[string]any{"event_type": d.Delivery.EventType, "previous_status": string(cur.Status), "attempts": cur.Attempts},
 		})
 	})

@@ -44,11 +44,11 @@ const (
 	failStaff       = "staff_failed"    // staff resolved: no money arrived
 )
 
-// Send sends a prompt for the request's full outstanding balance.
+// Send sends a prompt for the charge's exact amount.
 //
-//  1. Tx A: lock the request; check payable, amount <= mpesa.MaxAmount, no
+//  1. Tx A: lock the charge; check payable, amount <= mpesa.MaxAmount, no
 //     live push; insert the pending mpesa_stk transaction and the push
-//     (initiating). Replays (same product + idempotency key) return the
+//     (initiating). Replays (same app + idempotency key) return the
 //     existing push with replayed=true.
 //  2. Call Daraja OUTSIDE any transaction.
 //  3. Tx B: accepted -> push sent (+ checkout ids, next_query_at), emit
@@ -71,18 +71,18 @@ func (s *Service) Send(ctx context.Context, actor audit.Actor, p SendParams) (pu
 		hash []byte
 	)
 	switch p.Source {
-	case SourceProduct:
+	case SourceApp:
 		k := strings.TrimSpace(p.IdempotencyKey)
 		if k == "" || len(k) > 255 || strings.IndexFunc(k, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 {
 			return Push{}, false, ErrInvalidIdempotency
 		}
-		key, hash = &k, requestHash(p.RequestID, ph)
-		existing, ok, err := s.byKey(ctx, p.ProductID, k)
+		key, hash = &k, requestHash(p.ChargeID, ph)
+		existing, ok, err := s.byKey(ctx, p.AppID, k)
 		if err != nil {
 			return Push{}, false, err
 		}
 		if ok {
-			return replay(existing, p.RequestID, hash)
+			return replay(existing, p.ChargeID, hash)
 		}
 	case SourcePayPage:
 		// No key: the one-live-push rule stops repeats.
@@ -99,18 +99,18 @@ func (s *Service) Send(ctx context.Context, actor audit.Actor, p SendParams) (pu
 	if err != nil {
 		oneLive := db.IsUniqueViolation(err, "stk_pushes_one_live")
 		var inProg *InProgressError
-		if key != nil && (oneLive || errors.As(err, &inProg) || db.IsUniqueViolation(err, "stk_pushes_product_id_idempotency_key_key")) {
+		if key != nil && (oneLive || errors.As(err, &inProg) || db.IsUniqueViolation(err, "stk_pushes_app_id_idempotency_key_key")) {
 			// A concurrent call with the same key may have won either index.
-			existing, ok, gerr := s.byKey(ctx, p.ProductID, *key)
+			existing, ok, gerr := s.byKey(ctx, p.AppID, *key)
 			if gerr != nil {
 				return Push{}, false, gerr
 			}
 			if ok {
-				return replay(existing, p.RequestID, hash)
+				return replay(existing, p.ChargeID, hash)
 			}
 		}
 		if oneLive {
-			return Push{}, false, s.inProgress(ctx, p.RequestID)
+			return Push{}, false, s.inProgress(ctx, p.ChargeID)
 		}
 		return Push{}, false, err
 	}
@@ -122,7 +122,7 @@ func (s *Service) Send(ctx context.Context, actor audit.Actor, p SendParams) (pu
 	// may already be on the customer's phone.
 	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	log := s.o.Logger.With(slog.String("stk_push_id", push.ID.String()), slog.String("payment_request_id", push.PaymentRequestID.String()),
+	log := s.o.Logger.With(slog.String("stk_push_id", push.ID.String()), slog.String("charge_id", push.ChargeID.String()),
 		slog.String("phone", tlog.MaskPhone(ph)), slog.Int64("amount", push.Amount))
 
 	switch {
@@ -164,45 +164,35 @@ type darajaArgs struct {
 }
 
 func (s *Service) startTx(ctx context.Context, q *store.Queries, p SendParams, ph string, key *string, hash []byte) (Push, darajaArgs, error) {
-	req, err := q.LockPaymentRequest(ctx, store.LockPaymentRequestParams{ProductID: p.ProductID, ID: p.RequestID})
+	// TODO(gateway-core): review payability rules (rule 4: re-prompt after a
+	// failed prompt, one live prompt; needs_review/expired/cancelled not payable).
+	c, err := q.LockCharge(ctx, store.LockChargeParams{AppID: p.AppID, ID: p.ChargeID})
 	if db.IsNotFound(err) {
 		return Push{}, darajaArgs{}, ErrNotFound
 	}
 	if err != nil {
 		return Push{}, darajaArgs{}, err
 	}
-	if req.Status != store.PaymentRequestStatusOpen && req.Status != store.PaymentRequestStatusPartiallyPaid {
-		return Push{}, darajaArgs{}, ErrNotPayable
+	if c.Status != store.ChargeStatusPending || !c.ExpiresAt.After(s.o.Now()) {
+		return Push{}, darajaArgs{}, ErrNotPayable // not pending, or expired but not yet swept
 	}
-	if req.Status == store.PaymentRequestStatusOpen && req.ExpiresAt != nil && !req.ExpiresAt.After(s.o.Now()) {
-		return Push{}, darajaArgs{}, ErrNotPayable // expired, not yet swept
-	}
-	prod, err := q.GetProduct(ctx, p.ProductID)
+	a, err := q.GetApp(ctx, p.AppID)
 	if err != nil {
 		return Push{}, darajaArgs{}, err
 	}
-	if prod.Status != store.ProductStatusActive {
+	if a.Status != store.AppStatusActive {
 		return Push{}, darajaArgs{}, ErrNotPayable
 	}
-	outstanding := req.Amount - req.AmountPaid
-	if outstanding <= 0 {
-		return Push{}, darajaArgs{}, ErrNotPayable
-	}
-	if outstanding > mpesa.MaxAmount {
+	if c.Amount > mpesa.MaxAmount {
 		return Push{}, darajaArgs{}, ErrAmountTooLarge
 	}
-	if live, err := q.GetLiveSTKPushForRequest(ctx, req.ID); err == nil {
+	if live, err := q.GetLiveSTKPushForCharge(ctx, c.ID); err == nil {
 		return Push{}, darajaArgs{}, &InProgressError{LiveID: live.ID}
 	} else if !db.IsNotFound(err) {
 		return Push{}, darajaArgs{}, err
 	}
-	pa, err := q.GetPayer(ctx, store.GetPayerParams{ProductID: p.ProductID, ID: req.PayerAccountID})
-	if err != nil {
-		return Push{}, darajaArgs{}, fmt.Errorf("stk: load payer: %w", err)
-	}
 	txn, err := ledger.StartSTK(ctx, q, ledger.StartSTKParams{
-		ProductID: p.ProductID, PayerAccountID: pa.ID, PaymentRequestID: req.ID,
-		Amount: money.KES(outstanding), Phone: ph, BillRef: pa.AccountNumber,
+		AppID: p.AppID, ChargeID: c.ID, Amount: money.KES(c.Amount), Phone: ph, AccountNumber: c.AccountNumber,
 	})
 	if err != nil {
 		return Push{}, darajaArgs{}, err
@@ -213,13 +203,13 @@ func (s *Service) startTx(ctx context.Context, q *store.Queries, p SendParams, p
 	}
 	next := s.o.Now().Add(s.o.InitiatingTimeout)
 	push, err := q.InsertSTKPush(ctx, store.InsertSTKPushParams{
-		ID: id, ProductID: p.ProductID, PaymentRequestID: req.ID, TransactionID: txn.ID, Source: string(p.Source),
-		Phone: ph, Amount: outstanding, IdempotencyKey: key, RequestHash: hash, NextQueryAt: &next,
+		ID: id, AppID: p.AppID, ChargeID: c.ID, TransactionID: txn.ID, Source: string(p.Source),
+		Phone: ph, Amount: c.Amount, IdempotencyKey: key, RequestHash: hash, NextQueryAt: &next,
 	})
 	if err != nil {
 		return Push{}, darajaArgs{}, err
 	}
-	return push, darajaArgs{accountRef: pa.AccountNumber, desc: req.ProductReference}, nil
+	return push, darajaArgs{accountRef: c.AccountNumber, desc: c.Reference}, nil
 }
 
 // markSent is Tx B after Daraja accepted the push.
@@ -255,7 +245,7 @@ func (s *Service) sendPushTx(ctx context.Context, q *store.Queries, cur Push, me
 	if err := s.linkCheckout(ctx, q, cur.TransactionID, checkoutID); err != nil {
 		return Push{}, err
 	}
-	if err := s.o.Events.EmitSTKPush(ctx, q, out.ProductID, out.ID, events.STKPushSent); err != nil {
+	if err := s.o.Events.EmitSTKPush(ctx, q, out.AppID, out.ID, events.STKPushSent); err != nil {
 		return Push{}, err
 	}
 	return out, nil
@@ -327,7 +317,7 @@ func (s *Service) failPushTx(ctx context.Context, q *store.Queries, cur Push, re
 			return Push{}, err
 		}
 	}
-	if err := s.o.Events.EmitSTKPush(ctx, q, out.ProductID, out.ID, events.STKPushFailed); err != nil {
+	if err := s.o.Events.EmitSTKPush(ctx, q, out.AppID, out.ID, events.STKPushFailed); err != nil {
 		return Push{}, err
 	}
 	return out, nil
@@ -368,15 +358,15 @@ func (s *Service) reviewPushTx(ctx context.Context, q *store.Queries, cur Push, 
 		changed = true
 	}
 	if changed {
-		if err := s.o.Events.EmitSTKPush(ctx, q, out.ProductID, out.ID, events.STKPushNeedsReview); err != nil {
+		if err := s.o.Events.EmitSTKPush(ctx, q, out.AppID, out.ID, events.STKPushNeedsReview); err != nil {
 			return Push{}, err
 		}
 	}
 	return out, nil
 }
 
-func (s *Service) byKey(ctx context.Context, productID uuid.UUID, key string) (Push, bool, error) {
-	existing, err := store.New(s.o.Pool).GetSTKPushByIdempotencyKey(ctx, store.GetSTKPushByIdempotencyKeyParams{ProductID: productID, IdempotencyKey: &key})
+func (s *Service) byKey(ctx context.Context, appID uuid.UUID, key string) (Push, bool, error) {
+	existing, err := store.New(s.o.Pool).GetSTKPushByIdempotencyKey(ctx, store.GetSTKPushByIdempotencyKeyParams{AppID: appID, IdempotencyKey: &key})
 	if db.IsNotFound(err) {
 		return Push{}, false, nil
 	}
@@ -386,15 +376,15 @@ func (s *Service) byKey(ctx context.Context, productID uuid.UUID, key string) (P
 	return existing, true, nil
 }
 
-func replay(existing Push, requestID uuid.UUID, hash []byte) (Push, bool, error) {
-	if existing.PaymentRequestID != requestID || !bytes.Equal(existing.RequestHash, hash) {
+func replay(existing Push, chargeID uuid.UUID, hash []byte) (Push, bool, error) {
+	if existing.ChargeID != chargeID || !bytes.Equal(existing.RequestHash, hash) {
 		return Push{}, false, ErrIdempotencyConflict
 	}
 	return existing, true, nil
 }
 
-func (s *Service) inProgress(ctx context.Context, requestID uuid.UUID) error {
-	live, err := store.New(s.o.Pool).GetLiveSTKPushForRequest(ctx, requestID)
+func (s *Service) inProgress(ctx context.Context, chargeID uuid.UUID) error {
+	live, err := store.New(s.o.Pool).GetLiveSTKPushForCharge(ctx, chargeID)
 	if err != nil && !db.IsNotFound(err) {
 		return err
 	}
@@ -402,27 +392,27 @@ func (s *Service) inProgress(ctx context.Context, requestID uuid.UUID) error {
 }
 
 // requestHash fingerprints what an idempotent push asked for.
-func requestHash(requestID uuid.UUID, phone string) []byte {
+func requestHash(chargeID uuid.UUID, phone string) []byte {
 	h := sha256.New()
-	h.Write(requestID[:])
+	h.Write(chargeID[:])
 	h.Write([]byte{0})
 	h.Write([]byte(phone))
 	return h.Sum(nil)
 }
 
-// Get returns a product's push.
-func (s *Service) Get(ctx context.Context, productID, id uuid.UUID) (Push, error) {
-	p, err := store.New(s.o.Pool).GetSTKPushForProduct(ctx, store.GetSTKPushForProductParams{ProductID: productID, ID: id})
+// Get returns an app's push.
+func (s *Service) Get(ctx context.Context, appID, id uuid.UUID) (Push, error) {
+	p, err := store.New(s.o.Pool).GetSTKPushForApp(ctx, store.GetSTKPushForAppParams{AppID: appID, ID: id})
 	if db.IsNotFound(err) {
 		return Push{}, ErrNotFound
 	}
 	return p, err
 }
 
-// LatestForRequest returns the newest push for a request created after
-// since, or nil (pay page).
-func (s *Service) LatestForRequest(ctx context.Context, requestID uuid.UUID, since time.Time) (*Push, error) {
-	p, err := store.New(s.o.Pool).LatestSTKPushForRequest(ctx, store.LatestSTKPushForRequestParams{PaymentRequestID: requestID, Since: since})
+// LatestForCharge returns the newest push for a charge created after since,
+// or nil (pay page).
+func (s *Service) LatestForCharge(ctx context.Context, chargeID uuid.UUID, since time.Time) (*Push, error) {
+	p, err := store.New(s.o.Pool).LatestSTKPushForChargeSince(ctx, store.LatestSTKPushForChargeSinceParams{ChargeID: chargeID, Since: since})
 	if db.IsNotFound(err) {
 		return nil, nil
 	}
@@ -432,12 +422,12 @@ func (s *Service) LatestForRequest(ctx context.Context, requestID uuid.UUID, sin
 	return &p, nil
 }
 
-// ListForRequest lists a request's pushes, newest first (admin).
-func (s *Service) ListForRequest(ctx context.Context, requestID uuid.UUID, limit int) ([]Push, error) {
+// ListForCharge lists a charge's pushes, newest first (admin).
+func (s *Service) ListForCharge(ctx context.Context, chargeID uuid.UUID, limit int) ([]Push, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	return store.New(s.o.Pool).ListSTKPushesForRequest(ctx, store.ListSTKPushesForRequestParams{PaymentRequestID: requestID, Lim: int32(limit)})
+	return store.New(s.o.Pool).ListSTKPushesForCharge(ctx, store.ListSTKPushesForChargeParams{ChargeID: chargeID, Lim: int32(limit)})
 }
 
 // alarm logs something staff must look at (money anomaly, lost callback).

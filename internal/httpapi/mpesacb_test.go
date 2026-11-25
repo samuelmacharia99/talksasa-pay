@@ -243,7 +243,7 @@ func TestCallbacksRateLimitedPerIP(t *testing.T) {
 	e.post(path, stkBody, fromAddr("203.0.113.9:1")).expect(t, 404, "not_found")
 }
 
-// Callbacks never go through product-API authentication.
+// Callbacks never go through app-API authentication.
 func TestCallbacksNeedNoAPIKey(t *testing.T) {
 	e := newCBEnv(t, nil)
 	expectAck(t, e.post("/cb/mpesa/"+cbToken+"/stk", stkBody, fromSafaricom(), withHeader("Authorization", "Bearer junk")))

@@ -15,10 +15,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/talksasa/talksasa-pay/internal/accountref"
 	"github.com/talksasa/talksasa-pay/internal/admin"
-	"github.com/talksasa/talksasa-pay/internal/payer"
+	"github.com/talksasa/talksasa-pay/internal/app"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
-	"github.com/talksasa/talksasa-pay/internal/product"
 	"github.com/talksasa/talksasa-pay/internal/reporting"
 	"github.com/talksasa/talksasa-pay/internal/store"
 )
@@ -146,21 +146,21 @@ func (h *handlers) fail(w http.ResponseWriter, r *http.Request, err error) {
 		p(http.StatusConflict, "last_admin", "This would leave no active admin. Promote someone else first.")
 	case errors.Is(err, admin.ErrAlreadyDisabled):
 		p(http.StatusConflict, "already_disabled", "This account is already disabled.")
-	case errors.Is(err, admin.ErrNotFound), errors.Is(err, reporting.ErrNotFound), errors.Is(err, product.ErrNotFound):
+	case errors.Is(err, admin.ErrNotFound), errors.Is(err, reporting.ErrNotFound), errors.Is(err, app.ErrNotFound):
 		p(http.StatusNotFound, "not_found", "No such resource.")
-	case errors.Is(err, product.ErrKeyNotFound):
+	case errors.Is(err, app.ErrKeyNotFound):
 		p(http.StatusNotFound, "key_not_found", "API key not found or already revoked.")
-	case errors.Is(err, product.ErrPrefixTaken):
-		p(http.StatusConflict, "prefix_taken", "That account prefix is already used by another product.")
-	case errors.Is(err, payer.ErrInvalidPrefix):
+	case errors.Is(err, app.ErrPrefixTaken):
+		p(http.StatusConflict, "prefix_taken", "That account prefix is already used by another app.")
+	case errors.Is(err, accountref.ErrInvalidPrefix):
 		p(http.StatusUnprocessableEntity, "invalid_prefix", "Account prefix must be 2-6 capital letters.")
-	case errors.Is(err, product.ErrInvalidName):
-		p(http.StatusUnprocessableEntity, "invalid_name", "Product name must be 1-100 characters.")
-	case errors.Is(err, product.ErrInvalidWebhook):
+	case errors.Is(err, app.ErrInvalidName):
+		p(http.StatusUnprocessableEntity, "invalid_name", "App name must be 1-100 characters.")
+	case errors.Is(err, app.ErrInvalidWebhook):
 		p(http.StatusUnprocessableEntity, "invalid_webhook_url", "Webhook URL must be an absolute https:// URL.")
-	case errors.Is(err, product.ErrInvalidLabel):
+	case errors.Is(err, app.ErrInvalidLabel):
 		p(http.StatusUnprocessableEntity, "invalid_label", "Key label must be 1-100 characters.")
-	case errors.Is(err, product.ErrInvalidExpiry):
+	case errors.Is(err, app.ErrInvalidExpiry):
 		p(http.StatusUnprocessableEntity, "invalid_expiry", "Key expiry must be in the future.")
 	default:
 		httpx.InternalError(w, r, h.d.Logger, err)
@@ -269,12 +269,12 @@ func (h *handlers) dashboard(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, err)
 		return
 	}
-	products, err := h.d.Products.List(r.Context())
+	apps, err := h.d.Apps.List(r.Context())
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, toDashboard(d, products))
+	httpx.WriteJSON(w, http.StatusOK, toDashboard(d, apps))
 }
 
 func (h *handlers) integrity(w http.ResponseWriter, r *http.Request) {
@@ -283,31 +283,31 @@ func (h *handlers) integrity(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, err)
 		return
 	}
-	if !i.AuditChainOK || len(i.Drift) > 0 {
+	if !i.AuditChainOK {
 		h.d.Logger.ErrorContext(r.Context(), "INTEGRITY CHECK FAILED",
-			slog.Bool("audit_chain_ok", i.AuditChainOK), slog.Int64("first_bad_audit_id", i.FirstBadID), slog.Int("ledger_drift_rows", len(i.Drift)))
+			slog.Bool("audit_chain_ok", i.AuditChainOK), slog.Int64("first_bad_audit_id", i.FirstBadID))
 	}
 	httpx.WriteJSON(w, http.StatusOK, toIntegrity(i))
 }
 
 // ---------------------------------------------------------------------------
-// Products and API keys
+// Apps and API keys
 // ---------------------------------------------------------------------------
 
-func (h *handlers) listProducts(w http.ResponseWriter, r *http.Request) {
-	ps, err := h.d.Products.List(r.Context())
+func (h *handlers) listApps(w http.ResponseWriter, r *http.Request) {
+	ps, err := h.d.Apps.List(r.Context())
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	out := make([]productJSON, len(ps))
+	out := make([]appJSON, len(ps))
 	for i, p := range ps {
-		out[i] = toProduct(p)
+		out[i] = toApp(p)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
-func (h *handlers) createProduct(w http.ResponseWriter, r *http.Request) {
+func (h *handlers) createApp(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name          string `json:"name"`
 		AccountPrefix string `json:"account_prefix"`
@@ -316,27 +316,27 @@ func (h *handlers) createProduct(w http.ResponseWriter, r *http.Request) {
 	if !h.decode(w, r, &in) {
 		return
 	}
-	c, err := h.d.Products.Create(r.Context(), principalFrom(r.Context()).Actor(), product.CreateParams{
+	c, err := h.d.Apps.Create(r.Context(), principalFrom(r.Context()).Actor(), app.CreateParams{
 		Name: in.Name, AccountPrefix: in.AccountPrefix, WebhookURL: in.WebhookURL,
 	})
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"product": toProduct(c.Product), "webhook_secret": c.WebhookSecret})
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"app": toApp(c.App), "webhook_secret": c.WebhookSecret})
 }
 
-func (h *handlers) getProduct(w http.ResponseWriter, r *http.Request) {
+func (h *handlers) getApp(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathUUID(w, r, "id")
 	if !ok {
 		return
 	}
-	p, err := h.d.Products.Get(r.Context(), id)
+	p, err := h.d.Apps.Get(r.Context(), id)
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, toProduct(p))
+	httpx.WriteJSON(w, http.StatusOK, toApp(p))
 }
 
 func (h *handlers) setWebhookURL(w http.ResponseWriter, r *http.Request) {
@@ -350,12 +350,12 @@ func (h *handlers) setWebhookURL(w http.ResponseWriter, r *http.Request) {
 	if !h.decode(w, r, &in) {
 		return
 	}
-	p, err := h.d.Products.SetWebhookURL(r.Context(), principalFrom(r.Context()).Actor(), id, in.WebhookURL)
+	p, err := h.d.Apps.SetWebhookURL(r.Context(), principalFrom(r.Context()).Actor(), id, in.WebhookURL)
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, toProduct(p))
+	httpx.WriteJSON(w, http.StatusOK, toApp(p))
 }
 
 func (h *handlers) rotateWebhookSecret(w http.ResponseWriter, r *http.Request) {
@@ -363,7 +363,7 @@ func (h *handlers) rotateWebhookSecret(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	secret, err := h.d.Products.RotateWebhookSecret(r.Context(), principalFrom(r.Context()).Actor(), id)
+	secret, err := h.d.Apps.RotateWebhookSecret(r.Context(), principalFrom(r.Context()).Actor(), id)
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -371,7 +371,7 @@ func (h *handlers) rotateWebhookSecret(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"webhook_secret": secret})
 }
 
-func (h *handlers) setProductStatus(w http.ResponseWriter, r *http.Request) {
+func (h *handlers) setAppStatus(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathUUID(w, r, "id")
 	if !ok {
 		return
@@ -382,17 +382,17 @@ func (h *handlers) setProductStatus(w http.ResponseWriter, r *http.Request) {
 	if !h.decode(w, r, &in) {
 		return
 	}
-	st := store.ProductStatus(in.Status)
+	st := store.AppStatus(in.Status)
 	if !st.Valid() {
 		httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusUnprocessableEntity, "invalid_status", "Status must be active or suspended."))
 		return
 	}
-	p, err := h.d.Products.SetStatus(r.Context(), principalFrom(r.Context()).Actor(), id, st)
+	p, err := h.d.Apps.SetStatus(r.Context(), principalFrom(r.Context()).Actor(), id, st)
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, toProduct(p))
+	httpx.WriteJSON(w, http.StatusOK, toApp(p))
 }
 
 func (h *handlers) listAPIKeys(w http.ResponseWriter, r *http.Request) {
@@ -400,11 +400,11 @@ func (h *handlers) listAPIKeys(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, err := h.d.Products.Get(r.Context(), id); err != nil {
+	if _, err := h.d.Apps.Get(r.Context(), id); err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	keys, err := h.d.Products.ListAPIKeys(r.Context(), id)
+	keys, err := h.d.Apps.ListAPIKeys(r.Context(), id)
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -428,11 +428,11 @@ func (h *handlers) issueAPIKey(w http.ResponseWriter, r *http.Request) {
 	if !h.decode(w, r, &in) {
 		return
 	}
-	if _, err := h.d.Products.Get(r.Context(), id); err != nil {
+	if _, err := h.d.Apps.Get(r.Context(), id); err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	k, err := h.d.Products.IssueAPIKey(r.Context(), principalFrom(r.Context()).Actor(), id, in.Label, in.ExpiresAt)
+	k, err := h.d.Apps.IssueAPIKey(r.Context(), principalFrom(r.Context()).Actor(), id, in.Label, in.ExpiresAt)
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -445,7 +445,7 @@ func (h *handlers) revokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.d.Products.RevokeAPIKey(r.Context(), principalFrom(r.Context()).Actor(), id, chi.URLParam(r, "keyID")); err != nil {
+	if err := h.d.Apps.RevokeAPIKey(r.Context(), principalFrom(r.Context()).Actor(), id, chi.URLParam(r, "keyID")); err != nil {
 		h.fail(w, r, err)
 		return
 	}
@@ -456,65 +456,77 @@ func (h *handlers) revokeAPIKey(w http.ResponseWriter, r *http.Request) {
 // Read-only screens
 // ---------------------------------------------------------------------------
 
-func (h *handlers) listPayers(w http.ResponseWriter, r *http.Request) {
+func (h *handlers) listCharges(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	productID, err := queryUUID(q, "product_id")
-	if err != nil {
+	appID, e1 := queryUUID(q, "app_id")
+	from, e2 := queryTime(q, "from", false)
+	to, e3 := queryTime(q, "to", true)
+	if err := firstErr(e1, e2, e3); err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	page, err := h.d.Reporting.ListPayers(r.Context(), reporting.PayerFilter{
-		ProductID: productID, Q: q.Get("q"), Cursor: q.Get("cursor"), Limit: queryLimit(q),
+	page, err := h.d.Reporting.ListCharges(r.Context(), reporting.ChargeFilter{
+		AppID: appID, Status: q.Get("status"), Q: q.Get("q"), From: from, To: to,
+		Cursor: q.Get("cursor"), Limit: queryLimit(q),
 	})
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, mapPage(page, toPayerRow))
+	httpx.WriteJSON(w, http.StatusOK, mapPage(page, toChargeRow))
 }
 
-func (h *handlers) getPayer(w http.ResponseWriter, r *http.Request) {
+func (h *handlers) getCharge(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathUUID(w, r, "id")
 	if !ok {
 		return
 	}
-	d, err := h.d.Reporting.GetPayer(r.Context(), id)
+	d, err := h.d.Reporting.GetCharge(r.Context(), id)
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, toPayerDetail(d))
+	httpx.WriteJSON(w, http.StatusOK, toChargeDetail(d))
 }
 
-func (h *handlers) listRequests(w http.ResponseWriter, r *http.Request) {
+func (h *handlers) listUnmatched(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	productID, err1 := queryUUID(q, "product_id")
-	payerID, err2 := queryUUID(q, "payer_id")
-	if err := firstErr(err1, err2); err != nil {
+	from, e1 := queryTime(q, "from", false)
+	to, e2 := queryTime(q, "to", true)
+	if err := firstErr(e1, e2); err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	page, err := h.d.Reporting.ListPaymentRequests(r.Context(), reporting.RequestFilter{
-		ProductID: productID, PayerID: payerID, Status: q.Get("status"), DuplicatesOnly: q.Get("duplicates") == "true", Q: q.Get("q"), Cursor: q.Get("cursor"), Limit: queryLimit(q),
+	page, err := h.d.Reporting.ListTransactions(r.Context(), reporting.TxnFilter{
+		UnmatchedOnly: true, Phone: q.Get("phone"), Receipt: q.Get("receipt"), From: from, To: to,
+		Cursor: q.Get("cursor"), Limit: queryLimit(q),
 	})
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, mapPage(page, toRequestRow))
+	httpx.WriteJSON(w, http.StatusOK, mapPage(page, toTxnRow))
 }
 
-func (h *handlers) getRequest(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathUUID(w, r, "id")
-	if !ok {
-		return
-	}
-	d, err := h.d.Reporting.GetPaymentRequest(r.Context(), id)
-	if err != nil {
-		h.fail(w, r, err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, toRequestDetail(d))
+// notImplemented answers admin routes whose behaviour has not landed yet.
+// TODO(gateway-core): remove once assign and reverse are implemented.
+func notImplemented(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusNotImplemented, "not_implemented", "This endpoint is not implemented yet."))
+}
+
+// assignTransaction: POST /transactions/{id}/assign {app_id, reason}. Staff
+// route an unmatched payment to an app (audited); the app then gets
+// payment.received.
+func (h *handlers) assignTransaction(w http.ResponseWriter, r *http.Request) {
+	// TODO(gateway-core): AssignTransactionApp + EmitPaymentReceived + audit.
+	notImplemented(w, r)
+}
+
+// reverseTransaction: POST /transactions/{id}/reverse {reason}. Admin only
+// (money rule 9): ledger.Service.Reverse.
+func (h *handlers) reverseTransaction(w http.ResponseWriter, r *http.Request) {
+	// TODO(gateway-core): call ledger.Service.Reverse.
+	notImplemented(w, r)
 }
 
 func firstErr(errs ...error) error {
@@ -528,19 +540,18 @@ func firstErr(errs ...error) error {
 
 func (h *handlers) listTransactions(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	productID, e1 := queryUUID(q, "product_id")
-	payerID, e2 := queryUUID(q, "payer_id")
-	requestID, e3 := queryUUID(q, "request_id")
-	from, e4 := queryTime(q, "from", false)
-	to, e5 := queryTime(q, "to", true)
-	if err := firstErr(e1, e2, e3, e4, e5); err != nil {
+	appID, e1 := queryUUID(q, "app_id")
+	chargeID, e2 := queryUUID(q, "charge_id")
+	from, e3 := queryTime(q, "from", false)
+	to, e4 := queryTime(q, "to", true)
+	if err := firstErr(e1, e2, e3, e4); err != nil {
 		h.fail(w, r, err)
 		return
 	}
 	page, err := h.d.Reporting.ListTransactions(r.Context(), reporting.TxnFilter{
-		ProductID: productID, PayerID: payerID, RequestID: requestID, Channel: q.Get("channel"), Status: q.Get("status"),
+		AppID: appID, ChargeID: chargeID, Channel: q.Get("channel"), Status: q.Get("status"),
 		Direction: q.Get("direction"), Receipt: q.Get("receipt"), Phone: q.Get("phone"), From: from, To: to,
-		SuspenseOnly: q.Get("suspense") == "true", Cursor: q.Get("cursor"), Limit: queryLimit(q),
+		UnmatchedOnly: q.Get("unmatched") == "true", Cursor: q.Get("cursor"), Limit: queryLimit(q),
 	})
 	if err != nil {
 		h.fail(w, r, err)
@@ -564,13 +575,13 @@ func (h *handlers) getTransaction(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) listAudit(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	productID, err := queryUUID(q, "product_id")
+	appID, err := queryUUID(q, "app_id")
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
 	page, err := h.d.Reporting.ListAudit(r.Context(), reporting.AuditFilter{
-		ProductID: productID, Action: q.Get("action"), ActorID: q.Get("actor_id"), EntityID: q.Get("entity_id"),
+		AppID: appID, Action: q.Get("action"), ActorID: q.Get("actor_id"), EntityID: q.Get("entity_id"),
 		Cursor: q.Get("cursor"), Limit: queryLimit(q),
 	})
 	if err != nil {
@@ -588,7 +599,7 @@ func (h *handlers) listAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, http.StatusOK, mapPage(page, func(a store.ListAuditAdminRow) auditJSON {
 		out := auditJSON{ID: a.ID, OccurredAt: a.OccurredAt, ActorType: string(a.ActorType), ActorID: a.ActorID,
-			Action: a.Action, EntityType: a.EntityType, EntityID: a.EntityID, ProductID: a.ProductID,
+			Action: a.Action, EntityType: a.EntityType, EntityID: a.EntityID, AppID: a.AppID,
 			AccountPrefix: a.AccountPrefix, Details: a.Details}
 		if a.ActorType == store.AuditActorTypeAdmin {
 			out.ActorName = names[a.ActorID]

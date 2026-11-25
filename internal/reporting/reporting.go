@@ -1,6 +1,6 @@
 // Package reporting serves the read-only views behind the admin panel and the
 // hosted pay page. It never writes: every money-changing action lives in its
-// owning domain package (ledger, allocation, refunds...).
+// owning domain package (charge, ledger, stk...).
 package reporting
 
 import (
@@ -142,113 +142,45 @@ func optString(s string) *string {
 }
 
 // ---------------------------------------------------------------------------
-// Payers
+// Charges
 // ---------------------------------------------------------------------------
 
-// PayerFilter filters the payer list.
-type PayerFilter struct {
-	ProductID *uuid.UUID
-	Q         string
-	Cursor    string
-	Limit     int
+// ChargeFilter filters the charge list. From/To bound created_at.
+type ChargeFilter struct {
+	AppID    *uuid.UUID
+	Status   string
+	Q        string // reference, description or account number
+	From, To *time.Time
+	Cursor   string
+	Limit    int
 }
 
-// ListPayers lists payer accounts, newest first.
-func (s *Service) ListPayers(ctx context.Context, f PayerFilter) (Page[store.ListPayersAdminRow], error) {
-	var out Page[store.ListPayersAdminRow]
+// ListCharges lists charges, newest first.
+func (s *Service) ListCharges(ctx context.Context, f ChargeFilter) (Page[store.ListChargesAdminRow], error) {
+	var out Page[store.ListChargesAdminRow]
 	srch, err := parseSearch(f.Q)
 	if err != nil {
 		return out, err
 	}
-	at, id, err := uuidCursor(f.Cursor)
-	if err != nil {
-		return out, err
-	}
-	lim := limit(f.Limit)
-	rows, err := store.New(s.pool).ListPayersAdmin(ctx, store.ListPayersAdminParams{
-		ProductID: f.ProductID, Pattern: srch.pattern, AccountNorm: srch.accountNorm, Phone: srch.phone,
-		CursorAt: at, CursorID: id, Lim: lim + 1,
-	})
-	if err != nil {
-		return out, err
-	}
-	if len(rows) > int(lim) {
-		rows = rows[:lim]
-		last := rows[len(rows)-1]
-		out.NextCursor = encodeCursor(last.CreatedAt, last.ID.String())
-	}
-	out.Items = rows
-	return out, nil
-}
-
-// PayerDetail is one payer with phones and recent credit movements.
-type PayerDetail struct {
-	Payer  store.GetPayerAdminRow
-	Phones []store.ListPayerPhonesAdminRow
-	Credit []store.ListCreditMovementsAdminRow
-}
-
-// GetPayer returns a payer's detail view.
-func (s *Service) GetPayer(ctx context.Context, id uuid.UUID) (PayerDetail, error) {
-	q := store.New(s.pool)
-	p, err := q.GetPayerAdmin(ctx, id)
-	if err != nil {
-		if db.IsNotFound(err) {
-			return PayerDetail{}, ErrNotFound
-		}
-		return PayerDetail{}, err
-	}
-	phones, err := q.ListPayerPhonesAdmin(ctx, id)
-	if err != nil {
-		return PayerDetail{}, err
-	}
-	credit, err := q.ListCreditMovementsAdmin(ctx, store.ListCreditMovementsAdminParams{PayerAccountID: id, Lim: 50})
-	if err != nil {
-		return PayerDetail{}, err
-	}
-	return PayerDetail{Payer: p, Phones: phones, Credit: credit}, nil
-}
-
-// ---------------------------------------------------------------------------
-// Payment requests
-// ---------------------------------------------------------------------------
-
-// RequestFilter filters the payment-request list.
-type RequestFilter struct {
-	ProductID *uuid.UUID
-	PayerID   *uuid.UUID
-	Status    string
-	// DuplicatesOnly keeps live requests reopened by a reversal while a
-	// newer live request had the same reference (staff must resolve them).
-	DuplicatesOnly bool
-	Q              string
-	Cursor         string
-	Limit          int
-}
-
-// ListPaymentRequests lists payment requests, newest first.
-func (s *Service) ListPaymentRequests(ctx context.Context, f RequestFilter) (Page[store.ListPaymentRequestsAdminRow], error) {
-	var out Page[store.ListPaymentRequestsAdminRow]
-	srch, err := parseSearch(f.Q)
-	if err != nil {
-		return out, err
-	}
-	status := store.NullPaymentRequestStatus{}
+	status := store.NullChargeStatus{}
 	if f.Status != "" {
-		st := store.PaymentRequestStatus(f.Status)
+		st := store.ChargeStatus(f.Status)
 		if !st.Valid() {
 			return out, invalid("unknown status %q", f.Status)
 		}
-		status = store.NullPaymentRequestStatus{PaymentRequestStatus: st, Valid: true}
+		status = store.NullChargeStatus{ChargeStatus: st, Valid: true}
+	}
+	if f.From != nil && f.To != nil && !f.From.Before(*f.To) {
+		return out, invalid("'from' must be before 'to'")
 	}
 	at, id, err := uuidCursor(f.Cursor)
 	if err != nil {
 		return out, err
 	}
 	lim := limit(f.Limit)
-	rows, err := store.New(s.pool).ListPaymentRequestsAdmin(ctx, store.ListPaymentRequestsAdminParams{
-		ProductID: f.ProductID, PayerID: f.PayerID, DuplicatesOnly: f.DuplicatesOnly, Status: status, Pattern: srch.pattern, AccountNorm: srch.accountNorm,
-		CursorAt: at, CursorID: id, Lim: lim + 1,
+	rows, err := store.New(s.pool).ListChargesAdmin(ctx, store.ListChargesAdminParams{
+		AppID: f.AppID, Status: status, Pattern: srch.pattern, AccountNorm: srch.accountNorm,
+		CreatedFrom: f.From, CreatedTo: f.To, CursorAt: at, CursorID: id, Lim: lim + 1,
 	})
 	if err != nil {
 		return out, err
@@ -262,27 +194,32 @@ func (s *Service) ListPaymentRequests(ctx context.Context, f RequestFilter) (Pag
 	return out, nil
 }
 
-// RequestDetail is a payment request with the allocation lines that paid it.
-type RequestDetail struct {
-	Request     store.GetPaymentRequestAdminRow
-	Allocations []store.ListAllocationsForRequestAdminRow
+// ChargeDetail is a charge with its prompts and every transaction naming it.
+type ChargeDetail struct {
+	Charge       store.GetChargeAdminRow
+	Pushes       []store.StkPush
+	Transactions []store.Transaction
 }
 
-// GetPaymentRequest returns one payment request.
-func (s *Service) GetPaymentRequest(ctx context.Context, id uuid.UUID) (RequestDetail, error) {
+// GetCharge returns one charge.
+func (s *Service) GetCharge(ctx context.Context, id uuid.UUID) (ChargeDetail, error) {
 	q := store.New(s.pool)
-	r, err := q.GetPaymentRequestAdmin(ctx, id)
+	c, err := q.GetChargeAdmin(ctx, id)
 	if err != nil {
 		if db.IsNotFound(err) {
-			return RequestDetail{}, ErrNotFound
+			return ChargeDetail{}, ErrNotFound
 		}
-		return RequestDetail{}, err
+		return ChargeDetail{}, err
 	}
-	allocs, err := q.ListAllocationsForRequestAdmin(ctx, &id)
+	pushes, err := q.ListSTKPushesForCharge(ctx, store.ListSTKPushesForChargeParams{ChargeID: id, Lim: MaxLimit})
 	if err != nil {
-		return RequestDetail{}, err
+		return ChargeDetail{}, err
 	}
-	return RequestDetail{Request: r, Allocations: allocs}, nil
+	txns, err := q.ListTransactionsForChargeAdmin(ctx, &id)
+	if err != nil {
+		return ChargeDetail{}, err
+	}
+	return ChargeDetail{Charge: c, Pushes: pushes, Transactions: txns}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -291,26 +228,27 @@ func (s *Service) GetPaymentRequest(ctx context.Context, id uuid.UUID) (RequestD
 
 // TxnFilter filters the transaction list. From/To bound created_at.
 type TxnFilter struct {
-	ProductID    *uuid.UUID
-	PayerID      *uuid.UUID
-	RequestID    *uuid.UUID
-	Channel      string
-	Status       string
-	Direction    string
-	Receipt      string
-	Phone        string
-	From, To     *time.Time
-	SuspenseOnly bool
-	Cursor       string
-	Limit        int
+	AppID     *uuid.UUID
+	ChargeID  *uuid.UUID
+	Channel   string
+	Status    string
+	Direction string
+	Receipt   string
+	Phone     string
+	From, To  *time.Time
+	// UnmatchedOnly keeps succeeded incoming money with no app (unknown
+	// account prefix) that staff must assign.
+	UnmatchedOnly bool
+	Cursor        string
+	Limit         int
 }
 
 // ListTransactions lists ledger rows, newest first.
 func (s *Service) ListTransactions(ctx context.Context, f TxnFilter) (Page[store.ListTransactionsAdminRow], error) {
 	var out Page[store.ListTransactionsAdminRow]
 	p := store.ListTransactionsAdminParams{
-		ProductID: f.ProductID, PayerID: f.PayerID, RequestID: f.RequestID, CreatedFrom: f.From, CreatedTo: f.To,
-		SuspenseOnly: f.SuspenseOnly,
+		AppID: f.AppID, ChargeID: f.ChargeID, CreatedFrom: f.From, CreatedTo: f.To,
+		UnmatchedOnly: f.UnmatchedOnly,
 	}
 	if f.Channel != "" {
 		c := store.TxnChannel(f.Channel)
@@ -368,11 +306,10 @@ func (s *Service) ListTransactions(ctx context.Context, f TxnFilter) (Page[store
 	return out, nil
 }
 
-// TxnDetail is one transaction with its status history and allocations.
+// TxnDetail is one transaction with its status history.
 type TxnDetail struct {
-	Txn         store.GetTransactionAdminRow
-	Events      []store.TransactionEvent
-	Allocations []store.ListAllocationsForTransactionAdminRow
+	Txn    store.GetTransactionAdminRow
+	Events []store.TransactionEvent
 }
 
 // GetTransaction returns one transaction.
@@ -389,25 +326,21 @@ func (s *Service) GetTransaction(ctx context.Context, id uuid.UUID) (TxnDetail, 
 	if err != nil {
 		return TxnDetail{}, err
 	}
-	allocs, err := q.ListAllocationsForTransactionAdmin(ctx, &id)
-	if err != nil {
-		return TxnDetail{}, err
-	}
-	return TxnDetail{Txn: t, Events: events, Allocations: allocs}, nil
+	return TxnDetail{Txn: t, Events: events}, nil
 }
 
 // ---------------------------------------------------------------------------
 // Audit log
 // ---------------------------------------------------------------------------
 
-// AuditFilter filters the audit log. Action matches a prefix ("product.").
+// AuditFilter filters the audit log. Action matches a prefix ("app.").
 type AuditFilter struct {
-	ProductID *uuid.UUID
-	Action    string
-	ActorID   string
-	EntityID  string
-	Cursor    string
-	Limit     int
+	AppID    *uuid.UUID
+	Action   string
+	ActorID  string
+	EntityID string
+	Cursor   string
+	Limit    int
 }
 
 // ListAudit lists audit entries, newest first.
@@ -435,7 +368,7 @@ func (s *Service) ListAudit(ctx context.Context, f AuditFilter) (Page[store.List
 	}
 	lim := limit(f.Limit)
 	rows, err := store.New(s.pool).ListAuditAdmin(ctx, store.ListAuditAdminParams{
-		ProductID: f.ProductID, ActionPrefix: action, ActorID: optString(f.ActorID), EntityID: optString(f.EntityID),
+		AppID: f.AppID, ActionPrefix: action, ActorID: optString(f.ActorID), EntityID: optString(f.EntityID),
 		CursorAt: at, CursorID: cursorID, Lim: lim + 1,
 	})
 	if err != nil {
@@ -456,17 +389,17 @@ func (s *Service) ListAudit(ctx context.Context, f AuditFilter) (Page[store.List
 
 // DayTotal is the collections of one Nairobi calendar day.
 type DayTotal struct {
-	Day       string // YYYY-MM-DD
-	Total     int64
-	Payments  int64
-	ByProduct map[uuid.UUID]int64
+	Day      string // YYYY-MM-DD
+	Total    int64
+	Payments int64
+	ByApp    map[uuid.UUID]int64
 }
 
-// Window is collections over a period, overall and per product.
+// Window is collections over a period, overall and per app.
 type Window struct {
-	Total     int64
-	Payments  int64
-	ByProduct map[uuid.UUID]int64
+	Total    int64
+	Payments int64
+	ByApp    map[uuid.UUID]int64
 }
 
 // Dashboard is the admin home page.
@@ -495,7 +428,7 @@ func (s *Service) Dashboard(ctx context.Context) (Dashboard, error) {
 	days := map[string]*DayTotal{}
 	var daily []DayTotal
 	for d := since; !d.After(today); d = d.AddDate(0, 0, 1) {
-		daily = append(daily, DayTotal{Day: d.Format(time.DateOnly), ByProduct: map[uuid.UUID]int64{}})
+		daily = append(daily, DayTotal{Day: d.Format(time.DateOnly), ByApp: map[uuid.UUID]int64{}})
 	}
 	for i := range daily {
 		days[daily[i].Day] = &daily[i]
@@ -510,7 +443,7 @@ func (s *Service) Dashboard(ctx context.Context) (Dashboard, error) {
 		}
 		day.Total += r.Total
 		day.Payments += r.Payments
-		day.ByProduct[r.ProductID] += r.Total
+		day.ByApp[r.AppID] += r.Total
 		add(&d.Last30Days, r)
 		if r.Day >= weekStart {
 			add(&d.Last7Days, r)
@@ -523,86 +456,77 @@ func (s *Service) Dashboard(ctx context.Context) (Dashboard, error) {
 	return d, nil
 }
 
-func newWindow() Window { return Window{ByProduct: map[uuid.UUID]int64{}} }
+func newWindow() Window { return Window{ByApp: map[uuid.UUID]int64{}} }
 
 func add(w *Window, r store.CollectionsByDayRow) {
 	w.Total += r.Total
 	w.Payments += r.Payments
-	w.ByProduct[r.ProductID] += r.Total
+	w.ByApp[r.AppID] += r.Total
 }
 
-// Integrity reports the audit-chain and ledger-balance checks.
+// Integrity reports the audit-chain check.
 type Integrity struct {
 	AuditChainOK bool
 	FirstBadID   int64
-	Drift        []store.FindBalanceDriftRow
 	CheckedAt    time.Time
 }
 
-// CheckIntegrity runs the same checks as `admin audit verify` and
-// `admin ledger check`.
+// CheckIntegrity runs the same check as `admin audit verify`.
 func (s *Service) CheckIntegrity(ctx context.Context) (Integrity, error) {
 	q := store.New(s.pool)
 	bad, err := q.VerifyAuditChain(ctx)
 	if err != nil {
 		return Integrity{}, err
 	}
-	drift, err := q.FindBalanceDrift(ctx)
-	if err != nil {
-		return Integrity{}, err
-	}
-	return Integrity{AuditChainOK: bad == 0, FirstBadID: bad, Drift: drift, CheckedAt: s.now().UTC()}, nil
+	return Integrity{AuditChainOK: bad == 0, FirstBadID: bad, CheckedAt: s.now().UTC()}, nil
 }
 
 // ---------------------------------------------------------------------------
 // Hosted pay page
 // ---------------------------------------------------------------------------
 
-// PayPage is everything the public pay page may show. It deliberately
-// excludes payer name, phone, email and external ref. RequestID and
-// ProductID are for the server only (sending an STK push, finding the
-// latest one): they must never be rendered to the visitor.
+// PayPage is everything the public pay page may show. ChargeID and AppID
+// are for the server only (sending an STK push, finding the latest one):
+// they must never be rendered to the visitor.
 type PayPage struct {
-	RequestID        uuid.UUID
-	ProductID        uuid.UUID
-	ProductName      string
-	AccountNumber    string
-	ProductReference string
-	Description      string
-	Amount           int64
-	AmountPaid       int64
-	Status           store.PaymentRequestStatus
-	ExpiresAt        *time.Time
-	PaidAt           *time.Time
-	Payable          bool
+	ChargeID      uuid.UUID
+	AppID         uuid.UUID
+	AppName       string
+	AccountNumber string
+	Reference     string
+	Description   *string
+	Amount        int64
+	Currency      string
+	Status        store.ChargeStatus
+	ExpiresAt     time.Time
+	SucceededAt   *time.Time
+	// Payable: a prompt may be sent (pending and not past expires_at).
+	Payable bool
 }
 
-// PayPageByToken resolves a hosted-page token. Unknown tokens and requests
-// of suspended products are both ErrNotFound.
+// PayPageByToken resolves a hosted-page token. Unknown tokens and charges
+// of suspended apps are both ErrNotFound.
 func (s *Service) PayPageByToken(ctx context.Context, token string) (PayPage, error) {
-	r, err := store.New(s.pool).GetPaymentRequestByHostedToken(ctx, token)
+	r, err := store.New(s.pool).GetChargeByHostedToken(ctx, token)
 	if err != nil {
 		if db.IsNotFound(err) {
 			return PayPage{}, ErrNotFound
 		}
 		return PayPage{}, err
 	}
-	if r.ProductStatus != store.ProductStatusActive {
+	if r.AppStatus != store.AppStatusActive {
 		return PayPage{}, ErrNotFound
 	}
-	// Only untouched (open) requests expire; a partially paid request stays
-	// payable until settled (confirmed allocation rule).
-	expired := r.Status == store.PaymentRequestStatusOpen && r.ExpiresAt != nil && !s.now().Before(*r.ExpiresAt)
-	payable := (r.Status == store.PaymentRequestStatusOpen && !expired) || r.Status == store.PaymentRequestStatusPartiallyPaid
 	status := r.Status
+	expired := status == store.ChargeStatusPending && !s.now().Before(r.ExpiresAt)
 	if expired {
 		// The expiry job may not have run yet; present it as expired.
-		status = store.PaymentRequestStatusExpired
+		status = store.ChargeStatusExpired
 	}
 	return PayPage{
-		RequestID: r.ID, ProductID: r.ProductID,
-		ProductName: r.ProductName, AccountNumber: r.AccountNumber, ProductReference: r.ProductReference,
-		Description: r.Description, Amount: r.Amount, AmountPaid: r.AmountPaid, Status: status,
-		ExpiresAt: r.ExpiresAt, PaidAt: r.PaidAt, Payable: payable,
+		ChargeID: r.ID, AppID: r.AppID, AppName: r.AppName, AccountNumber: r.AccountNumber,
+		Reference: r.Reference, Description: r.Description, Amount: r.Amount, Currency: r.Currency,
+		Status: status, ExpiresAt: r.ExpiresAt, SucceededAt: r.SucceededAt,
+		Payable: status == store.ChargeStatusPending,
 	}, nil
 }

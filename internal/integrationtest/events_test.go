@@ -1,27 +1,30 @@
 package integrationtest
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/talksasa/talksasa-pay/internal/events"
-	"github.com/talksasa/talksasa-pay/internal/paymentrequest"
+	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/store"
 )
 
-// feed returns every event visible in the gap-free feed for a product.
-func (e *env) feed(productID uuid.UUID) []store.Event {
+// feed returns every event visible in the gap-free feed for an app.
+func (e *env) feed(appID uuid.UUID) []store.Event {
 	e.t.Helper()
 	// The feed hides events until every older transaction on the SERVER has
 	// finished (txids are cluster-wide), so parallel test packages can delay
-	// it. Wait until it has caught up with this product's newest event.
+	// it. Wait until it has caught up with this app's newest event.
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		var settled bool
-		if err := e.db.Owner.QueryRow(e.ctx, `SELECT coalesce(max(txid), 0) < (pg_snapshot_xmin(pg_current_snapshot())::text)::bigint FROM events WHERE product_id = $1`, productID).Scan(&settled); err != nil {
+		if err := e.db.Owner.QueryRow(e.ctx, `SELECT coalesce(max(txid), 0) < (pg_snapshot_xmin(pg_current_snapshot())::text)::bigint FROM events WHERE app_id = $1`, appID).Scan(&settled); err != nil {
 			e.t.Fatal(err)
 		}
 		if settled {
@@ -36,7 +39,7 @@ func (e *env) feed(productID uuid.UUID) []store.Event {
 	afterTxid, afterID := int64(0), uuid.Nil
 	for {
 		page, err := store.New(e.db.App).ListEventsFeed(e.ctx, store.ListEventsFeedParams{
-			ProductID: productID, AfterTxid: afterTxid, AfterID: afterID, Lim: 2,
+			AppID: appID, AfterTxid: afterTxid, AfterID: afterID, Lim: 2,
 		})
 		if err != nil {
 			e.t.Fatal(err)
@@ -58,38 +61,26 @@ func types(evs []store.Event) []string {
 	return out
 }
 
-// Every money change emits its events in the same transaction, in order,
-// with a webhook delivery row and exactly one River job per event.
+// Events go through the outbox in the writing transaction, in order, with a
+// webhook delivery row and exactly one River job per event. (Which events a
+// money change emits is tested with the money core: TODO(gateway-core).)
 func TestEventsOutbox(t *testing.T) {
 	e := newEnv(t)
-	p := e.product("EVT")
-	pr := e.payer(p.Product.ID, "c-1")
-	r := e.request(p.Product.ID, pr.ID, 1000)
-
-	e.pay(pr, 400, &r.ID, "EVTRCPT0001") // partially paid
-	e.pay(pr, 900, &r.ID, "EVTRCPT0002") // paid + 300 credit
-	r2 := e.request(p.Product.ID, pr.ID, 1000)
-	if _, err := e.requests.Cancel(e.ctx, operator, p.Product.ID, r2.ID); err == nil {
-		t.Fatal("cancel of a credit-paid request should fail")
-	}
-	r3 := e.request(p.Product.ID, pr.ID, 5000) // 0 credit left: stays open
-	c1, err := e.requests.Cancel(e.ctx, operator, p.Product.ID, r3.ID)
-	if err != nil || c1.AlreadyCancelled {
-		t.Fatalf("cancel: %v %+v", err, c1)
-	}
-	c2, err := e.requests.Cancel(e.ctx, operator, p.Product.ID, r3.ID) // idempotent retry
-	if err != nil || !c2.AlreadyCancelled {
-		t.Fatalf("second cancel should be an idempotent no-op: %v %+v", err, c2)
+	p := e.app("EVT")
+	c1 := e.charge(p.App.ID, 1000)
+	c2 := e.charge(p.App.ID, 2000)
+	txn := e.payCharge(c1)
+	e.emitCharge(p.App.ID, c1.ID, events.ChargeSucceeded)
+	e.emitCharge(p.App.ID, c2.ID, events.ChargeExpired)
+	if err := db.WithTx(e.ctx, e.db.App, worker.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
+		return e.events.EmitPaymentReceived(ctx, q, p.App.ID, txn.ID, &c1.ID)
+	}); err != nil {
+		t.Fatal(err)
 	}
 
-	got := types(e.feed(p.Product.ID))
-	want := []string{
-		events.PaymentRequestCreated,
-		events.TransactionAllocated, events.PaymentRequestPartiallyPaid,
-		events.TransactionAllocated, events.PaymentRequestPaid, events.PayerCreditChanged,
-		events.PaymentRequestCreated, events.PaymentRequestPartiallyPaid, events.PayerCreditChanged, // credit 300 applied to r2
-		events.PaymentRequestCreated, events.PaymentRequestCancelled, // r3; second cancel emits nothing
-	}
+	evs := e.feed(p.App.ID)
+	got := types(evs)
+	want := []string{events.ChargeSucceeded, events.ChargeExpired, events.PaymentReceived}
 	if len(got) != len(want) {
 		t.Fatalf("events:\n got %v\nwant %v", got, want)
 	}
@@ -101,51 +92,63 @@ func TestEventsOutbox(t *testing.T) {
 
 	// Data is the public resource: no internals.
 	var data map[string]any
-	if err := json.Unmarshal(e.feed(p.Product.ID)[0].Data, &data); err != nil {
+	if err := json.Unmarshal(evs[0].Data, &data); err != nil {
 		t.Fatal(err)
 	}
-	for _, banned := range []string{"hosted_token", "idempotency_key", "product_id", "payer_account_id"} {
+	for _, banned := range []string{"hosted_token", "idempotency_key", "app_id", "request_hash", "account_number_norm"} {
 		if _, ok := data[banned]; ok {
 			t.Errorf("event data exposes %s", banned)
 		}
 	}
-	if data["object"] != "payment_request" || data["pay_url"] == "" {
+	if data["object"] != "charge" || data["status"] != "succeeded" || data["transaction_id"] != txn.ID.String() ||
+		data["checkout_url"] != "https://pay.test/"+c1.HostedToken {
 		t.Errorf("unexpected data %v", data)
+	}
+	if err := json.Unmarshal(evs[2].Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data["object"] != "transaction" || data["duplicate_of_charge"] != c1.ID.String() || data["charge_id"] != c1.ID.String() {
+		t.Errorf("payment.received data %v", data)
 	}
 
 	var deliveries, jobs int
-	if err := e.db.Owner.QueryRow(e.ctx, `SELECT count(*) FROM webhook_deliveries WHERE product_id = $1 AND status = 'pending'`, p.Product.ID).Scan(&deliveries); err != nil {
+	if err := e.db.Owner.QueryRow(e.ctx, `SELECT count(*) FROM webhook_deliveries WHERE app_id = $1 AND status = 'pending'`, p.App.ID).Scan(&deliveries); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.db.Owner.QueryRow(e.ctx, `SELECT count(*) FROM river_job WHERE kind = 'webhook_delivery' AND args->>'product_id' = $1`, p.Product.ID.String()).Scan(&jobs); err != nil {
+	if err := e.db.Owner.QueryRow(e.ctx, `SELECT count(*) FROM river_job WHERE kind = 'webhook_delivery' AND args->>'app_id' = $1`, p.App.ID.String()).Scan(&jobs); err != nil {
 		t.Fatal(err)
 	}
 	if deliveries != len(want) || jobs != len(want) {
 		t.Fatalf("deliveries=%d jobs=%d, want %d each", deliveries, jobs, len(want))
 	}
 
-	// Other products see nothing.
-	other := e.product("OTH")
-	if n := len(e.feed(other.Product.ID)); n != 0 {
-		t.Fatalf("other product sees %d events", n)
+	// Other apps see nothing.
+	other := e.app("OTH")
+	if n := len(e.feed(other.App.ID)); n != 0 {
+		t.Fatalf("other app sees %d events", n)
 	}
-	e.assertNoDrift()
+	e.assertAuditChain()
 }
 
-// A rolled-back money change leaves no event and no job behind.
+// A rolled-back change leaves no event and no job behind.
 func TestEventsRollBackWithChange(t *testing.T) {
 	e := newEnv(t)
-	p := e.product("RBK")
-	pr := e.payer(p.Product.ID, "c-1")
-	r := e.request(p.Product.ID, pr.ID, 1000)
-	before := len(e.feed(p.Product.ID))
-	// Duplicate live reference: the insert fails inside the transaction.
-	if _, err := e.requests.Create(e.ctx, operator, p.Product.ID, paymentrequest.CreateParams{
-		PayerAccountID: pr.ID, ProductReference: r.ProductReference, Description: "dup", Amount: 500, IdempotencyKey: "other-key",
-	}); err == nil {
-		t.Fatal("duplicate reference accepted")
+	p := e.app("RBK")
+	c := e.charge(p.App.ID, 1000)
+	before := len(e.feed(p.App.ID))
+	err := db.WithTx(e.ctx, e.db.App, worker.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
+		if err := e.events.EmitCharge(ctx, q, p.App.ID, c.ID, events.ChargeCancelled); err != nil {
+			return err
+		}
+		return errRollback
+	})
+	if !errors.Is(err, errRollback) {
+		t.Fatal(err)
 	}
-	if after := len(e.feed(p.Product.ID)); after != before {
-		t.Fatalf("failed create left %d events", after-before)
+	if after := len(e.feed(p.App.ID)); after != before {
+		t.Fatalf("rolled-back change left %d events", after-before)
+	}
+	if n := e.count(`SELECT count(*) FROM river_job WHERE kind = 'webhook_delivery' AND args->>'app_id' = $1`, p.App.ID.String()); n != 0 {
+		t.Fatalf("rolled-back change left %d jobs", n)
 	}
 }

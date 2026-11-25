@@ -18,10 +18,10 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/talksasa/talksasa-pay/internal/admin"
+	"github.com/talksasa/talksasa-pay/internal/app"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 	tlog "github.com/talksasa/talksasa-pay/internal/platform/log"
 	"github.com/talksasa/talksasa-pay/internal/platform/metrics"
-	"github.com/talksasa/talksasa-pay/internal/product"
 	"github.com/talksasa/talksasa-pay/internal/reporting"
 	"github.com/talksasa/talksasa-pay/internal/webhook"
 )
@@ -30,7 +30,7 @@ import (
 type Deps struct {
 	Logger    *slog.Logger
 	Admin     *admin.Service
-	Products  *product.Service
+	Apps      *app.Service
 	Reporting *reporting.Service
 	// Webhooks serves the webhook-delivery screens and redelivery
 	// (webhook.NewDeliveries(pool, riverClient); an insert-only River
@@ -42,7 +42,7 @@ type Deps struct {
 	// AuthLimiter throttles sign-in, 2FA and setup attempts per client IP.
 	// nil uses the default (10 per minute, burst 10).
 	AuthLimiter *httpx.RateLimiter
-	// STK resolves needs_review M-Pesa payments and lists a request's STK
+	// STK resolves needs_review M-Pesa payments and lists a charge's STK
 	// pushes (*stk.Service). nil: resolve answers 503 mpesa_unavailable and
 	// push lists are empty.
 	STK STKService
@@ -80,29 +80,30 @@ func Routes(d Deps) []Route {
 		{http.MethodGet, "/dashboard", admin.PermRead, h.dashboard},
 		{http.MethodGet, "/integrity", admin.PermRead, h.integrity},
 
-		{http.MethodGet, "/products", admin.PermRead, h.listProducts},
-		{http.MethodPost, "/products", admin.PermManageProducts, h.createProduct},
-		{http.MethodGet, "/products/{id}", admin.PermRead, h.getProduct},
-		{http.MethodPut, "/products/{id}/webhook-url", admin.PermManageProducts, h.setWebhookURL},
-		{http.MethodPost, "/products/{id}/rotate-webhook-secret", admin.PermManageProducts, h.rotateWebhookSecret},
-		{http.MethodPost, "/products/{id}/status", admin.PermManageProducts, h.setProductStatus},
-		{http.MethodGet, "/products/{id}/api-keys", admin.PermRead, h.listAPIKeys},
-		{http.MethodPost, "/products/{id}/api-keys", admin.PermManageProducts, h.issueAPIKey},
-		{http.MethodPost, "/products/{id}/api-keys/{keyID}/revoke", admin.PermManageProducts, h.revokeAPIKey},
-		{http.MethodPut, "/products/{id}/api-keys/{keyID}/allowed-ips", admin.PermManageProducts, h.setAllowedIPs},
+		{http.MethodGet, "/apps", admin.PermRead, h.listApps},
+		{http.MethodPost, "/apps", admin.PermManageApps, h.createApp},
+		{http.MethodGet, "/apps/{id}", admin.PermRead, h.getApp},
+		{http.MethodPut, "/apps/{id}/webhook-url", admin.PermManageApps, h.setWebhookURL},
+		{http.MethodPost, "/apps/{id}/rotate-webhook-secret", admin.PermManageApps, h.rotateWebhookSecret},
+		{http.MethodPost, "/apps/{id}/status", admin.PermManageApps, h.setAppStatus},
+		{http.MethodGet, "/apps/{id}/api-keys", admin.PermRead, h.listAPIKeys},
+		{http.MethodPost, "/apps/{id}/api-keys", admin.PermManageApps, h.issueAPIKey},
+		{http.MethodPost, "/apps/{id}/api-keys/{keyID}/revoke", admin.PermManageApps, h.revokeAPIKey},
+		{http.MethodPut, "/apps/{id}/api-keys/{keyID}/allowed-ips", admin.PermManageApps, h.setAllowedIPs},
 
 		{http.MethodGet, "/webhook-deliveries", admin.PermRead, h.listWebhookDeliveries},
 		{http.MethodGet, "/webhook-deliveries/{eventID}", admin.PermRead, h.getWebhookDelivery},
-		{http.MethodPost, "/webhook-deliveries/{eventID}/redeliver", admin.PermManageProducts, h.redeliverWebhook},
+		{http.MethodPost, "/webhook-deliveries/{eventID}/redeliver", admin.PermManageApps, h.redeliverWebhook},
 
-		{http.MethodGet, "/payers", admin.PermRead, h.listPayers},
-		{http.MethodGet, "/payers/{id}", admin.PermRead, h.getPayer},
-		{http.MethodGet, "/payment-requests", admin.PermRead, h.listRequests},
-		{http.MethodGet, "/payment-requests/{id}", admin.PermRead, h.getRequest},
+		{http.MethodGet, "/charges", admin.PermRead, h.listCharges},
+		{http.MethodGet, "/charges/{id}", admin.PermRead, h.getCharge},
+		{http.MethodGet, "/charges/{id}/stk-pushes", admin.PermRead, h.listSTKPushes},
 		{http.MethodGet, "/transactions", admin.PermRead, h.listTransactions},
+		{http.MethodGet, "/transactions/unmatched", admin.PermRead, h.listUnmatched},
 		{http.MethodGet, "/transactions/{id}", admin.PermRead, h.getTransaction},
 		{http.MethodPost, "/transactions/{id}/resolve", admin.PermResolvePayments, h.resolveTransaction},
-		{http.MethodGet, "/payment-requests/{id}/stk-pushes", admin.PermRead, h.listSTKPushes},
+		{http.MethodPost, "/transactions/{id}/assign", admin.PermResolvePayments, h.assignTransaction},
+		{http.MethodPost, "/transactions/{id}/reverse", admin.PermReversePayments, h.reverseTransaction},
 		{http.MethodGet, "/mpesa/callbacks", admin.PermRead, h.listMpesaCallbacks},
 		{http.MethodGet, "/audit", admin.PermRead, h.listAudit},
 

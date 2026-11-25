@@ -12,7 +12,7 @@ import (
 )
 
 const insertAudit = `-- name: InsertAudit :exec
-INSERT INTO audit_log (actor_type, actor_id, action, entity_type, entity_id, product_id, details)
+INSERT INTO audit_log (actor_type, actor_id, action, entity_type, entity_id, app_id, details)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
 `
 
@@ -22,7 +22,7 @@ type InsertAuditParams struct {
 	Action     string
 	EntityType string
 	EntityID   *string
-	ProductID  *uuid.UUID
+	AppID      *uuid.UUID
 	Details    []byte
 }
 
@@ -33,7 +33,7 @@ func (q *Queries) InsertAudit(ctx context.Context, arg InsertAuditParams) error 
 		arg.Action,
 		arg.EntityType,
 		arg.EntityID,
-		arg.ProductID,
+		arg.AppID,
 		arg.Details,
 	)
 	return err

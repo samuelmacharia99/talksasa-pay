@@ -11,22 +11,22 @@ import (
 	"github.com/google/uuid"
 )
 
-const getEventForProduct = `-- name: GetEventForProduct :one
-SELECT id, txid, product_id, type, subject_type, subject_id, data, created_at FROM events WHERE product_id = $1 AND id = $2
+const getEventForApp = `-- name: GetEventForApp :one
+SELECT id, txid, app_id, type, subject_type, subject_id, data, created_at FROM events WHERE app_id = $1 AND id = $2
 `
 
-type GetEventForProductParams struct {
-	ProductID uuid.UUID
-	ID        uuid.UUID
+type GetEventForAppParams struct {
+	AppID uuid.UUID
+	ID    uuid.UUID
 }
 
-func (q *Queries) GetEventForProduct(ctx context.Context, arg GetEventForProductParams) (Event, error) {
-	row := q.db.QueryRow(ctx, getEventForProduct, arg.ProductID, arg.ID)
+func (q *Queries) GetEventForApp(ctx context.Context, arg GetEventForAppParams) (Event, error) {
+	row := q.db.QueryRow(ctx, getEventForApp, arg.AppID, arg.ID)
 	var i Event
 	err := row.Scan(
 		&i.ID,
 		&i.Txid,
-		&i.ProductID,
+		&i.AppID,
 		&i.Type,
 		&i.SubjectType,
 		&i.SubjectID,
@@ -37,7 +37,7 @@ func (q *Queries) GetEventForProduct(ctx context.Context, arg GetEventForProduct
 }
 
 const getEventInternal = `-- name: GetEventInternal :one
-SELECT id, txid, product_id, type, subject_type, subject_id, data, created_at FROM events WHERE id = $1
+SELECT id, txid, app_id, type, subject_type, subject_id, data, created_at FROM events WHERE id = $1
 `
 
 // Worker only: loads the event a webhook job refers to.
@@ -47,7 +47,7 @@ func (q *Queries) GetEventInternal(ctx context.Context, id uuid.UUID) (Event, er
 	err := row.Scan(
 		&i.ID,
 		&i.Txid,
-		&i.ProductID,
+		&i.AppID,
 		&i.Type,
 		&i.SubjectType,
 		&i.SubjectID,
@@ -58,14 +58,14 @@ func (q *Queries) GetEventInternal(ctx context.Context, id uuid.UUID) (Event, er
 }
 
 const insertEvent = `-- name: InsertEvent :one
-INSERT INTO events (id, product_id, type, subject_type, subject_id, data)
+INSERT INTO events (id, app_id, type, subject_type, subject_id, data)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, txid, product_id, type, subject_type, subject_id, data, created_at
+RETURNING id, txid, app_id, type, subject_type, subject_id, data, created_at
 `
 
 type InsertEventParams struct {
 	ID          uuid.UUID
-	ProductID   uuid.UUID
+	AppID       uuid.UUID
 	Type        string
 	SubjectType string
 	SubjectID   uuid.UUID
@@ -75,7 +75,7 @@ type InsertEventParams struct {
 func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Event, error) {
 	row := q.db.QueryRow(ctx, insertEvent,
 		arg.ID,
-		arg.ProductID,
+		arg.AppID,
 		arg.Type,
 		arg.SubjectType,
 		arg.SubjectID,
@@ -85,7 +85,7 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Event
 	err := row.Scan(
 		&i.ID,
 		&i.Txid,
-		&i.ProductID,
+		&i.AppID,
 		&i.Type,
 		&i.SubjectType,
 		&i.SubjectID,
@@ -96,8 +96,8 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Event
 }
 
 const listEventsFeed = `-- name: ListEventsFeed :many
-SELECT id, txid, product_id, type, subject_type, subject_id, data, created_at FROM events
- WHERE product_id = $1
+SELECT id, txid, app_id, type, subject_type, subject_id, data, created_at FROM events
+ WHERE app_id = $1
    AND (txid, id) > ($2::bigint, $3::uuid)
    AND txid < (pg_snapshot_xmin(pg_current_snapshot())::text)::bigint
  ORDER BY txid, id
@@ -105,7 +105,7 @@ SELECT id, txid, product_id, type, subject_type, subject_id, data, created_at FR
 `
 
 type ListEventsFeedParams struct {
-	ProductID uuid.UUID
+	AppID     uuid.UUID
 	AfterTxid int64
 	AfterID   uuid.UUID
 	Lim       int32
@@ -116,7 +116,7 @@ type ListEventsFeedParams struct {
 // list can never skip an event that commits later.
 func (q *Queries) ListEventsFeed(ctx context.Context, arg ListEventsFeedParams) ([]Event, error) {
 	rows, err := q.db.Query(ctx, listEventsFeed,
-		arg.ProductID,
+		arg.AppID,
 		arg.AfterTxid,
 		arg.AfterID,
 		arg.Lim,
@@ -131,7 +131,7 @@ func (q *Queries) ListEventsFeed(ctx context.Context, arg ListEventsFeedParams) 
 		if err := rows.Scan(
 			&i.ID,
 			&i.Txid,
-			&i.ProductID,
+			&i.AppID,
 			&i.Type,
 			&i.SubjectType,
 			&i.SubjectID,

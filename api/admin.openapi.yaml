@@ -12,7 +12,8 @@ info:
     TSP_TRUSTED_PROXIES.
 
     Amounts are integer Kenya shillings. Phone numbers are always masked.
-    Errors are RFC 9457 problem+json (`Problem`).
+    Errors are RFC 9457 problem+json (`Problem`). Routes the gateway-core
+    work has not implemented yet answer 501 `not_implemented`.
 servers:
   - url: /admin/v1
 security:
@@ -162,12 +163,12 @@ paths:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Dashboard" } } } }
   /integrity:
     get:
-      summary: Audit-chain and ledger-balance checks
+      summary: Audit-chain check
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Integrity" } } } }
-  /products:
+  /apps:
     get:
-      summary: List products
+      summary: List apps
       responses:
         "200":
           description: OK
@@ -177,9 +178,9 @@ paths:
                 type: object
                 required: [items]
                 properties:
-                  items: { type: array, items: { $ref: "#/components/schemas/Product" } }
+                  items: { type: array, items: { $ref: "#/components/schemas/App" } }
     post:
-      summary: Create a product (admin)
+      summary: Create an app (admin)
       requestBody:
         required: true
         content:
@@ -199,20 +200,20 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [product, webhook_secret]
+                required: [app, webhook_secret]
                 properties:
-                  product: { $ref: "#/components/schemas/Product" }
+                  app: { $ref: "#/components/schemas/App" }
                   webhook_secret: { type: string }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
-  /products/{id}:
+  /apps/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
-      summary: One product
+      summary: One app
       responses:
-        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/App" } } } }
         "404": { $ref: "#/components/responses/Problem" }
-  /products/{id}/webhook-url:
+  /apps/{id}/webhook-url:
     parameters: [{ $ref: "#/components/parameters/id" }]
     put:
       summary: Change the webhook URL (admin)
@@ -227,9 +228,9 @@ paths:
               properties:
                 webhook_url: { type: string, description: Empty clears it }
       responses:
-        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/App" } } } }
         "422": { $ref: "#/components/responses/Problem" }
-  /products/{id}/rotate-webhook-secret:
+  /apps/{id}/rotate-webhook-secret:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
       summary: Replace the webhook signing secret (admin); shown once
@@ -243,10 +244,10 @@ paths:
                 required: [webhook_secret]
                 properties:
                   webhook_secret: { type: string }
-  /products/{id}/status:
+  /apps/{id}/status:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: Suspend or re-activate a product (admin)
+      summary: Suspend or re-activate an app (admin)
       requestBody:
         required: true
         content:
@@ -258,11 +259,11 @@ paths:
               properties:
                 status: { type: string, enum: [active, suspended] }
       responses:
-        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Product" } } } }
-  /products/{id}/api-keys:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/App" } } } }
+  /apps/{id}/api-keys:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
-      summary: List a product's API keys (never the secrets)
+      summary: List an app's API keys (never the secrets)
       responses:
         "200":
           description: OK
@@ -297,7 +298,7 @@ paths:
                 properties:
                   key: { $ref: "#/components/schemas/APIKey" }
                   api_key: { type: string }
-  /products/{id}/api-keys/{keyID}/revoke:
+  /apps/{id}/api-keys/{keyID}/revoke:
     parameters:
       - { $ref: "#/components/parameters/id" }
       - { name: keyID, in: path, required: true, schema: { type: string } }
@@ -306,7 +307,7 @@ paths:
       responses:
         "204": { description: Revoked }
         "404": { $ref: "#/components/responses/Problem" }
-  /products/{id}/api-keys/{keyID}/allowed-ips:
+  /apps/{id}/api-keys/{keyID}/allowed-ips:
     parameters:
       - { $ref: "#/components/parameters/id" }
       - { name: keyID, in: path, required: true, schema: { type: string } }
@@ -330,7 +331,7 @@ paths:
     get:
       summary: Webhook deliveries, newest first
       parameters:
-        - { $ref: "#/components/parameters/product_id" }
+        - { $ref: "#/components/parameters/app_id" }
         - { name: status, in: query, schema: { type: string, enum: [pending, delivered, failed, skipped] } }
         - { $ref: "#/components/parameters/cursor" }
         - { $ref: "#/components/parameters/limit" }
@@ -380,12 +381,15 @@ paths:
         "200": { description: Queued, content: { application/json: { schema: { $ref: "#/components/schemas/WebhookDelivery" } } } }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
-  /payers:
+  /charges:
     get:
-      summary: Search payer accounts
+      summary: List charges, newest first
       parameters:
-        - { $ref: "#/components/parameters/product_id" }
-        - { name: q, in: query, schema: { type: string }, description: "Account number, name, external ref or phone" }
+        - { $ref: "#/components/parameters/app_id" }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/ChargeStatus" } }
+        - { name: q, in: query, schema: { type: string }, description: "Reference, description or account number (typed loosely)" }
+        - { name: from, in: query, schema: { type: string }, description: "Created from: YYYY-MM-DD (Nairobi) or RFC 3339" }
+        - { name: to, in: query, schema: { type: string }, description: "Created to: YYYY-MM-DD inclusive (Nairobi) or RFC 3339" }
         - { $ref: "#/components/parameters/cursor" }
         - { $ref: "#/components/parameters/limit" }
       responses:
@@ -397,27 +401,20 @@ paths:
                 type: object
                 required: [items]
                 properties:
-                  items: { type: array, items: { $ref: "#/components/schemas/Payer" } }
+                  items: { type: array, items: { $ref: "#/components/schemas/Charge" } }
                   next_cursor: { type: string }
         "400": { $ref: "#/components/responses/Problem" }
-  /payers/{id}:
+  /charges/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
-      summary: One payer with phones and credit movements
+      summary: One charge with its prompts and every transaction naming it
       responses:
-        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/PayerDetail" } } } }
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/ChargeDetail" } } } }
         "404": { $ref: "#/components/responses/Problem" }
-  /payment-requests:
+  /charges/{id}/stk-pushes:
+    parameters: [{ $ref: "#/components/parameters/id" }]
     get:
-      summary: List payment requests
-      parameters:
-        - { $ref: "#/components/parameters/product_id" }
-        - { name: payer_id, in: query, schema: { type: string, format: uuid } }
-        - { name: status, in: query, schema: { $ref: "#/components/schemas/RequestStatus" } }
-        - { name: q, in: query, schema: { type: string }, description: "Reference, description or account number" }
-        - { name: duplicates, in: query, schema: { type: boolean }, description: "Only live requests reopened by a reversal while a newer live request had the same reference" }
-        - { $ref: "#/components/parameters/cursor" }
-        - { $ref: "#/components/parameters/limit" }
+      summary: M-Pesa prompts sent for a charge, newest first
       responses:
         "200":
           description: OK
@@ -427,23 +424,14 @@ paths:
                 type: object
                 required: [items]
                 properties:
-                  items: { type: array, items: { $ref: "#/components/schemas/PaymentRequest" } }
-                  next_cursor: { type: string }
-        "400": { $ref: "#/components/responses/Problem" }
-  /payment-requests/{id}:
-    parameters: [{ $ref: "#/components/parameters/id" }]
-    get:
-      summary: One payment request with its allocations
-      responses:
-        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentRequestDetail" } } } }
+                  items: { type: array, items: { $ref: "#/components/schemas/STKPush" } }
         "404": { $ref: "#/components/responses/Problem" }
   /transactions:
     get:
       summary: List ledger transactions
       parameters:
-        - { $ref: "#/components/parameters/product_id" }
-        - { name: payer_id, in: query, schema: { type: string, format: uuid } }
-        - { name: request_id, in: query, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/app_id" }
+        - { name: charge_id, in: query, schema: { type: string, format: uuid } }
         - { name: channel, in: query, schema: { $ref: "#/components/schemas/Channel" } }
         - { name: status, in: query, schema: { $ref: "#/components/schemas/TxnStatus" } }
         - { name: direction, in: query, schema: { type: string, enum: [in, out] } }
@@ -451,7 +439,33 @@ paths:
         - { name: phone, in: query, schema: { type: string } }
         - { name: from, in: query, schema: { type: string }, description: "YYYY-MM-DD (Nairobi) or RFC 3339" }
         - { name: to, in: query, schema: { type: string }, description: "YYYY-MM-DD inclusive (Nairobi) or RFC 3339" }
-        - { name: suspense, in: query, schema: { type: string, enum: ["true"] } }
+        - { name: unmatched, in: query, schema: { type: string, enum: ["true"] }, description: "Only succeeded incoming money with no app" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Transaction" } }
+                  next_cursor: { type: string }
+        "400": { $ref: "#/components/responses/Problem" }
+  /transactions/unmatched:
+    get:
+      summary: Unmatched payments (unknown account prefix), newest first
+      description: |
+        Succeeded incoming money that could not be routed to an app because
+        the account number's prefix belongs to no app. Assign each one to an
+        app with POST /transactions/{id}/assign.
+      parameters:
+        - { name: receipt, in: query, schema: { type: string } }
+        - { name: phone, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string }, description: "YYYY-MM-DD (Nairobi) or RFC 3339" }
+        - { name: to, in: query, schema: { type: string }, description: "YYYY-MM-DD inclusive (Nairobi) or RFC 3339" }
         - { $ref: "#/components/parameters/cursor" }
         - { $ref: "#/components/parameters/limit" }
       responses:
@@ -469,7 +483,7 @@ paths:
   /transactions/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
-      summary: One transaction with events and allocations
+      summary: One transaction with its status history
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/TransactionDetail" } } } }
         "404": { $ref: "#/components/responses/Problem" }
@@ -480,10 +494,12 @@ paths:
       description: |
         Safaricom reported success for an STK push but never sent the receipt.
         Look the payment up on the M-Pesa portal, then either confirm it with
-        its receipt (the transaction succeeds and is applied to the bill) or
-        mark it failed (no money arrived). Audited with the reason.
+        its receipt (the transaction succeeds and its charge succeeds, or the
+        app gets payment.received) or mark it failed (no money arrived; a
+        charge in needs_review goes back to pending). Audited with the reason.
         409 `not_resolvable` if the transaction is not needs_review;
-        409 `receipt_taken` if the receipt is already recorded elsewhere.
+        409 `receipt_taken` if the receipt is already recorded elsewhere;
+        409 `amount_mismatch` if Safaricom reported a different amount.
       requestBody:
         required: true
         content:
@@ -502,21 +518,64 @@ paths:
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
-  /payment-requests/{id}/stk-pushes:
+  /transactions/{id}/assign:
     parameters: [{ $ref: "#/components/parameters/id" }]
-    get:
-      summary: M-Pesa prompts sent for a payment request, newest first
+    post:
+      summary: Assign an unmatched payment to an app (finance, admin)
+      description: |
+        Routes a succeeded payment with no app (unknown account prefix) to an
+        app, which then gets `payment.received`. Set once: a payment that
+        already has an app is 409 `already_assigned`. Audited with the reason.
+        The app must exist (422 `validation_failed` on `app_id`); assigning
+        to a suspended app is allowed (money rule 8) and the response says so
+        in `app_status`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [app_id, reason]
+              properties:
+                app_id: { type: string, format: uuid }
+                reason: { type: string, minLength: 3, maxLength: 500 }
       responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items: { type: array, items: { $ref: "#/components/schemas/STKPush" } }
+        "200": { description: Assigned, content: { application/json: { schema: { $ref: "#/components/schemas/TransactionDetail" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /transactions/{id}/reverse:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Record a reversal of a succeeded payment (admin)
+      description: |
+        Money rule 9: records a reversal transaction (kind `reversal`,
+        direction `out`) for the payment's full amount. If the payment paid a
+        charge, the charge becomes `reversed`. The app gets
+        `transaction.reversed`. Admin only, with a reason, audited. An M-Pesa
+        payment needs Safaricom's reversal receipt.
+        409 `not_reversible` (not a succeeded incoming payment) or
+        `already_reversed`; 409 `receipt_taken` if the reversal receipt is
+        already recorded.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 3, maxLength: 500 }
+                receipt: { type: string, maxLength: 64, description: "Safaricom's reversal receipt; required for M-Pesa payments" }
+      responses:
+        "200": { description: Reversed; the reversal transaction, content: { application/json: { schema: { $ref: "#/components/schemas/TransactionDetail" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
   /mpesa/callbacks:
     get:
       summary: Safaricom callbacks received, newest first (bodies are not listed)
@@ -539,8 +598,8 @@ paths:
     get:
       summary: Audit log
       parameters:
-        - { $ref: "#/components/parameters/product_id" }
-        - { name: action, in: query, schema: { type: string }, description: Prefix, e.g. "product." }
+        - { $ref: "#/components/parameters/app_id" }
+        - { name: action, in: query, schema: { type: string }, description: Prefix, e.g. "app." }
         - { name: actor_id, in: query, schema: { type: string } }
         - { name: entity_id, in: query, schema: { type: string } }
         - { $ref: "#/components/parameters/cursor" }
@@ -623,7 +682,7 @@ components:
     session: { type: http, scheme: bearer }
   parameters:
     id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
-    product_id: { name: product_id, in: query, schema: { type: string, format: uuid } }
+    app_id: { name: app_id, in: query, schema: { type: string, format: uuid } }
     cursor: { name: cursor, in: query, schema: { type: string } }
     limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200 } }
   responses:
@@ -648,7 +707,7 @@ components:
       required: [id, source, status, amount, phone, checkout_request_id, result_code, result_desc, query_attempts, transaction_id, paid_transaction_id, confirm_blocked, created_at, completed_at]
       properties:
         id: { type: string, format: uuid }
-        source: { type: string, enum: [product, pay_page] }
+        source: { type: string, enum: [app, pay_page] }
         status: { type: string, enum: [initiating, sent, succeeded, failed, unknown] }
         amount: { type: integer }
         phone: { type: string, description: Masked }
@@ -674,7 +733,7 @@ components:
         attempts: { type: integer }
         transaction_id: { type: [string, "null"], format: uuid }
     Role: { type: string, enum: [viewer, finance, approver, admin] }
-    RequestStatus: { type: string, enum: [open, partially_paid, paid, cancelled, expired] }
+    ChargeStatus: { type: string, enum: [pending, needs_review, succeeded, expired, cancelled, reversed] }
     TxnStatus: { type: string, enum: [pending, succeeded, failed, cancelled, needs_review] }
     Channel: { type: string, enum: [mpesa_stk, mpesa_c2b, mpesa_b2c, manual] }
     Me:
@@ -685,7 +744,7 @@ components:
         email: { type: string }
         name: { type: string }
         role: { $ref: "#/components/schemas/Role" }
-        permissions: { type: array, items: { type: string, enum: [read, products.manage, users.manage, payments.resolve] } }
+        permissions: { type: array, items: { type: string, enum: [read, apps.manage, users.manage, payments.resolve, payments.reverse] } }
         expires_at: { type: string, format: date-time }
         idle_expires_at: { type: string, format: date-time }
     User:
@@ -708,7 +767,7 @@ components:
         user: { $ref: "#/components/schemas/User" }
         setup_url: { type: string }
         expires_at: { type: string, format: date-time }
-    Product:
+    App:
       type: object
       required: [id, name, account_prefix, webhook_url, status, created_at]
       properties:
@@ -732,10 +791,10 @@ components:
         allowed_ips: { type: [array, "null"], items: { type: string }, description: "null = any address" }
     WebhookDelivery:
       type: object
-      required: [event_id, product_id, account_prefix, event_type, subject_type, subject_id, status, attempts, last_attempt_at, last_status_code, last_error, delivered_at, created_at]
+      required: [event_id, app_id, account_prefix, event_type, subject_type, subject_id, status, attempts, last_attempt_at, last_status_code, last_error, delivered_at, created_at]
       properties:
         event_id: { type: string, format: uuid }
-        product_id: { type: string, format: uuid }
+        app_id: { type: string, format: uuid }
         account_prefix: { type: string }
         event_type: { type: string }
         subject_type: { type: string }
@@ -758,97 +817,49 @@ components:
         latency_ms: { type: integer }
         error: { type: [string, "null"] }
         response_body: { type: [string, "null"], description: "First 1 KB of the receiver's response" }
-    Payer:
+    Charge:
       type: object
-      required: [id, product_id, account_prefix, external_ref, account_number, display_name, email, status, credit_balance, created_at]
+      required: [id, app_id, account_prefix, app_name, reference, description, amount, currency, account_number, phone, status,
+        expires_at, succeeded_at, transaction_id, closed_at, created_at]
       properties:
         id: { type: string, format: uuid }
-        product_id: { type: string, format: uuid }
+        app_id: { type: string, format: uuid }
         account_prefix: { type: string }
-        external_ref: { type: string }
-        account_number: { type: string }
-        display_name: { type: string }
-        email: { type: [string, "null"] }
-        status: { type: string, enum: [active, closed] }
-        credit_balance: { type: integer }
-        created_at: { type: string, format: date-time }
-    PayerDetail:
-      allOf:
-        - $ref: "#/components/schemas/Payer"
-        - type: object
-          required: [product_name, updated_at, phones, credit_movements]
-          properties:
-            product_name: { type: string }
-            updated_at: { type: string, format: date-time }
-            phones:
-              type: array
-              items:
-                type: object
-                required: [phone, is_primary]
-                properties:
-                  phone: { type: string, description: Masked }
-                  is_primary: { type: boolean }
-            credit_movements:
-              type: array
-              items:
-                type: object
-                required: [id, batch_kind, transaction_id, payment_request_id, amount, created_at]
-                properties:
-                  id: { type: integer }
-                  batch_kind: { type: string }
-                  transaction_id: { type: [string, "null"], format: uuid }
-                  payment_request_id: { type: [string, "null"], format: uuid }
-                  amount: { type: integer }
-                  created_at: { type: string, format: date-time }
-    PaymentRequest:
-      type: object
-      required: [id, product_id, account_prefix, payer_account_id, account_number, payer_name, product_reference, description, amount, amount_paid, outstanding, status, expires_at, created_at, paid_at, closed_at, duplicate_reference]
-      properties:
-        id: { type: string, format: uuid }
-        product_id: { type: string, format: uuid }
-        account_prefix: { type: string }
-        payer_account_id: { type: string, format: uuid }
-        account_number: { type: string }
-        payer_name: { type: string }
-        product_reference: { type: string }
-        description: { type: string }
+        app_name: { type: string }
+        reference: { type: string }
+        description: { type: [string, "null"] }
         amount: { type: integer }
-        amount_paid: { type: integer }
-        outstanding: { type: integer }
-        status: { $ref: "#/components/schemas/RequestStatus" }
-        expires_at: { type: [string, "null"], format: date-time }
+        currency: { type: string, enum: [KES] }
+        account_number: { type: string }
+        phone: { type: [string, "null"], description: "Masked; the phone the app gave for the first prompt" }
+        status: { $ref: "#/components/schemas/ChargeStatus" }
+        expires_at: { type: string, format: date-time }
+        succeeded_at: { type: [string, "null"], format: date-time }
+        transaction_id: { type: [string, "null"], format: uuid, description: The payment that made the charge succeed }
+        closed_at: { type: [string, "null"], format: date-time, description: When it expired or was cancelled }
         created_at: { type: string, format: date-time }
-        paid_at: { type: [string, "null"], format: date-time }
-        closed_at: { type: [string, "null"], format: date-time }
-        duplicate_reference:
-          type: boolean
-          description: Reopened by a reversal while a newer live request had the same reference; staff should cancel or settle one of them.
-    PaymentRequestDetail:
+    ChargeDetail:
       allOf:
-        - $ref: "#/components/schemas/PaymentRequest"
+        - $ref: "#/components/schemas/Charge"
         - type: object
-          required: [product_name, updated_at, allocations]
+          required: [app_status, metadata, account_generated, updated_at, stk_pushes, transactions]
           properties:
-            product_name: { type: string }
+            app_status: { type: string, enum: [active, suspended] }
+            metadata: { type: [object, "null"], additionalProperties: true }
+            account_generated: { type: boolean, description: "True when the gateway generated the account number" }
             updated_at: { type: string, format: date-time }
-            allocations:
+            stk_pushes: { type: array, items: { $ref: "#/components/schemas/STKPush" }, description: Newest first }
+            transactions:
               type: array
-              items:
-                type: object
-                required: [id, batch_kind, transaction_id, receipt, amount, created_at]
-                properties:
-                  id: { type: integer }
-                  batch_kind: { type: string, enum: [payment, credit_application, reversal] }
-                  transaction_id: { type: [string, "null"], format: uuid }
-                  receipt: { type: [string, "null"] }
-                  amount: { type: integer }
-                  created_at: { type: string, format: date-time }
+              items: { $ref: "#/components/schemas/Transaction" }
+              description: "Every transaction naming this charge, oldest first: the payment that paid it, failed prompts, duplicates and a reversal"
     Transaction:
       type: object
-      required: [id, product_id, account_prefix, direction, kind, channel, status, amount, receipt, phone, bill_ref, payer_account_id, account_number, payment_request_id, failure_reason, created_at, completed_at]
+      required: [id, app_id, account_prefix, direction, kind, channel, status, amount, receipt, phone, account_number, charge_id,
+        charge_reference, failure_reason, created_at, completed_at]
       properties:
         id: { type: string, format: uuid }
-        product_id: { type: [string, "null"], format: uuid }
+        app_id: { type: [string, "null"], format: uuid, description: "null = unmatched (no app)" }
         account_prefix: { type: [string, "null"] }
         direction: { type: string, enum: [in, out] }
         kind: { type: string, enum: [payment, refund, reversal, adjustment] }
@@ -857,10 +868,9 @@ components:
         amount: { type: integer }
         receipt: { type: [string, "null"] }
         phone: { type: [string, "null"], description: Masked }
-        bill_ref: { type: [string, "null"] }
-        payer_account_id: { type: [string, "null"], format: uuid }
-        account_number: { type: [string, "null"] }
-        payment_request_id: { type: [string, "null"], format: uuid }
+        account_number: { type: [string, "null"], description: "As typed at the paybill, or as sent with the prompt" }
+        charge_id: { type: [string, "null"], format: uuid }
+        charge_reference: { type: [string, "null"] }
         failure_reason: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
         completed_at: { type: [string, "null"], format: date-time }
@@ -868,7 +878,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/Transaction"
         - type: object
-          required: [provider_request_id, reverses_transaction_id, failure_code, reason, created_by, occurred_at, updated_at, payer_name, product_reference, raw_payload, events, allocations]
+          required: [provider_request_id, reverses_transaction_id, failure_code, reason, created_by, occurred_at, updated_at, app_name, raw_payload, events]
           properties:
             provider_request_id: { type: [string, "null"] }
             reverses_transaction_id: { type: [string, "null"], format: uuid }
@@ -877,8 +887,7 @@ components:
             created_by: { type: [string, "null"] }
             occurred_at: { type: [string, "null"], format: date-time }
             updated_at: { type: string, format: date-time }
-            payer_name: { type: [string, "null"] }
-            product_reference: { type: [string, "null"] }
+            app_name: { type: [string, "null"] }
             raw_payload: { description: Provider payload with phones masked }
             events:
               type: array
@@ -890,45 +899,31 @@ components:
                   to_status: { type: string }
                   actor: { type: string }
                   occurred_at: { type: string, format: date-time }
-            allocations:
-              type: array
-              items:
-                type: object
-                required: [id, batch_id, batch_kind, line_no, payment_request_id, product_reference, amount, created_at]
-                properties:
-                  id: { type: integer }
-                  batch_id: { type: string, format: uuid }
-                  batch_kind: { type: string, enum: [payment, credit_application, reversal] }
-                  line_no: { type: integer }
-                  payment_request_id: { type: [string, "null"], format: uuid, description: "null = payer credit" }
-                  product_reference: { type: [string, "null"] }
-                  amount: { type: integer }
-                  created_at: { type: string, format: date-time }
     AuditEntry:
       type: object
-      required: [id, occurred_at, actor_type, actor_id, action, entity_type, entity_id, product_id, account_prefix, details]
+      required: [id, occurred_at, actor_type, actor_id, action, entity_type, entity_id, app_id, account_prefix, details]
       properties:
         id: { type: integer }
         occurred_at: { type: string, format: date-time }
-        actor_type: { type: string, enum: [system, admin, cli, product] }
+        actor_type: { type: string, enum: [system, admin, cli, app] }
         actor_id: { type: string }
         actor_name: { type: string }
         action: { type: string }
         entity_type: { type: string }
         entity_id: { type: [string, "null"] }
-        product_id: { type: [string, "null"], format: uuid }
+        app_id: { type: [string, "null"], format: uuid }
         account_prefix: { type: [string, "null"] }
         details: { type: object, additionalProperties: true }
     Window:
       type: object
-      required: [total, payments, by_product]
+      required: [total, payments, by_app]
       properties:
         total: { type: integer }
         payments: { type: integer }
-        by_product: { type: object, additionalProperties: { type: integer }, description: "product id -> KES; nil UUID = unassigned" }
+        by_app: { type: object, additionalProperties: { type: integer }, description: "app id -> KES; nil UUID = unassigned (unmatched)" }
     Dashboard:
       type: object
-      required: [today, last_7_days, last_30_days, daily, products, counts, timezone, generated_at]
+      required: [today, last_7_days, last_30_days, daily, apps, counts, timezone, generated_at]
       properties:
         today: { $ref: "#/components/schemas/Window" }
         last_7_days: { $ref: "#/components/schemas/Window" }
@@ -937,54 +932,42 @@ components:
           type: array
           items:
             type: object
-            required: [day, total, payments, by_product]
+            required: [day, total, payments, by_app]
             properties:
               day: { type: string, format: date }
               total: { type: integer }
               payments: { type: integer }
-              by_product: { type: object, additionalProperties: { type: integer } }
-        products: { type: array, items: { $ref: "#/components/schemas/Product" } }
+              by_app: { type: object, additionalProperties: { type: integer } }
+        apps: { type: array, items: { $ref: "#/components/schemas/App" } }
         counts:
           type: object
-          required: [open_requests, outstanding, suspense_count, suspense_amount, needs_review, pending, credit_held, payers, duplicate_references, unknown_stk_pushes, unprocessed_callbacks, inactive_product_payments]
+          required: [charges_pending, charges_succeeded_today, charges_succeeded_today_amount, charges_needs_review,
+            transactions_needs_review, unmatched_count, unmatched_amount, pending_transactions, unknown_stk_pushes,
+            unprocessed_callbacks, inactive_app_payments]
           properties:
-            open_requests: { type: integer }
-            outstanding: { type: integer }
-            suspense_count: { type: integer }
-            suspense_amount: { type: integer }
-            needs_review: { type: integer }
-            pending: { type: integer }
-            credit_held: { type: integer }
-            payers: { type: integer }
-            duplicate_references:
-              type: integer
-              description: Live requests reopened by a reversal while a newer live request had the same reference; staff should resolve them.
+            charges_pending: { type: integer }
+            charges_succeeded_today: { type: integer, description: Charges that succeeded since midnight Nairobi time }
+            charges_succeeded_today_amount: { type: integer, description: KES }
+            charges_needs_review: { type: integer }
+            transactions_needs_review: { type: integer, description: M-Pesa payments staff must confirm or fail }
+            unmatched_count: { type: integer, description: Succeeded incoming payments with no app (unknown prefix) }
+            unmatched_amount: { type: integer, description: KES }
+            pending_transactions: { type: integer }
             unknown_stk_pushes:
               type: integer
               description: STK pushes a status check reported as paid but no receipt arrived; their transactions are in needs_review until staff enter the receipt.
             unprocessed_callbacks:
               type: integer
               description: Safaricom callbacks still unprocessed 5 minutes after arrival, plus callbacks whose processing recorded an error in the last 7 days.
-            inactive_product_payments:
+            inactive_app_payments:
               type: integer
-              description: Successful incoming payments in the last 30 days for a product that is not active or a payer account that is closed. The money was applied as normal; staff should follow up.
+              description: Successful incoming payments in the last 30 days for an app that is not active. The money was recorded and forwarded as normal; staff should follow up.
         timezone: { type: string }
         generated_at: { type: string, format: date-time }
     Integrity:
       type: object
-      required: [audit_chain_ok, ledger_ok, drift, checked_at]
+      required: [audit_chain_ok, checked_at]
       properties:
         audit_chain_ok: { type: boolean }
         first_bad_audit_id: { type: integer }
-        ledger_ok: { type: boolean }
-        drift:
-          type: array
-          items:
-            type: object
-            required: [kind, id, cached, actual]
-            properties:
-              kind: { type: string }
-              id: { type: string, format: uuid }
-              cached: { type: integer }
-              actual: { type: integer }
         checked_at: { type: string, format: date-time }

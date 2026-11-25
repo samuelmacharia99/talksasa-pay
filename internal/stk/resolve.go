@@ -21,7 +21,7 @@ import (
 type ResolveParams struct {
 	TransactionID uuid.UUID
 	// Confirm with the receipt from the M-Pesa portal (marks it succeeded
-	// and allocates it), or Fail (no money arrived).
+	// and pays its charge), or Fail (no money arrived).
 	Confirm bool
 	Receipt string
 	Reason  string
@@ -39,7 +39,7 @@ var ErrAmountMismatchConfirm = fmt.Errorf("%w: the amount Safaricom reported dif
 // Only an incoming M-Pesa payment in needs_review can be resolved. Confirm
 // needs the receipt (normalised to upper case, 1-64 letters/digits) and it
 // must not be on another transaction; the transaction becomes succeeded, is
-// allocated (if matched to a payer) and its STK push succeeds. Fail marks
+// applied to its charge and its STK push succeeds. Fail marks
 // the transaction failed and its push failed.
 func (s *Service) Resolve(ctx context.Context, actor audit.Actor, p ResolveParams) (store.Transaction, error) {
 	if err := actor.Validate(); err != nil {
@@ -102,10 +102,10 @@ func (s *Service) Resolve(ctx context.Context, actor audit.Actor, p ResolveParam
 				}
 				return err
 			}
-			if out.PayerAccountID != nil {
-				if _, err := s.o.Alloc.AllocateTransaction(ctx, q, actor, out.ID); err != nil {
-					return err
-				}
+			// TODO(gateway-core): staff confirm pays the charge (rule 5);
+			// on fail, a needs_review charge goes back to pending.
+			if err := s.payCharge(ctx, q, out); err != nil {
+				return err
 			}
 			if push != nil {
 				switch push.Status {
@@ -129,7 +129,7 @@ func (s *Service) Resolve(ctx context.Context, actor audit.Actor, p ResolveParam
 					if err != nil {
 						return fmt.Errorf("stk: fail push: %w", err)
 					}
-					if err := s.o.Events.EmitSTKPush(ctx, q, pushed.ProductID, pushed.ID, events.STKPushFailed); err != nil {
+					if err := s.o.Events.EmitSTKPush(ctx, q, pushed.AppID, pushed.ID, events.STKPushFailed); err != nil {
 						return err
 					}
 				}
@@ -145,7 +145,7 @@ func (s *Service) Resolve(ctx context.Context, actor audit.Actor, p ResolveParam
 		}
 		return audit.Record(ctx, q, audit.Entry{
 			Actor: actor, Action: "transaction.resolved", EntityType: "transaction", EntityID: txn.ID.String(),
-			ProductID: txn.ProductID, Details: details,
+			AppID: txn.AppID, Details: details,
 		})
 	})
 	if err != nil {

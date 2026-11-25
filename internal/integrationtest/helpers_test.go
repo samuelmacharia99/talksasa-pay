@@ -11,22 +11,20 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
-	"github.com/talksasa/talksasa-pay/internal/allocation"
 	"github.com/talksasa/talksasa-pay/internal/apiview"
+	"github.com/talksasa/talksasa-pay/internal/app"
 	"github.com/talksasa/talksasa-pay/internal/audit"
 	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/ledger"
-	"github.com/talksasa/talksasa-pay/internal/money"
-	"github.com/talksasa/talksasa-pay/internal/payer"
-	"github.com/talksasa/talksasa-pay/internal/paymentrequest"
 	"github.com/talksasa/talksasa-pay/internal/platform/crypto"
-	"github.com/talksasa/talksasa-pay/internal/product"
+	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/queue"
 	"github.com/talksasa/talksasa-pay/internal/store"
+	"github.com/talksasa/talksasa-pay/internal/testutil/seed"
 	"github.com/talksasa/talksasa-pay/internal/testutil/testdb"
 )
 
@@ -36,19 +34,19 @@ var (
 )
 
 type env struct {
-	t        *testing.T
-	ctx      context.Context
-	db       *testdb.DB
-	logs     *syncBuffer
-	logger   *slog.Logger
-	keyring  *crypto.Keyring
-	products *product.Service
-	payers   *payer.Service
-	requests *paymentrequest.Service
-	ledger   *ledger.Service
-	alloc    *allocation.Service
-	river    *queue.Client
-	events   *events.Emitter
+	t       *testing.T
+	ctx     context.Context
+	db      *testdb.DB
+	logs    *syncBuffer
+	logger  *slog.Logger
+	keyring *crypto.Keyring
+	apps    *app.Service
+	ledger  *ledger.Service
+	river   *queue.Client
+	events  *events.Emitter
+	// prefixes by app id (seeded charges need the app's prefix).
+	mu       sync.Mutex
+	prefixes map[uuid.UUID]string
 }
 
 func newEnv(t *testing.T) *env {
@@ -69,121 +67,71 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	ev := events.NewEmitter(apiview.View{PayBaseURL: "https://pay.test/", Paybill: "174379"}, queue.NewEnqueuer(rc))
-	alloc := allocation.NewService(logger, ev)
 	return &env{
 		t: t, ctx: context.Background(), db: d, logs: logs, logger: logger, keyring: kr,
-		products: product.NewService(product.Options{
+		apps: app.NewService(app.Options{
 			Pool: d.App, Keyring: kr, APIKeyPepper: []byte(strings.Repeat("p", 40)), AllowHTTPHooks: true, Logger: logger,
 		}),
-		payers:   payer.NewService(d.App, logger),
-		requests: paymentrequest.NewService(d.App, alloc, ev, logger),
-		ledger:   ledger.NewService(d.App, alloc, logger),
-		alloc:    alloc,
+		ledger:   ledger.NewService(d.App, logger),
 		river:    rc,
 		events:   ev,
+		prefixes: map[uuid.UUID]string{},
 	}
 }
 
-func (e *env) product(prefix string) product.Created {
+func (e *env) app(prefix string) app.Created {
 	e.t.Helper()
-	c, err := e.products.Create(e.ctx, operator, product.CreateParams{
-		Name: prefix + " product", AccountPrefix: prefix, WebhookURL: "https://" + strings.ToLower(prefix) + ".example.com/hooks",
+	c, err := e.apps.Create(e.ctx, operator, app.CreateParams{
+		Name: prefix + " app", AccountPrefix: prefix, WebhookURL: "https://" + strings.ToLower(prefix) + ".example.com/hooks",
 	})
 	if err != nil {
-		e.t.Fatalf("create product %s: %v", prefix, err)
+		e.t.Fatalf("create app %s: %v", prefix, err)
 	}
+	e.mu.Lock()
+	e.prefixes[c.App.ID] = prefix
+	e.mu.Unlock()
 	return c
 }
 
-func (e *env) payer(productID uuid.UUID, ref string) payer.Payer {
+// charge seeds a pending charge (store queries; the charge service is not
+// under test here).
+func (e *env) charge(appID uuid.UUID, amount int64) store.Charge {
 	e.t.Helper()
-	p, _, err := e.payers.Upsert(e.ctx, operator, productID, payer.UpsertParams{
-		ExternalRef: ref, DisplayName: "Customer " + ref, Email: "c" + ref + "@example.com", Phones: []string{"0712345678"},
-	})
-	if err != nil {
-		e.t.Fatalf("create payer: %v", err)
-	}
-	return p
-}
-
-var seq atomic.Int64
-
-func (e *env) request(productID, payerID uuid.UUID, amount int64) paymentrequest.Request {
-	e.t.Helper()
-	n := seq.Add(1)
-	c, err := e.requests.Create(e.ctx, audit.Product(productID), productID, paymentrequest.CreateParams{
-		PayerAccountID: payerID, ProductReference: fmt.Sprintf("INV-%d", n), Description: "Invoice",
-		Amount: amount, IdempotencyKey: fmt.Sprintf("idem-%d", n),
-	})
-	if err != nil {
-		e.t.Fatalf("create request: %v", err)
-	}
-	// Distinct created_at ordering even on fast machines.
-	time.Sleep(2 * time.Millisecond)
-	return c.Request
+	e.mu.Lock()
+	prefix := e.prefixes[appID]
+	e.mu.Unlock()
+	return seed.Charge(e.t, e.ctx, e.db.App, appID, prefix, amount, seed.ChargeOpts{})
 }
 
 var receiptSeq atomic.Int64
 
 func newReceipt() string { return fmt.Sprintf("TST%07d", receiptSeq.Add(1)) }
 
-func (e *env) pay(pr payer.Payer, amount money.KES, target *uuid.UUID, receipt string) (ledger.Transaction, allocation.Result) {
+// payCharge records a paybill payment that pays c (no events).
+func (e *env) payCharge(c store.Charge) store.Transaction {
 	e.t.Helper()
-	ch := store.TxnChannelMpesaC2b
-	if target != nil {
-		ch = store.TxnChannelMpesaStk
-	}
-	txn, res, err := e.ledger.RecordAndAllocate(e.ctx, worker, ledger.IncomingPayment{
-		Channel: ch, Receipt: receipt, Amount: amount, Phone: "254712345678", BillRef: pr.AccountNumber,
-		ProductID: &pr.ProductID, PayerAccountID: &pr.ID, PaymentRequestID: target,
-		RawPayload: []byte(`{"TransID":"` + receipt + `"}`),
-	})
-	if err != nil {
-		e.t.Fatalf("pay %d: %v", amount, err)
-	}
-	return txn, res
+	return seed.PayCharge(e.t, e.ctx, e.db.App, c)
 }
 
-func (e *env) reqState(productID, id uuid.UUID) paymentrequest.Request {
+// emitCharge writes a charge event through the outbox.
+func (e *env) emitCharge(appID, chargeID uuid.UUID, typ string) {
 	e.t.Helper()
-	r, err := e.requests.Get(e.ctx, productID, id)
-	if err != nil {
+	if err := db.WithTx(e.ctx, e.db.App, worker.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
+		return e.events.EmitCharge(ctx, q, appID, chargeID, typ)
+	}); err != nil {
 		e.t.Fatal(err)
 	}
-	return r
 }
 
-func (e *env) credit(productID, payerID uuid.UUID) money.KES {
+// assertAuditChain fails the test if the audit hash chain is broken.
+func (e *env) assertAuditChain() {
 	e.t.Helper()
-	p, err := e.payers.Get(e.ctx, productID, payerID)
-	if err != nil {
-		e.t.Fatal(err)
-	}
-	return p.CreditBalance
-}
-
-func (e *env) assertNoDrift() {
-	e.t.Helper()
-	drift, err := store.New(e.db.App).FindBalanceDrift(e.ctx)
-	if err != nil {
-		e.t.Fatal(err)
-	}
-	if len(drift) != 0 {
-		e.t.Fatalf("balance drift: %+v", drift)
-	}
 	bad, err := store.New(e.db.App).VerifyAuditChain(e.ctx)
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	if bad != 0 {
 		e.t.Fatalf("audit chain broken at %d", bad)
-	}
-}
-
-func assertStatus(t *testing.T, r paymentrequest.Request, st allocation.Status, paid money.KES) {
-	t.Helper()
-	if r.Status != st || r.AmountPaid != paid {
-		t.Fatalf("request %s: status=%s paid=%d, want status=%s paid=%d", r.ProductReference, r.Status, r.AmountPaid, st, paid)
 	}
 }
 

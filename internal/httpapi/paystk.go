@@ -14,12 +14,12 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/talksasa/talksasa-pay/internal/apiview"
+	"github.com/talksasa/talksasa-pay/internal/appapi"
 	"github.com/talksasa/talksasa-pay/internal/audit"
 	"github.com/talksasa/talksasa-pay/internal/mpesa"
 	"github.com/talksasa/talksasa-pay/internal/phone"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
-	"github.com/talksasa/talksasa-pay/internal/productapi"
 	"github.com/talksasa/talksasa-pay/internal/reporting"
 	"github.com/talksasa/talksasa-pay/internal/stk"
 	"github.com/talksasa/talksasa-pay/internal/store"
@@ -28,8 +28,8 @@ import (
 // STKService is the part of *stk.Service the public listener uses (an
 // interface so handler tests can use a fake).
 type STKService interface {
-	productapi.STKService
-	LatestForRequest(ctx context.Context, requestID uuid.UUID, since time.Time) (*stk.Push, error)
+	appapi.STKService
+	LatestForCharge(ctx context.Context, chargeID uuid.UUID, since time.Time) (*stk.Push, error)
 	StoreCallback(ctx context.Context, kind stk.CallbackKind, remoteIP netip.Addr, raw []byte) (uuid.UUID, error)
 }
 
@@ -42,18 +42,17 @@ const payPageSTKWindow = 15 * time.Minute
 var payPageActor = audit.System("pay_page")
 
 func stkAvailable(d Deps, p reporting.PayPage) bool {
-	outstanding := p.Amount - p.AmountPaid
-	return d.STK != nil && d.STK.Available() && p.Payable && outstanding > 0 && outstanding <= mpesa.MaxAmount
+	return d.STK != nil && d.STK.Available() && p.Payable && p.Amount <= mpesa.MaxAmount
 }
 
-// latestSTK is the newest prompt for the bill in the last 15 minutes, or
+// latestSTK is the newest prompt for the charge in the last 15 minutes, or
 // nil. A lookup failure is logged and shown as no prompt: the page itself
 // (amount, paybill steps) must still load.
 func latestSTK(d Deps, r *http.Request, p reporting.PayPage) *payPageSTK {
 	if d.STK == nil {
 		return nil
 	}
-	push, err := d.STK.LatestForRequest(r.Context(), p.RequestID, time.Now().Add(-payPageSTKWindow))
+	push, err := d.STK.LatestForCharge(r.Context(), p.ChargeID, time.Now().Add(-payPageSTKWindow))
 	if err != nil {
 		d.Logger.ErrorContext(r.Context(), "pay page: latest stk push lookup failed", slog.String("error", err.Error()))
 		return nil
@@ -85,7 +84,7 @@ const maxPayPageSTKBody = 1 << 10
 
 // payPageSTKPush: POST /public/v1/pay/{token}/stk {phone}. Same 404 rules
 // as GET /pay/{token}; per-IP rate limited (stricter than reads) by the
-// router; the service allows one live prompt per bill. Responses never
+// router; the service allows one live prompt per charge. Responses never
 // carry ids or the phone number.
 func payPageSTKPush(d Deps) http.HandlerFunc {
 	prob := func(w http.ResponseWriter, r *http.Request, status int, code, detail string) {
@@ -100,10 +99,10 @@ func payPageSTKPush(d Deps) http.HandlerFunc {
 		prob(w, r, http.StatusServiceUnavailable, "mpesa_unavailable", "M-Pesa payment prompts are not available right now. Pay by paybill instead.")
 	}
 	notPayable := func(w http.ResponseWriter, r *http.Request) {
-		prob(w, r, http.StatusConflict, "not_payable", "This bill can no longer be paid.")
+		prob(w, r, http.StatusConflict, "not_payable", "This payment can no longer be made.")
 	}
 	tooLarge := func(w http.ResponseWriter, r *http.Request) {
-		prob(w, r, http.StatusConflict, "amount_too_large", "This balance is above the M-Pesa limit of KES 250,000. Pay by paybill instead.")
+		prob(w, r, http.StatusConflict, "amount_too_large", "This amount is above the M-Pesa limit of KES 250,000. Pay by paybill instead.")
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, ok := lookupPayPage(d, w, r)
@@ -123,16 +122,16 @@ func payPageSTKPush(d Deps) http.HandlerFunc {
 			return
 		}
 		// Cheap checks first; the service re-checks under a lock.
-		if !p.Payable || p.Amount-p.AmountPaid <= 0 {
+		if !p.Payable {
 			notPayable(w, r)
 			return
 		}
-		if p.Amount-p.AmountPaid > mpesa.MaxAmount {
+		if p.Amount > mpesa.MaxAmount {
 			tooLarge(w, r)
 			return
 		}
 		push, _, err := d.STK.Send(r.Context(), payPageActor, stk.SendParams{
-			ProductID: p.ProductID, RequestID: p.RequestID, Phone: raw, Source: stk.SourcePayPage,
+			AppID: p.AppID, ChargeID: p.ChargeID, Phone: raw, Source: stk.SourcePayPage,
 		})
 		var inProgress *stk.InProgressError
 		switch {
@@ -147,7 +146,7 @@ func payPageSTKPush(d Deps) http.HandlerFunc {
 		case errors.Is(err, stk.ErrAmountTooLarge):
 			tooLarge(w, r)
 		case errors.As(err, &inProgress):
-			prob(w, r, http.StatusConflict, "stk_in_progress", "A payment prompt was already sent for this bill. Check your phone, or wait a minute and try again.")
+			prob(w, r, http.StatusConflict, "stk_in_progress", "A payment prompt was already sent for this payment. Check your phone, or wait a minute and try again.")
 		case errors.Is(err, phone.ErrInvalid):
 			invalidPhone(w, r)
 		case errors.Is(err, stk.ErrDaraja):

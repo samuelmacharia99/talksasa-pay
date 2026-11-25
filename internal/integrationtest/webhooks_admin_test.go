@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/store"
 )
 
@@ -21,12 +22,14 @@ func TestAdminAPIWebhookDeliveries(t *testing.T) {
 	e := newAPIEnv(t)
 	viewer := e.signIn(e.onboard("whview@talksasa.co.ke", store.AdminRoleViewer)).Token
 	adm := e.signIn(e.onboard("whadmin@talksasa.co.ke", store.AdminRoleAdmin)).Token
-	p := e.product("WHA")
-	other := e.product("WHB")
-	py := e.payer(p.Product.ID, "wh-1")
-	r1 := e.request(p.Product.ID, py.ID, 1000)
-	e.request(p.Product.ID, py.ID, 2000)
-	e.request(other.Product.ID, e.payer(other.Product.ID, "wh-2").ID, 500)
+	p := e.app("WHA")
+	other := e.app("WHB")
+	r1 := e.charge(p.App.ID, 1000)
+	e.emitCharge(p.App.ID, r1.ID, events.ChargeCancelled)
+	r2 := e.charge(p.App.ID, 2000)
+	e.emitCharge(p.App.ID, r2.ID, events.ChargeCancelled)
+	r3 := e.charge(other.App.ID, 500)
+	e.emitCharge(other.App.ID, r3.ID, events.ChargeCancelled)
 
 	var evID string
 	if err := e.db.Owner.QueryRow(e.ctx, `SELECT id::text FROM events WHERE subject_id = $1`, r1.ID).Scan(&evID); err != nil {
@@ -34,23 +37,23 @@ func TestAdminAPIWebhookDeliveries(t *testing.T) {
 	}
 
 	// List: filters and keyset pagination.
-	base := "/admin/v1/webhook-deliveries?product_id=" + p.Product.ID.String()
+	base := "/admin/v1/webhook-deliveries?app_id=" + p.App.ID.String()
 	r := call(e.admin, "GET", base, viewer, nil)
 	if r.code != 200 {
 		t.Fatalf("%d %s", r.code, r.body)
 	}
 	items := r.json(t)["items"].([]any)
 	if len(items) != 2 {
-		t.Fatalf("want 2 deliveries for product, got %d", len(items))
+		t.Fatalf("want 2 deliveries for app, got %d", len(items))
 	}
 	first := items[0].(map[string]any)
-	for _, k := range []string{"event_id", "product_id", "account_prefix", "event_type", "subject_type", "subject_id", "status",
+	for _, k := range []string{"event_id", "app_id", "account_prefix", "event_type", "subject_type", "subject_id", "status",
 		"attempts", "last_attempt_at", "last_status_code", "last_error", "delivered_at", "created_at"} {
 		if _, ok := first[k]; !ok {
 			t.Errorf("delivery JSON lacks %q", k)
 		}
 	}
-	if first["account_prefix"] != "WHA" || first["status"] != "pending" || first["event_type"] != "payment_request.created" {
+	if first["account_prefix"] != "WHA" || first["status"] != "pending" || first["event_type"] != events.ChargeCancelled {
 		t.Fatalf("row: %v", first)
 	}
 	seen := map[string]bool{}
@@ -76,7 +79,7 @@ func TestAdminAPIWebhookDeliveries(t *testing.T) {
 	if n := len(call(e.admin, "GET", "/admin/v1/webhook-deliveries?status=failed", viewer, nil).json(t)["items"].([]any)); n != 0 {
 		t.Fatalf("failed filter: %d", n)
 	}
-	for _, q := range []string{"status=bogus", "cursor=%21%21", "product_id=nope"} {
+	for _, q := range []string{"status=bogus", "cursor=%21%21", "app_id=nope"} {
 		if r := call(e.admin, "GET", "/admin/v1/webhook-deliveries?"+q, viewer, nil); r.code != 400 {
 			t.Errorf("%s: %d %s", q, r.code, r.body)
 		}
@@ -90,7 +93,7 @@ func TestAdminAPIWebhookDeliveries(t *testing.T) {
 	m := r.json(t)
 	ev := m["event"].(map[string]any)
 	if m["delivery"].(map[string]any)["event_id"] != evID || len(m["attempts"].([]any)) != 0 ||
-		ev["id"] != evID || ev["type"] != "payment_request.created" || ev["data"].(map[string]any)["object"] != "payment_request" {
+		ev["id"] != evID || ev["type"] != events.ChargeCancelled || ev["data"].(map[string]any)["object"] != "charge" {
 		t.Fatalf("detail: %s", r.body)
 	}
 	if r := call(e.admin, "GET", "/admin/v1/webhook-deliveries/00000000-0000-7000-8000-000000000000", viewer, nil); r.code != 404 {
@@ -129,7 +132,7 @@ func TestAdminAPIWebhookDeliveries(t *testing.T) {
 	if n := e.count(`SELECT count(*) FROM river_job WHERE args->>'event_id' = $1`, evID); n != jobsBefore+1 {
 		t.Fatalf("jobs: before %d after %d", jobsBefore, n)
 	}
-	if n := e.count(`SELECT count(*) FROM audit_log WHERE action = 'webhook.redelivered' AND entity_id = $1 AND product_id = $2`, evID, p.Product.ID); n != 1 {
+	if n := e.count(`SELECT count(*) FROM audit_log WHERE action = 'webhook.redelivered' AND entity_id = $1 AND app_id = $2`, evID, p.App.ID); n != 1 {
 		t.Fatalf("audit entries: %d", n)
 	}
 	if r := call(e.admin, "POST", redeliver, adm, nil); r.code != http.StatusConflict {
@@ -144,12 +147,12 @@ func TestAdminAPIAllowedIPs(t *testing.T) {
 	e := newAPIEnv(t)
 	viewer := e.signIn(e.onboard("ipview@talksasa.co.ke", store.AdminRoleViewer)).Token
 	adm := e.signIn(e.onboard("ipadmin@talksasa.co.ke", store.AdminRoleAdmin)).Token
-	p := e.product("IPS")
-	k, err := e.products.IssueAPIKey(e.ctx, operator, p.Product.ID, "server", nil)
+	p := e.app("IPS")
+	k, err := e.apps.IssueAPIKey(e.ctx, operator, p.App.ID, "server", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := "/admin/v1/products/" + p.Product.ID.String() + "/api-keys/" + k.Key.KeyID + "/allowed-ips"
+	path := "/admin/v1/apps/" + p.App.ID.String() + "/api-keys/" + k.Key.KeyID + "/allowed-ips"
 
 	if r := call(e.admin, "PUT", path, viewer, map[string]any{"allowed_ips": []string{"203.0.113.4"}}); r.code != http.StatusForbidden {
 		t.Fatalf("viewer: %d", r.code)
@@ -171,7 +174,7 @@ func TestAdminAPIAllowedIPs(t *testing.T) {
 	if len(got) != 3 || got[0] != "203.0.113.4" || got[1] != "10.0.0.0/8" || got[2] != "2001:db8::/32" {
 		t.Fatalf("allowed_ips: %v", got)
 	}
-	list := call(e.admin, "GET", "/admin/v1/products/"+p.Product.ID.String()+"/api-keys", viewer, nil)
+	list := call(e.admin, "GET", "/admin/v1/apps/"+p.App.ID.String()+"/api-keys", viewer, nil)
 	if !strings.Contains(list.body, `"allowed_ips":["203.0.113.4","10.0.0.0/8","2001:db8::/32"]`) {
 		t.Fatalf("list: %s", list.body)
 	}
@@ -186,18 +189,18 @@ func TestAdminAPIAllowedIPs(t *testing.T) {
 		t.Fatalf("audit entries: %d", n)
 	}
 
-	if r := call(e.admin, "PUT", "/admin/v1/products/"+p.Product.ID.String()+"/api-keys/abcdefghijklmnopqrst/allowed-ips", adm,
+	if r := call(e.admin, "PUT", "/admin/v1/apps/"+p.App.ID.String()+"/api-keys/abcdefghijklmnopqrst/allowed-ips", adm,
 		map[string]any{"allowed_ips": nil}); r.code != 404 {
 		t.Fatalf("unknown key: %d", r.code)
 	}
-	if r := call(e.admin, "PUT", "/admin/v1/products/00000000-0000-7000-8000-000000000000/api-keys/"+k.Key.KeyID+"/allowed-ips", adm,
+	if r := call(e.admin, "PUT", "/admin/v1/apps/00000000-0000-7000-8000-000000000000/api-keys/"+k.Key.KeyID+"/allowed-ips", adm,
 		map[string]any{"allowed_ips": nil}); r.code != 404 {
-		t.Fatalf("unknown product: %d", r.code)
+		t.Fatalf("unknown app: %d", r.code)
 	}
-	// Another product's key can't be changed through this product's path.
-	o := e.product("IPT")
-	if r := call(e.admin, "PUT", "/admin/v1/products/"+o.Product.ID.String()+"/api-keys/"+k.Key.KeyID+"/allowed-ips", adm,
+	// Another app's key can't be changed through this app's path.
+	o := e.app("IPT")
+	if r := call(e.admin, "PUT", "/admin/v1/apps/"+o.App.ID.String()+"/api-keys/"+k.Key.KeyID+"/allowed-ips", adm,
 		map[string]any{"allowed_ips": nil}); r.code != 404 {
-		t.Fatalf("cross-product key: %d", r.code)
+		t.Fatalf("cross-app key: %d", r.code)
 	}
 }

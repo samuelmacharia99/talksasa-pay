@@ -101,7 +101,7 @@ func (k *Keyring) Versions() []int {
 func (k *Keyring) ActiveVersion() int { return k.active }
 
 // Seal encrypts plaintext with the active key. aad (additional authenticated
-// data) binds the ciphertext to its context, e.g. "products.webhook_secret:<id>",
+// data) binds the ciphertext to its context, e.g. "apps.webhook_secret:<id>",
 // so a ciphertext copied into another row fails to decrypt.
 // Output layout: nonce || ciphertext+tag.
 func (k *Keyring) Seal(plaintext, aad []byte) (ciphertext []byte, version int, err error) {

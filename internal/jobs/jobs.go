@@ -1,5 +1,5 @@
 // Package jobs is the worker side of the River queue: the maintenance jobs
-// (payment request expiry, webhook attempt retention), the registration of
+// (charge expiry, webhook attempt retention), the registration of
 // every job worker, and the Runner that starts the River client, reports
 // health and shuts down gracefully.
 //
@@ -147,8 +147,8 @@ func Queues(d Deps) map[string]river.QueueConfig {
 func PeriodicJobs(d Deps, expiryEvery time.Duration) []*river.PeriodicJob {
 	jobs := []*river.PeriodicJob{
 		river.NewPeriodicJob(river.PeriodicInterval(expiryEvery),
-			func() (river.JobArgs, *river.InsertOpts) { return queue.ExpireRequestsArgs{}, nil },
-			&river.PeriodicJobOpts{ID: "expire_payment_requests", RunOnStart: true}),
+			func() (river.JobArgs, *river.InsertOpts) { return queue.ExpireChargesArgs{}, nil },
+			&river.PeriodicJobOpts{ID: "expire_charges", RunOnStart: true}),
 		river.NewPeriodicJob(river.PeriodicInterval(RetentionEvery),
 			func() (river.JobArgs, *river.InsertOpts) { return queue.RetentionArgs{}, nil },
 			&river.PeriodicJobOpts{ID: "retention", RunOnStart: true}),

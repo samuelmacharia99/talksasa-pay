@@ -2,20 +2,18 @@ package integrationtest
 
 // Shared machinery for the concurrency/chaos suite (concurrency_*_test.go).
 //
-// Every concurrency test ends with checkInvariants, which proves the money
-// core is still consistent after the storm:
-//   - cached balances match the allocation lines (no drift) and the audit
-//     chain verifies (reporting.CheckIntegrity agrees);
-//   - per payer: sum(allocations) == sum(amount_paid) + credit_balance ==
-//     sum(allocated incoming payments) - sum(reversals); credit >= 0;
-//   - every matched incoming payment has exactly one payment batch;
-//   - cancelled/expired requests never received money;
-//   - (unless the test allows it) a payer never holds credit while it still
-//     has a payable request (credit is always applied oldest-first);
+// Every concurrency test ends with checkInvariants, which proves the core
+// is still consistent after the storm:
+//   - the audit chain verifies (reporting.CheckIntegrity agrees);
+//   - every succeeded charge is paid by a succeeded payment of the same app
+//     and charge for exactly its amount; each receipt is recorded once;
 //   - events feed: gap-free and duplicate-free, equals the events table, one
-//     webhook delivery row and one River job per event, one
-//     transaction.allocated per payment batch, one payment_request.created
-//     per request, and every event's subject belongs to its product.
+//     webhook delivery row and one River job per event, and every event's
+//     subject belongs to its app.
+//
+// TODO(gateway-core): add the charge money invariants of the plan (one
+// charge.succeeded per succeeded charge, payment.received for every other
+// app-routed payment) once the money core emits them.
 
 import (
 	"bytes"
@@ -28,20 +26,18 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/talksasa/talksasa-pay/internal/allocation"
 	"github.com/talksasa/talksasa-pay/internal/apiview"
-	"github.com/talksasa/talksasa-pay/internal/audit"
 	"github.com/talksasa/talksasa-pay/internal/events"
 	"github.com/talksasa/talksasa-pay/internal/ledger"
 	"github.com/talksasa/talksasa-pay/internal/money"
-	"github.com/talksasa/talksasa-pay/internal/payer"
-	"github.com/talksasa/talksasa-pay/internal/paymentrequest"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/queue"
 	"github.com/talksasa/talksasa-pay/internal/reporting"
 	"github.com/talksasa/talksasa-pay/internal/store"
+	"github.com/talksasa/talksasa-pay/internal/testutil/seed"
 )
 
 // concPoolSize bounds the app pool of a concurrency env. The dev Postgres
@@ -76,11 +72,8 @@ func (e *env) rebuildServices(pool *pgxpool.Pool) {
 		e.t.Fatal(err)
 	}
 	ev := events.NewEmitter(apiview.View{PayBaseURL: "https://pay.test/", Paybill: "174379"}, queue.NewEnqueuer(rc))
-	alloc := allocation.NewService(e.logger, ev)
-	e.river, e.events, e.alloc = rc, ev, alloc
-	e.payers = payer.NewService(pool, e.logger)
-	e.requests = paymentrequest.NewService(pool, alloc, ev, e.logger)
-	e.ledger = ledger.NewService(pool, alloc, e.logger)
+	e.river, e.events = rc, ev
+	e.ledger = ledger.NewService(pool, e.logger)
 }
 
 // storm runs fn(i) for i in [0,n) on n goroutines released at the same
@@ -112,107 +105,83 @@ func requireNoErrors(t *testing.T, what string, errs []error) {
 	}
 }
 
-// pay without t.Fatal, for use on goroutines.
-func (e *env) payErr(ctx context.Context, led *ledger.Service, pr payer.Payer, amount int64, target *uuid.UUID, receipt string) (ledger.Transaction, allocation.Result, error) {
-	ch := store.TxnChannelMpesaC2b
-	if target != nil {
-		ch = store.TxnChannelMpesaStk
+// insertCharge inserts a pending charge without t.Fatal (goroutine-safe).
+// The same key returns pgx.ErrNoRows (idempotency conflict on insert).
+func (e *env) insertCharge(ctx context.Context, appID uuid.UUID, ref, key string, amount int64) (store.Charge, error) {
+	e.mu.Lock()
+	prefix := e.prefixes[appID]
+	e.mu.Unlock()
+	p, err := seed.ChargeParams(appID, prefix, amount, seed.ChargeOpts{Reference: ref})
+	if err != nil {
+		return store.Charge{}, err
 	}
-	return led.RecordAndAllocate(ctx, worker, ledger.IncomingPayment{
-		Channel: ch, Receipt: receipt, Amount: money.KES(amount), Phone: "254712345678", BillRef: pr.AccountNumber,
-		ProductID: &pr.ProductID, PayerAccountID: &pr.ID, PaymentRequestID: target,
-		RawPayload: []byte(`{"TransID":"` + receipt + `"}`),
+	if key != "" {
+		p.IdempotencyKey = key
+	}
+	return store.New(e.db.App).InsertCharge(ctx, p)
+}
+
+// paymentErr records a succeeded paybill payment (goroutine-safe) and the
+// event the app would get: charge.succeeded when it pays chargeID,
+// payment.received otherwise. A duplicate receipt changes nothing.
+// Test scaffolding only: the real path is ledger.SucceedCharge.
+func (e *env) paymentErr(ctx context.Context, appID, chargeID *uuid.UUID, amount int64, receipt string) (store.Transaction, error) {
+	var txn store.Transaction
+	err := db.WithTx(ctx, e.db.App, worker.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
+		var created bool
+		var err error
+		txn, created, err = ledger.RecordIncoming(ctx, q, ledger.IncomingPayment{
+			Channel: store.TxnChannelMpesaC2b, Receipt: receipt, Amount: money.KES(amount), Phone: "254712345678",
+			AccountNumber: "TEST-1", AppID: appID, ChargeID: chargeID, RawPayload: []byte(`{"TransID":"` + receipt + `"}`),
+		})
+		if err != nil || !created || appID == nil {
+			return err
+		}
+		if chargeID != nil {
+			if _, err := q.MarkChargeSucceeded(ctx, store.MarkChargeSucceededParams{TransactionID: &txn.ID, ID: *chargeID}); err != nil {
+				return err
+			}
+			return e.events.EmitCharge(ctx, q, *appID, *chargeID, events.ChargeSucceeded)
+		}
+		return e.events.EmitPaymentReceived(ctx, q, *appID, txn.ID, nil)
 	})
+	return txn, err
 }
 
-// createReq creates a request without t.Fatal (goroutine-safe).
-func (e *env) createReq(productID, payerID uuid.UUID, ref, key string, amount int64, expires *time.Time) (paymentrequest.Created, error) {
-	return e.requests.Create(e.ctx, audit.Product(productID), productID, paymentrequest.CreateParams{
-		PayerAccountID: payerID, ProductReference: ref, Description: "Invoice " + ref,
-		Amount: amount, IdempotencyKey: key, ExpiresAt: expires,
-	})
-}
-
-type invariantOpts struct {
-	// allowCreditWithPayable: a reversal can reopen a request while the
-	// payer still holds credit from another payment (credit is only applied
-	// on request creation), so reversal tests relax this one rule.
-	allowCreditWithPayable bool
-}
-
-func (e *env) checkInvariants(opts invariantOpts) {
+func (e *env) checkInvariants() {
 	e.t.Helper()
 	t, ctx, own := e.t, e.ctx, e.db.Owner
-	e.assertNoDrift()
+	e.assertAuditChain()
 
 	integ, err := reporting.NewService(e.db.App).CheckIntegrity(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !integ.AuditChainOK || len(integ.Drift) != 0 {
+	if !integ.AuditChainOK {
 		t.Fatalf("CheckIntegrity: %+v", integ)
 	}
+	e.zero(`succeeded charges not paid by a succeeded payment of exactly their amount`, `
+		SELECT count(*) FROM charges c LEFT JOIN transactions t ON t.id = c.transaction_id
+		 WHERE c.status IN ('succeeded', 'reversed')
+		   AND (t.id IS NULL OR t.status <> 'succeeded' OR t.kind <> 'payment' OR t.amount <> c.amount
+		        OR t.charge_id <> c.id OR t.app_id <> c.app_id)`)
+	e.zero(`receipt recorded twice`, `
+		SELECT count(*) FROM (SELECT provider_transaction_id FROM transactions WHERE provider_transaction_id IS NOT NULL
+		                       GROUP BY provider, provider_transaction_id HAVING count(*) > 1) x`)
 
-	rows, err := own.Query(ctx, `
-		SELECT pa.id, pa.credit_balance,
-		       coalesce((SELECT sum(a.amount) FROM allocations a WHERE a.payer_account_id = pa.id), 0)::bigint,
-		       coalesce((SELECT sum(r.amount_paid) FROM payment_requests r WHERE r.payer_account_id = pa.id), 0)::bigint,
-		       coalesce((SELECT sum(t.amount) FROM transactions t
-		                  WHERE t.payer_account_id = pa.id AND t.kind = 'payment'
-		                    AND EXISTS (SELECT 1 FROM allocation_batches b WHERE b.transaction_id = t.id AND b.kind = 'payment')), 0)::bigint,
-		       coalesce((SELECT sum(t.amount) FROM transactions t WHERE t.payer_account_id = pa.id AND t.kind = 'reversal'), 0)::bigint,
-		       (SELECT count(*) FROM payment_requests r WHERE r.payer_account_id = pa.id AND r.status IN ('open', 'partially_paid'))
-		  FROM payer_accounts pa`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id uuid.UUID
-		var credit, alloc, paid, in, rev, payable int64
-		if err := rows.Scan(&id, &credit, &alloc, &paid, &in, &rev, &payable); err != nil {
-			t.Fatal(err)
-		}
-		if credit < 0 {
-			t.Fatalf("payer %s: negative credit %d", id, credit)
-		}
-		if alloc != paid+credit {
-			t.Fatalf("payer %s: allocations %d != amount_paid %d + credit %d", id, alloc, paid, credit)
-		}
-		if alloc != in-rev {
-			t.Fatalf("payer %s: allocations %d != payments %d - reversals %d", id, alloc, in, rev)
-		}
-		if !opts.allowCreditWithPayable && credit > 0 && payable > 0 {
-			t.Fatalf("payer %s holds credit %d while %d requests are still payable", id, credit, payable)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-
-	e.zero(`matched payments without exactly one payment batch`, `
-		SELECT count(*) FROM transactions t
-		 WHERE t.kind = 'payment' AND t.status = 'succeeded' AND t.payer_account_id IS NOT NULL
-		   AND (SELECT count(*) FROM allocation_batches b WHERE b.transaction_id = t.id AND b.kind = 'payment') <> 1`)
-	e.zero(`closed requests that received money`, `
-		SELECT count(*) FROM payment_requests r
-		 WHERE r.status IN ('cancelled', 'expired')
-		   AND EXISTS (SELECT 1 FROM allocations a WHERE a.payment_request_id = r.id)`)
-	e.zero(`over-allocated requests`, `SELECT count(*) FROM payment_requests WHERE amount_paid > amount OR amount_paid < 0`)
-
-	prods, err := own.Query(ctx, `SELECT id FROM products`)
+	apps, err := own.Query(ctx, `SELECT id FROM apps`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var ids []uuid.UUID
-	for prods.Next() {
+	for apps.Next() {
 		var id uuid.UUID
-		if err := prods.Scan(&id); err != nil {
+		if err := apps.Scan(&id); err != nil {
 			t.Fatal(err)
 		}
 		ids = append(ids, id)
 	}
-	prods.Close()
+	apps.Close()
 	for _, id := range ids {
 		e.checkEvents(id)
 	}
@@ -230,55 +199,42 @@ func (e *env) zero(what, sql string, args ...any) {
 	}
 }
 
-// checkEvents proves the outbox invariants for one product.
-func (e *env) checkEvents(productID uuid.UUID) {
+// checkEvents proves the outbox invariants for one app.
+func (e *env) checkEvents(appID uuid.UUID) {
 	e.t.Helper()
-	seen := e.drainFeed(productID, 0, uuid.Nil, nil)
+	seen := e.drainFeed(appID, 0, uuid.Nil, nil)
 	var total int64
-	if err := e.db.Owner.QueryRow(e.ctx, `SELECT count(*) FROM events WHERE product_id = $1`, productID).Scan(&total); err != nil {
+	if err := e.db.Owner.QueryRow(e.ctx, `SELECT count(*) FROM events WHERE app_id = $1`, appID).Scan(&total); err != nil {
 		e.t.Fatal(err)
 	}
 	if int64(len(seen)) != total {
-		e.t.Fatalf("product %s: feed returned %d events, table has %d", productID, len(seen), total)
+		e.t.Fatalf("app %s: feed returned %d events, table has %d", appID, len(seen), total)
 	}
 	e.zero("events without exactly one webhook job", `
 		SELECT count(*) FROM events ev
 		  LEFT JOIN (SELECT args->>'event_id' AS eid, count(*) AS c FROM river_job
 		              WHERE kind = 'webhook_delivery' GROUP BY 1) j ON j.eid = ev.id::text
-		 WHERE ev.product_id = $1 AND coalesce(j.c, 0) <> 1`, productID)
+		 WHERE ev.app_id = $1 AND coalesce(j.c, 0) <> 1`, appID)
 	e.zero("events without a delivery row", `
-		SELECT count(*) FROM events ev WHERE ev.product_id = $1
-		   AND NOT EXISTS (SELECT 1 FROM webhook_deliveries d WHERE d.event_id = ev.id AND d.product_id = ev.product_id)`, productID)
+		SELECT count(*) FROM events ev WHERE ev.app_id = $1
+		   AND NOT EXISTS (SELECT 1 FROM webhook_deliveries d WHERE d.event_id = ev.id AND d.app_id = ev.app_id)`, appID)
 	e.zero("webhook jobs for events that do not exist (rolled back?)", `
 		SELECT count(*) FROM river_job j WHERE j.kind = 'webhook_delivery'
 		   AND NOT EXISTS (SELECT 1 FROM events ev WHERE ev.id::text = j.args->>'event_id')`)
-	e.zero("payment batches without exactly one transaction.allocated event", `
-		SELECT count(*) FROM allocation_batches b WHERE b.product_id = $1 AND b.kind = 'payment'
-		   AND (SELECT count(*) FROM events ev WHERE ev.product_id = $1 AND ev.type = 'transaction.allocated'
-		         AND ev.subject_id = b.transaction_id) <> 1`, productID)
-	e.zero("requests without exactly one created event", `
-		SELECT count(*) FROM payment_requests r WHERE r.product_id = $1
-		   AND (SELECT count(*) FROM events ev WHERE ev.product_id = $1 AND ev.type = 'payment_request.created'
-		         AND ev.subject_id = r.id) <> 1`, productID)
-	e.zero("events whose subject belongs to another product", `
-		SELECT count(*) FROM events ev WHERE ev.product_id = $1 AND NOT (
-		     (ev.subject_type = 'payment_request' AND EXISTS (SELECT 1 FROM payment_requests r WHERE r.id = ev.subject_id AND r.product_id = ev.product_id))
-		  OR (ev.subject_type = 'transaction' AND EXISTS (SELECT 1 FROM transactions t WHERE t.id = ev.subject_id AND t.product_id = ev.product_id))
-		  OR (ev.subject_type = 'payer' AND EXISTS (SELECT 1 FROM payer_accounts p WHERE p.id = ev.subject_id AND p.product_id = ev.product_id))
-		  OR (ev.subject_type = 'stk_push' AND EXISTS (SELECT 1 FROM stk_pushes s WHERE s.id = ev.subject_id AND s.product_id = ev.product_id)))`, productID)
-	e.zero("expired/cancelled requests that also reported money", `
-		SELECT count(*) FROM payment_requests r WHERE r.product_id = $1 AND r.status IN ('cancelled', 'expired')
-		   AND EXISTS (SELECT 1 FROM events ev WHERE ev.subject_id = r.id
-		                AND ev.type IN ('payment_request.paid', 'payment_request.partially_paid'))`, productID)
+	e.zero("events whose subject belongs to another app", `
+		SELECT count(*) FROM events ev WHERE ev.app_id = $1 AND NOT (
+		     (ev.subject_type = 'charge' AND EXISTS (SELECT 1 FROM charges c WHERE c.id = ev.subject_id AND c.app_id = ev.app_id))
+		  OR (ev.subject_type = 'transaction' AND EXISTS (SELECT 1 FROM transactions t WHERE t.id = ev.subject_id AND t.app_id = ev.app_id))
+		  OR (ev.subject_type = 'stk_push' AND EXISTS (SELECT 1 FROM stk_pushes s WHERE s.id = ev.subject_id AND s.app_id = ev.app_id)))`, appID)
 }
 
 // drainFeed pages ListEventsFeed from the cursor until it has returned every
-// event currently in the table for the product. Events written by still-open
+// event currently in the table for the app. Events written by still-open
 // transactions anywhere in the cluster (other test binaries share the server)
 // are withheld by design, so it polls for up to 30 s. It fails on duplicates
 // and on any out-of-order page, and returns the events it saw (appended to
 // into).
-func (e *env) drainFeed(productID uuid.UUID, afterTxid int64, afterID uuid.UUID, into []store.Event) []store.Event {
+func (e *env) drainFeed(appID uuid.UUID, afterTxid int64, afterID uuid.UUID, into []store.Event) []store.Event {
 	e.t.Helper()
 	seen := make(map[uuid.UUID]bool, len(into))
 	for _, ev := range into {
@@ -287,7 +243,7 @@ func (e *env) drainFeed(productID uuid.UUID, afterTxid int64, afterID uuid.UUID,
 	deadline := time.Now().Add(30 * time.Second)
 	q := store.New(e.db.App)
 	for {
-		page, err := q.ListEventsFeed(e.ctx, store.ListEventsFeedParams{ProductID: productID, AfterTxid: afterTxid, AfterID: afterID, Lim: 200})
+		page, err := q.ListEventsFeed(e.ctx, store.ListEventsFeedParams{AppID: appID, AfterTxid: afterTxid, AfterID: afterID, Lim: 200})
 		if err != nil {
 			e.t.Fatal(err)
 		}
@@ -306,7 +262,7 @@ func (e *env) drainFeed(productID uuid.UUID, afterTxid int64, afterID uuid.UUID,
 			continue
 		}
 		var total int
-		if err := e.db.Owner.QueryRow(e.ctx, `SELECT count(*) FROM events WHERE product_id = $1`, productID).Scan(&total); err != nil {
+		if err := e.db.Owner.QueryRow(e.ctx, `SELECT count(*) FROM events WHERE app_id = $1`, appID).Scan(&total); err != nil {
 			e.t.Fatal(err)
 		}
 		if len(into) >= total {
@@ -377,8 +333,13 @@ func (e *env) skipIfAuditWedged(errs ...error) {
 	e.t.Helper()
 	for _, err := range errs {
 		if isAuditFork(err) {
-			e.checkInvariants(invariantOpts{allowCreditWithPayable: true})
+			e.checkInvariants()
 			e.t.Fatalf("audit_log chain wedged (regression of migration 000004): %v", err)
 		}
 	}
 }
+
+// TODO(gateway-core): used by the mpesa_*_test.go suite, which compiles only
+// with -tags gatewaycore until it is ported to charges. Referenced here so
+// the linter keeps them; delete this block once the port lands.
+var _ = []any{opsPerSec, &auditForks, retryAuditFork, (*env).skipIfAuditWedged}

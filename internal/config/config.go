@@ -114,7 +114,7 @@ type MpesaConfig struct {
 // Enabled reports whether M-Pesa is configured.
 func (m MpesaConfig) Enabled() bool { return m.Env != MpesaOff }
 
-// APIConfig bounds the product integration API (/v1).
+// APIConfig bounds the app integration API (/v1).
 type APIConfig struct {
 	// RatePerKey / BurstPerKey: token bucket per API key (requests/second).
 	RatePerKey  float64

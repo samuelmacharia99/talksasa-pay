@@ -37,14 +37,14 @@ func (f *fakeSTK) Resolve(_ context.Context, actor audit.Actor, p stk.ResolvePar
 	return f.resolveFn(p)
 }
 
-func (f *fakeSTK) ListForRequest(_ context.Context, _ uuid.UUID, limit int) ([]stk.Push, error) {
+func (f *fakeSTK) ListForCharge(_ context.Context, _ uuid.UUID, limit int) ([]stk.Push, error) {
 	f.gotLimit = limit
 	return f.pushes, nil
 }
 
 type fakeReads struct {
 	txns      map[uuid.UUID]reporting.TxnDetail
-	requests  map[uuid.UUID]bool
+	charges   map[uuid.UUID]bool
 	callbacks []store.ListMpesaCallbacksAttentionRow
 	gotFilter reporting.CallbackFilter
 }
@@ -57,11 +57,11 @@ func (f *fakeReads) GetTransaction(_ context.Context, id uuid.UUID) (reporting.T
 	return d, nil
 }
 
-func (f *fakeReads) GetPaymentRequest(_ context.Context, id uuid.UUID) (reporting.RequestDetail, error) {
-	if !f.requests[id] {
-		return reporting.RequestDetail{}, reporting.ErrNotFound
+func (f *fakeReads) GetCharge(_ context.Context, id uuid.UUID) (reporting.ChargeDetail, error) {
+	if !f.charges[id] {
+		return reporting.ChargeDetail{}, reporting.ErrNotFound
 	}
-	return reporting.RequestDetail{}, nil
+	return reporting.ChargeDetail{}, nil
 }
 
 func (f *fakeReads) ListMpesaCallbacks(_ context.Context, cf reporting.CallbackFilter) (reporting.Page[store.ListMpesaCallbacksAttentionRow], error) {
@@ -87,7 +87,7 @@ func mpesaServer(t *testing.T, s STKService, rd reads, role store.AdminRole) (*h
 	})
 	for _, rt := range []Route{
 		{http.MethodPost, "/transactions/{id}/resolve", admin.PermResolvePayments, h.resolveTransaction},
-		{http.MethodGet, "/payment-requests/{id}/stk-pushes", admin.PermRead, h.listSTKPushes},
+		{http.MethodGet, "/charges/{id}/stk-pushes", admin.PermRead, h.listSTKPushes},
 		{http.MethodGet, "/mpesa/callbacks", admin.PermRead, h.listMpesaCallbacks},
 	} {
 		r.With(requirePerm(rt.Perm)).Method(rt.Method, rt.Pattern, rt.handler)
@@ -221,12 +221,12 @@ func TestListSTKPushes(t *testing.T) {
 	checkout := "ws_CO_123"
 	now := time.Now().UTC().Truncate(time.Second)
 	f := &fakeSTK{pushes: []stk.Push{{
-		ID: uuid.New(), PaymentRequestID: reqID, TransactionID: uuid.New(), Source: "pay_page", Phone: "254712345678",
+		ID: uuid.New(), ChargeID: reqID, TransactionID: uuid.New(), Source: "pay_page", Phone: "254712345678",
 		Amount: 1500, CheckoutRequestID: &checkout, Status: store.StkPushStatusUnknown, QueryAttempts: 3, CreatedAt: now,
 	}}}
-	srv, _ := mpesaServer(t, f, &fakeReads{requests: map[uuid.UUID]bool{reqID: true}}, store.AdminRoleViewer)
+	srv, _ := mpesaServer(t, f, &fakeReads{charges: map[uuid.UUID]bool{reqID: true}}, store.AdminRoleViewer)
 
-	code, body := do(t, http.MethodGet, srv.URL+"/payment-requests/"+reqID.String()+"/stk-pushes", "")
+	code, body := do(t, http.MethodGet, srv.URL+"/charges/"+reqID.String()+"/stk-pushes", "")
 	if code != http.StatusOK {
 		t.Fatalf("%d %v", code, body)
 	}
@@ -248,13 +248,13 @@ func TestListSTKPushes(t *testing.T) {
 		t.Fatalf("limit %d", f.gotLimit)
 	}
 
-	if code, _ := do(t, http.MethodGet, srv.URL+"/payment-requests/"+uuid.NewString()+"/stk-pushes", ""); code != http.StatusNotFound {
+	if code, _ := do(t, http.MethodGet, srv.URL+"/charges/"+uuid.NewString()+"/stk-pushes", ""); code != http.StatusNotFound {
 		t.Fatalf("unknown request: %d", code)
 	}
 
 	// M-Pesa off: empty list, not an error.
-	srv2, _ := mpesaServer(t, nil, &fakeReads{requests: map[uuid.UUID]bool{reqID: true}}, store.AdminRoleViewer)
-	code, body = do(t, http.MethodGet, srv2.URL+"/payment-requests/"+reqID.String()+"/stk-pushes", "")
+	srv2, _ := mpesaServer(t, nil, &fakeReads{charges: map[uuid.UUID]bool{reqID: true}}, store.AdminRoleViewer)
+	code, body = do(t, http.MethodGet, srv2.URL+"/charges/"+reqID.String()+"/stk-pushes", "")
 	if code != http.StatusOK || len(body["items"].([]any)) != 0 {
 		t.Fatalf("off: %d %v", code, body)
 	}

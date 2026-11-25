@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -24,15 +23,14 @@ func execFails(t *testing.T, pool *pgxpool.Pool, want, sql string, args ...any) 
 
 func TestLedgerIsAppendOnlyForAppRole(t *testing.T) {
 	e := newEnv(t)
-	p := e.product("HOST").Product
-	pr := e.payer(p.ID, "c1")
-	r := e.request(p.ID, pr.ID, 1000)
-	txn, _ := e.pay(pr, 1500, nil, newReceipt())
+	p := e.app("HOST").App
+	ch := e.charge(p.ID, 1000)
+	txn := e.payCharge(ch)
 	app := e.db.App
 
 	// No DELETE privilege at all for the application role.
 	execFails(t, app, "permission denied", `DELETE FROM transactions WHERE id = $1`, txn.ID)
-	execFails(t, app, "permission denied", `DELETE FROM allocations`)
+	execFails(t, app, "permission denied", `DELETE FROM charges WHERE id = $1`, ch.ID)
 	execFails(t, app, "permission denied", `DELETE FROM audit_log`)
 	execFails(t, app, "permission denied", `TRUNCATE transactions`)
 
@@ -40,91 +38,75 @@ func TestLedgerIsAppendOnlyForAppRole(t *testing.T) {
 	execFails(t, app, "immutable", `UPDATE transactions SET amount = 1 WHERE id = $1`, txn.ID)
 	execFails(t, app, "cannot be changed", `UPDATE transactions SET provider_transaction_id = 'X' WHERE id = $1`, txn.ID)
 	execFails(t, app, "not allowed", `UPDATE transactions SET status = 'pending' WHERE id = $1`, txn.ID)
-	execFails(t, app, "permission denied", `UPDATE allocations SET amount = 1`)
-	execFails(t, app, "immutable", `UPDATE payment_requests SET amount = 1 WHERE id = $1`, r.ID)
-	execFails(t, app, "only change through allocations", `UPDATE payment_requests SET amount_paid = 0 WHERE id = $1`, r.ID)
-	execFails(t, app, "only change through allocations", `UPDATE payer_accounts SET credit_balance = 999999 WHERE id = $1`, pr.ID)
-	execFails(t, app, "immutable", `UPDATE payer_accounts SET account_number = 'HOST-1' WHERE id = $1`, pr.ID)
+	execFails(t, app, "immutable", `UPDATE charges SET amount = 1 WHERE id = $1`, ch.ID)
+	execFails(t, app, "immutable", `UPDATE charges SET reference = 'other' WHERE id = $1`, ch.ID)
+	execFails(t, app, "immutable", `UPDATE charges SET account_number = 'HOST-1', account_number_norm = 'HOST1' WHERE id = $1`, ch.ID)
+	execFails(t, app, "set once", `UPDATE charges SET transaction_id = NULL, succeeded_at = NULL, status = 'pending' WHERE id = $1`, ch.ID)
+	execFails(t, app, "not allowed", `UPDATE charges SET status = 'pending' WHERE id = $1`, ch.ID)
+}
 
-	// Setting the internal flag by hand does not bypass the guard: the
-	// trigger-depth check cannot be faked from a client session.
-	err := pgx.BeginFunc(e.ctx, app, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(e.ctx, `SELECT set_config('talksasa.allocating', 'on', true)`); err != nil {
-			return err
+// A charge succeeds only by pointing at a succeeded, receipted payment of the
+// same app and charge for exactly its amount (charges_guard).
+func TestChargeSucceedsOnlyWithItsExactPayment(t *testing.T) {
+	e := newEnv(t)
+	p := e.app("HOST").App
+	paid := e.charge(p.ID, 1000)
+	txn := e.payCharge(paid)
+	other := e.charge(p.ID, 1000)
+	small := e.charge(p.ID, 999)
+
+	for _, c := range []struct {
+		name   string
+		charge uuid.UUID
+		txn    uuid.UUID
+	}{
+		{"another charge's payment", other.ID, txn.ID},
+		{"wrong amount", small.ID, txn.ID},
+		{"no transaction", other.ID, uuid.Must(uuid.NewV7())},
+	} {
+		_, err := e.db.App.Exec(e.ctx, `UPDATE charges SET status = 'succeeded', transaction_id = $2, succeeded_at = now() WHERE id = $1`, c.charge, c.txn)
+		if err == nil {
+			t.Fatalf("%s: charge succeeded", c.name)
 		}
-		_, err := tx.Exec(e.ctx, `UPDATE payer_accounts SET credit_balance = 999999 WHERE id = $1`, pr.ID)
-		return err
-	})
-	if err == nil || !strings.Contains(err.Error(), "only change through allocations") {
-		t.Fatalf("guard bypassed with GUC: %v", err)
 	}
+	// A pending (unreceipted) STK payment cannot succeed a charge either.
+	if _, err := e.db.App.Exec(e.ctx, `INSERT INTO transactions (id, app_id, charge_id, direction, kind, channel, provider, status, amount)
+		VALUES ($1, $2, $3, 'in', 'payment', 'mpesa_stk', 'mpesa', 'pending', 1000)`, uuid.Must(uuid.NewV7()), p.ID, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	execFails(t, e.db.App, "can only be paid", `UPDATE charges SET status = 'succeeded', succeeded_at = now(),
+		transaction_id = (SELECT id FROM transactions WHERE charge_id = $1 AND status = 'pending') WHERE id = $1`, other.ID)
+
+	// A reversal must undo a succeeded payment of the same app and charge,
+	// for its full amount; a charge is reversed only after that.
+	execFails(t, e.db.App, "reversed only after", `UPDATE charges SET status = 'reversed' WHERE id = $1`, paid.ID)
+	execFails(t, e.db.App, "full amount", `INSERT INTO transactions (id, app_id, charge_id, direction, kind, channel, provider, status,
+		amount, reverses_transaction_id, reason, created_by, completed_at)
+		VALUES ($1, $2, $3, 'out', 'reversal', 'mpesa_c2b', 'mpesa', 'succeeded', 999, $4, 'customer refund', 'admin:x', now())`,
+		uuid.Must(uuid.NewV7()), p.ID, paid.ID, txn.ID)
 }
 
 func TestLedgerIsAppendOnlyEvenForOwner(t *testing.T) {
 	e := newEnv(t)
-	p := e.product("HOST").Product
-	pr := e.payer(p.ID, "c1")
-	txn, _ := e.pay(pr, 500, nil, newReceipt())
+	p := e.app("HOST").App
+	ch := e.charge(p.ID, 500)
+	txn := e.payCharge(ch)
 	owner := e.db.Owner
 
 	execFails(t, owner, "cannot be deleted", `DELETE FROM transactions WHERE id = $1`, txn.ID)
 	execFails(t, owner, "cannot be truncated", `TRUNCATE transactions CASCADE`)
 	execFails(t, owner, "immutable", `UPDATE transactions SET amount = 1 WHERE id = $1`, txn.ID)
-	execFails(t, owner, "cannot be deleted", `DELETE FROM allocations`)
-	execFails(t, owner, "append-only", `UPDATE allocation_batches SET expected_total = 1`)
+	execFails(t, owner, "cannot be deleted", `DELETE FROM charges`)
+	execFails(t, owner, "immutable", `UPDATE charges SET amount = 1 WHERE id = $1`, ch.ID)
 	execFails(t, owner, "append-only", `UPDATE audit_log SET actor_id = 'someone-else'`)
-	execFails(t, owner, "cannot be deleted", `DELETE FROM payer_accounts`)
-}
-
-func TestUnbalancedBatchRejectedAtCommit(t *testing.T) {
-	e := newEnv(t)
-	p := e.product("HOST").Product
-	pr := e.payer(p.ID, "c1")
-	// Pay 1000 against a 300 request (700 becomes credit), then open a 5000
-	// request that auto-consumes the 700. Finally try to write a credit
-	// application whose lines do not net to zero: money from nothing.
-	e.request(p.ID, pr.ID, 300)
-	e.pay(pr, 1000, nil, newReceipt())
-	r := e.request(p.ID, pr.ID, 5000)
-
-	err := pgx.BeginFunc(e.ctx, e.db.App, func(tx pgx.Tx) error {
-		b := uuid.Must(uuid.NewV7())
-		if _, err := tx.Exec(e.ctx, `INSERT INTO allocation_batches (id, product_id, payer_account_id, kind, payment_request_id, expected_total, created_by)
-			VALUES ($1, $2, $3, 'credit_application', $4, 0, 'attacker')`, b, p.ID, pr.ID, r.ID); err != nil {
-			return err
-		}
-		_, err := tx.Exec(e.ctx, `INSERT INTO allocations (batch_id, line_no, product_id, payer_account_id, payment_request_id, amount)
-			VALUES ($1, 1, $2, $3, $4, 100)`, b, p.ID, pr.ID, r.ID)
-		return err
-	})
-	if err == nil || !strings.Contains(err.Error(), "unbalanced") {
-		t.Fatalf("unbalanced batch committed: %v", err)
-	}
-	assertStatus(t, e.reqState(p.ID, r.ID), "partially_paid", 700)
-	e.assertNoDrift()
-}
-
-func TestPaymentBatchMustMatchTransactionAmount(t *testing.T) {
-	e := newEnv(t)
-	p := e.product("HOST").Product
-	pr := e.payer(p.ID, "c1")
-	// Record without allocating: insert an unmatched-then-matched style txn directly.
-	txnID := uuid.Must(uuid.NewV7())
-	if _, err := e.db.App.Exec(e.ctx, `INSERT INTO transactions (id, product_id, direction, kind, channel, provider, status, amount,
-		provider_transaction_id, payer_account_id, completed_at) VALUES ($1,$2,'in','payment','mpesa_c2b','mpesa','succeeded',100,'RCPT1',$3,now())`,
-		txnID, p.ID, pr.ID); err != nil {
-		t.Fatal(err)
-	}
-	execFails(t, e.db.App, "exactly the incoming payment amount",
-		`INSERT INTO allocation_batches (id, product_id, payer_account_id, kind, transaction_id, expected_total, created_by)
-		 VALUES ($1, $2, $3, 'payment', $4, 1000000, 'attacker')`, uuid.Must(uuid.NewV7()), p.ID, pr.ID, txnID)
+	execFails(t, owner, "cannot be deleted", `DELETE FROM apps`)
 }
 
 func TestAuditChainDetectsTampering(t *testing.T) {
 	e := newEnv(t)
-	e.product("HOST")
-	e.product("BILL")
-	e.assertNoDrift() // chain verifies
+	e.app("HOST")
+	e.app("BILL")
+	e.assertAuditChain() // chain verifies
 
 	// Simulate a superuser editing history behind the triggers' back.
 	if _, err := e.db.Owner.Exec(e.ctx, `ALTER TABLE audit_log DISABLE TRIGGER audit_log_no_update`); err != nil {
@@ -144,9 +126,11 @@ func TestAuditChainDetectsTampering(t *testing.T) {
 
 func TestTransactionEventsRecordActor(t *testing.T) {
 	e := newEnv(t)
-	p := e.product("HOST").Product
-	pr := e.payer(p.ID, "c1")
-	txn, _ := e.pay(pr, 100, nil, newReceipt())
+	p := e.app("HOST").App
+	txn, err := e.paymentErr(e.ctx, &p.ID, nil, 100, newReceipt())
+	if err != nil {
+		t.Fatal(err)
+	}
 	var actor, to string
 	if err := e.db.App.QueryRow(e.ctx, `SELECT actor, to_status::text FROM transaction_events WHERE transaction_id = $1`, txn.ID).Scan(&actor, &to); err != nil {
 		t.Fatal(err)
@@ -158,8 +142,8 @@ func TestTransactionEventsRecordActor(t *testing.T) {
 
 func TestSecretsNotStoredInPlaintext(t *testing.T) {
 	e := newEnv(t)
-	c := e.product("HOST")
-	k, err := e.products.IssueAPIKey(e.ctx, operator, c.Product.ID, "ci", nil)
+	c := e.app("HOST")
+	k, err := e.apps.IssueAPIKey(e.ctx, operator, c.App.ID, "ci", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,8 +151,8 @@ func TestSecretsNotStoredInPlaintext(t *testing.T) {
 
 	var dump string
 	if err := e.db.Owner.QueryRow(e.ctx, `SELECT
-		(SELECT string_agg(encode(webhook_secret_ciphertext, 'escape'), '') FROM products) ||
-		(SELECT string_agg(row_to_json(k)::text, '') FROM product_api_keys k) ||
+		(SELECT string_agg(encode(webhook_secret_ciphertext, 'escape'), '') FROM apps) ||
+		(SELECT string_agg(row_to_json(k)::text, '') FROM app_api_keys k) ||
 		(SELECT string_agg(row_to_json(a)::text, '') FROM audit_log a)`).Scan(&dump); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +162,7 @@ func TestSecretsNotStoredInPlaintext(t *testing.T) {
 	if strings.Contains(e.logs.String(), c.WebhookSecret) || strings.Contains(e.logs.String(), secretPart) {
 		t.Fatal("a secret was found in the logs")
 	}
-	got, err := e.products.WebhookSecret(e.ctx, c.Product.ID)
+	got, err := e.apps.WebhookSecret(e.ctx, c.App.ID)
 	if err != nil || string(got) != c.WebhookSecret {
 		t.Fatalf("decrypt webhook secret: %v", err)
 	}

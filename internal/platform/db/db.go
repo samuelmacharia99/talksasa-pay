@@ -1,7 +1,7 @@
 // Package db owns the PostgreSQL connection pool, the transaction helper and
 // error classification. All writes that touch money go through WithTx, which
 // runs at READ COMMITTED with explicit row locks (SELECT ... FOR UPDATE) taken
-// in a fixed order: transaction -> payer -> payment requests.
+// in a fixed order: stk push -> transaction -> charge.
 package db
 
 import (
@@ -108,7 +108,7 @@ const (
 )
 
 // WithTx runs fn in a READ COMMITTED transaction and commits if fn returns
-// nil. actor ("cli:alice", "system:c2b-worker", "product:<id>") is recorded
+// nil. actor ("cli:alice", "system:c2b-worker", "app:<id>") is recorded
 // by triggers on every ledger status change in this transaction.
 //
 // If the transaction fails with serialization_failure (40001) or

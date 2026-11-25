@@ -6,10 +6,10 @@
 
 -- name: InsertPendingSTKTransaction :one
 -- The ledger row an STK push will complete. No receipt yet.
-INSERT INTO transactions (id, product_id, direction, kind, channel, provider, status, amount,
-                          phone, bill_ref, payer_account_id, payment_request_id)
-VALUES (@id, @product_id, 'in', 'payment', 'mpesa_stk', 'mpesa', 'pending', @amount,
-        @phone, @bill_ref, @payer_account_id, @payment_request_id)
+INSERT INTO transactions (id, app_id, charge_id, direction, kind, channel, provider, status, amount,
+                          phone, account_number)
+VALUES (@id, @app_id, @charge_id, 'in', 'payment', 'mpesa_stk', 'mpesa', 'pending', @amount,
+        @phone, @account_number)
 RETURNING *;
 
 -- name: SetTransactionProviderRequest :exec
@@ -56,17 +56,17 @@ RETURNING *;
 -- ---------------------------------------------------------------------------
 
 -- name: InsertSTKPush :one
-INSERT INTO stk_pushes (id, product_id, payment_request_id, transaction_id, source, phone, amount,
+INSERT INTO stk_pushes (id, app_id, charge_id, transaction_id, source, phone, amount,
                         idempotency_key, request_hash, next_query_at)
-VALUES (@id, @product_id, @payment_request_id, @transaction_id, @source, @phone, @amount,
+VALUES (@id, @app_id, @charge_id, @transaction_id, @source, @phone, @amount,
         sqlc.narg(idempotency_key), sqlc.narg(request_hash), @next_query_at)
 RETURNING *;
 
 -- name: GetSTKPushByIdempotencyKey :one
-SELECT * FROM stk_pushes WHERE product_id = @product_id AND idempotency_key = @idempotency_key;
+SELECT * FROM stk_pushes WHERE app_id = @app_id AND idempotency_key = @idempotency_key;
 
--- name: GetSTKPushForProduct :one
-SELECT * FROM stk_pushes WHERE product_id = @product_id AND id = @id;
+-- name: GetSTKPushForApp :one
+SELECT * FROM stk_pushes WHERE app_id = @app_id AND id = @id;
 
 -- name: GetSTKPushInternal :one
 SELECT * FROM stk_pushes WHERE id = @id;
@@ -77,11 +77,8 @@ SELECT * FROM stk_pushes WHERE id = @id FOR NO KEY UPDATE;
 -- name: LockSTKPushByCheckout :one
 SELECT * FROM stk_pushes WHERE checkout_request_id = @checkout_request_id FOR NO KEY UPDATE;
 
--- name: GetLiveSTKPushForRequest :one
-SELECT * FROM stk_pushes WHERE payment_request_id = @payment_request_id AND status IN ('initiating', 'sent');
-
--- name: ListSTKPushesForRequest :many
-SELECT * FROM stk_pushes WHERE payment_request_id = @payment_request_id ORDER BY created_at DESC LIMIT @lim;
+-- name: GetLiveSTKPushForCharge :one
+SELECT * FROM stk_pushes WHERE charge_id = @charge_id AND status IN ('initiating', 'sent');
 
 -- name: MarkSTKPushSent :one
 UPDATE stk_pushes
