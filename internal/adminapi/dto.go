@@ -224,6 +224,7 @@ type txnDetailJSON struct {
 	OccurredAt            *time.Time      `json:"occurred_at"`
 	UpdatedAt             time.Time       `json:"updated_at"`
 	AppName               *string         `json:"app_name"`
+	AppStatus             *string         `json:"app_status"` // null = unmatched
 	RawPayload            json.RawMessage `json:"raw_payload"`
 	Events                []txnEventJSON  `json:"events"`
 }
@@ -239,6 +240,10 @@ func toTxnDetail(d reporting.TxnDetail) txnDetailJSON {
 		ProviderRequestID: t.ProviderRequestID, ReversesTransactionID: t.ReversesTransactionID, FailureCode: t.FailureCode,
 		Reason: t.Reason, CreatedBy: t.CreatedBy, OccurredAt: t.OccurredAt, UpdatedAt: t.UpdatedAt, AppName: t.AppName,
 		RawPayload: redactPayload(t.RawPayload), Events: []txnEventJSON{},
+	}
+	if t.AppStatus.Valid {
+		st := string(t.AppStatus.AppStatus)
+		out.AppStatus = &st
 	}
 	for _, e := range d.Events {
 		var from *string

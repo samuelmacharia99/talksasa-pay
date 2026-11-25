@@ -46,6 +46,9 @@ type Deps struct {
 	// pushes (*stk.Service). nil: resolve answers 503 mpesa_unavailable and
 	// push lists are empty.
 	STK STKService
+	// Ledger assigns unmatched payments to apps and records reversals
+	// (*ledger.Service). nil: both answer 503 ledger_unavailable.
+	Ledger LedgerService
 }
 
 // Route is one authenticated admin route and the permission it requires.
@@ -58,8 +61,10 @@ type Route struct {
 
 type handlers struct {
 	d Deps
-	// rd overrides d.Reporting for the M-Pesa screens (tests).
+	// rd overrides d.Reporting for the M-Pesa and transaction screens (tests).
 	rd reads
+	// ap overrides d.Apps for app lookups (tests).
+	ap appGetter
 }
 
 func (h *handlers) reads() reads {

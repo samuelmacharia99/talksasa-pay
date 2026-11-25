@@ -27,9 +27,15 @@ the audit log.
   app list
   app set-webhook --app ID|PREFIX --url URL --actor NAME
   app rotate-webhook-secret --app ID|PREFIX --actor NAME
+  app set-status   --app ID|PREFIX --status active|suspended --actor NAME
   key issue        --app ID|PREFIX --label LABEL [--expires YYYY-MM-DD] --actor NAME
   key list         --app ID|PREFIX
   key revoke       --app ID|PREFIX --key-id KEYID --actor NAME
+  txn assign       --txn ID --app ID|PREFIX --reason TEXT --actor NAME
+                   route an unmatched payment (unknown prefix) to an app
+  txn reverse      --txn ID --reason TEXT [--receipt RECEIPT] --actor NAME
+                   record a reversal (the M-Pesa reversal receipt is required
+                   for M-Pesa payments); the app gets transaction.reversed
   user invite      --email EMAIL --name NAME --role viewer|finance|approver|admin --actor NAME
   user list
   user reset       --email EMAIL --actor NAME   (lost 2FA / re-onboard: new setup link)
@@ -37,7 +43,7 @@ the audit log.
   audit verify     check the audit log hash chain
   mpesa register-urls --actor NAME   register the paybill's C2B callback URLs with Safaricom
   mpesa status     M-Pesa configuration (no secrets) and STK/callback counts to watch
-  seed demo        --actor NAME   development only: demo apps (and, later, charges and payments)
+  seed demo        --actor NAME   development only: demo apps, charges and payments
 `
 
 func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -65,6 +71,10 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	actorName := fs.String("actor", "", "your name, recorded in the audit log")
 	email := fs.String("email", "", "staff email")
 	role := fs.String("role", "", "staff role: viewer, finance, approver or admin")
+	status := fs.String("status", "", "app status: active or suspended")
+	txnRef := fs.String("txn", "", "transaction id")
+	reason := fs.String("reason", "", "why (recorded in the audit log)")
+	receipt := fs.String("receipt", "", "M-Pesa reversal receipt")
 	if err := fs.Parse(args); err != nil {
 		return usageError{adminUsage}
 	}
@@ -137,6 +147,37 @@ func runAdmin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		}
 		printSecretOnce(stdout, "New webhook signing secret for "+p.AccountPrefix, secret)
 		return nil
+
+	case "app set-status":
+		if err := needActor(); err != nil {
+			return err
+		}
+		st := store.AppStatus(*status)
+		if !st.Valid() {
+			return usageError{"--status must be active or suspended"}
+		}
+		p, err := a.apps.Resolve(ctx, *appRef)
+		if err != nil {
+			return err
+		}
+		p, err = a.apps.SetStatus(ctx, actor, p.ID, st)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "App %s is now %s\n", p.AccountPrefix, p.Status)
+		return nil
+
+	case "txn assign":
+		if err := needActor(); err != nil {
+			return err
+		}
+		return txnAssign(ctx, a, actor, *txnRef, *appRef, *reason, stdout)
+
+	case "txn reverse":
+		if err := needActor(); err != nil {
+			return err
+		}
+		return txnReverse(ctx, a, actor, *txnRef, *reason, *receipt, stdout)
 
 	case "key issue":
 		if err := needActor(); err != nil {

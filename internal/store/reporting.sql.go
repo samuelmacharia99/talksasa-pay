@@ -194,7 +194,7 @@ func (q *Queries) GetChargeAdmin(ctx context.Context, id uuid.UUID) (GetChargeAd
 }
 
 const getTransactionAdmin = `-- name: GetTransactionAdmin :one
-SELECT t.id, t.app_id, t.charge_id, t.direction, t.kind, t.channel, t.provider, t.status, t.amount, t.currency, t.provider_transaction_id, t.provider_request_id, t.phone, t.account_number, t.reverses_transaction_id, t.failure_code, t.failure_reason, t.reason, t.created_by, t.raw_payload, t.occurred_at, t.created_at, t.updated_at, t.completed_at, a.account_prefix, a.name AS app_name, c.reference AS charge_reference
+SELECT t.id, t.app_id, t.charge_id, t.direction, t.kind, t.channel, t.provider, t.status, t.amount, t.currency, t.provider_transaction_id, t.provider_request_id, t.phone, t.account_number, t.reverses_transaction_id, t.failure_code, t.failure_reason, t.reason, t.created_by, t.raw_payload, t.occurred_at, t.created_at, t.updated_at, t.completed_at, a.account_prefix, a.name AS app_name, a.status AS app_status, c.reference AS charge_reference
   FROM transactions t
   LEFT JOIN apps a ON a.id = t.app_id
   LEFT JOIN charges c ON c.id = t.charge_id
@@ -228,6 +228,7 @@ type GetTransactionAdminRow struct {
 	CompletedAt           *time.Time
 	AccountPrefix         *string
 	AppName               *string
+	AppStatus             NullAppStatus
 	ChargeReference       *string
 }
 
@@ -261,6 +262,7 @@ func (q *Queries) GetTransactionAdmin(ctx context.Context, id uuid.UUID) (GetTra
 		&i.CompletedAt,
 		&i.AccountPrefix,
 		&i.AppName,
+		&i.AppStatus,
 		&i.ChargeReference,
 	)
 	return i, err

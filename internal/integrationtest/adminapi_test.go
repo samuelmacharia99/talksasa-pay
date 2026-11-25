@@ -38,6 +38,10 @@ func newAPIEnv(t *testing.T) *apiEnv {
 		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
 		AuthLimiter:    httpx.NewRateLimiter(6000, 6000), // tests exercise auth many times
 	}
+	// TODO(gateway-core): `Ledger: a.ledger` once ledger.Service.AssignToApp lands.
+	if l, ok := any(a.ledger).(adminapi.LedgerService); ok {
+		deps.Ledger = l
+	}
 	return &apiEnv{
 		adminEnv: a, deps: deps, admin: adminapi.NewRouter(deps),
 		pub: httpapi.NewRouter(httpapi.Deps{Logger: a.logger, Pool: a.db.App, Apps: a.apps, Reporting: rep,
@@ -108,9 +112,7 @@ func TestAdminAPIEveryRouteRequiresSessionAndPermission(t *testing.T) {
 			if !allowed && r.code != http.StatusForbidden {
 				t.Errorf("%s %s as %s: got %d, want 403", rt.Method, rt.Pattern, role, r.code)
 			}
-			// TODO(gateway-core): drop the 501 exemption once assign and reverse land.
-			if allowed && (r.code == http.StatusForbidden || r.code == http.StatusUnauthorized ||
-				(r.code >= 500 && r.code != http.StatusNotImplemented)) {
+			if allowed && (r.code == http.StatusForbidden || r.code == http.StatusUnauthorized || r.code >= 500) {
 				t.Errorf("%s %s as %s: got %d (%s)", rt.Method, rt.Pattern, role, r.code, r.body)
 			}
 		}

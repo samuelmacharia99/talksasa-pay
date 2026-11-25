@@ -878,7 +878,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/Transaction"
         - type: object
-          required: [provider_request_id, reverses_transaction_id, failure_code, reason, created_by, occurred_at, updated_at, app_name, raw_payload, events]
+          required: [provider_request_id, reverses_transaction_id, failure_code, reason, created_by, occurred_at, updated_at, app_name, app_status, raw_payload, events]
           properties:
             provider_request_id: { type: [string, "null"] }
             reverses_transaction_id: { type: [string, "null"], format: uuid }
@@ -888,6 +888,7 @@ components:
             occurred_at: { type: [string, "null"], format: date-time }
             updated_at: { type: string, format: date-time }
             app_name: { type: [string, "null"] }
+            app_status: { type: [string, "null"], enum: [active, suspended, null], description: "The app's status (null = unmatched); payments for a suspended app are still recorded and forwarded" }
             raw_payload: { description: Provider payload with phones masked }
             events:
               type: array
