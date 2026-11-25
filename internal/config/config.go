@@ -692,7 +692,11 @@ func (l *loader) secret(name string, env Environment, required bool) Secret {
 		}
 		return NewSecret(strings.TrimSpace(direct))
 	case required:
-		l.fail(name, fmt.Errorf("required (set %s)", fileVar))
+		if l.envSecrets {
+			l.fail(name, fmt.Errorf("required (set %s or %s)", name, fileVar))
+		} else {
+			l.fail(name, fmt.Errorf("required (set %s)", fileVar))
+		}
 	}
 	return Secret{}
 }
