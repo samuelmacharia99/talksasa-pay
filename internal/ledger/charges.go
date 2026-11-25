@@ -46,7 +46,7 @@ var (
 // ErrNotImplemented is kept for callers written against the gateway-core
 // stubs; nothing returns it any more.
 //
-// Deprecated: every ledger operation is implemented.
+// Callers may drop it: every ledger operation is implemented.
 var ErrNotImplemented = errors.New("ledger: not implemented yet (gateway-core)")
 
 // SucceedResult says what SucceedCharge did with a payment.

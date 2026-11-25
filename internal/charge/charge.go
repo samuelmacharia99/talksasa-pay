@@ -83,7 +83,7 @@ var (
 // ErrNotImplemented reported the gateway-core stub sentinel. Every method
 // is implemented now, so it is always false; kept for existing callers.
 //
-// Deprecated: nothing returns a not-implemented error any more.
+// Callers may drop it: nothing returns a not-implemented error any more.
 func ErrNotImplemented(error) bool { return false }
 
 // Charge is a stored charge.

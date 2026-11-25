@@ -597,7 +597,7 @@ components:
             stk_push.* -> STKPush; payment.received -> PaymentReceived;
             transaction.reversed -> Transaction (the reversal transaction;
             its reverses_transaction_id names the payment, its charge_id the
-            charge that is now reversed).
+            charge the payment named, now reversed if that payment paid it).
           oneOf:
             - $ref: "#/components/schemas/Charge"
             - $ref: "#/components/schemas/STKPush"
