@@ -168,3 +168,23 @@ func TestDatabaseSessionTimeoutsAndDrainDelay(t *testing.T) {
 		}
 	}
 }
+
+func TestWebhookAllowLoopbackDevelopmentOnly(t *testing.T) {
+	dev := map[string]string{"TSP_DATABASE_URL": "postgres://u:p@h/db?sslmode=disable", "TSP_MASTER_KEYS": "1:x",
+		"TSP_API_KEY_PEPPER": pepper, "TSP_WEBHOOK_ALLOW_LOOPBACK": "true"}
+	cfg, err := Load(src(dev, nil, 0o600))
+	if err != nil || !cfg.Worker.WebhookAllowLoopback {
+		t.Fatalf("development: %v %+v", err, cfg)
+	}
+	dev["TSP_WEBHOOK_ALLOW_LOOPBACK"] = "maybe"
+	if _, err := Load(src(dev, nil, 0o600)); err == nil || !strings.Contains(err.Error(), "TSP_WEBHOOK_ALLOW_LOOPBACK") {
+		t.Fatalf("bad bool accepted: %v", err)
+	}
+	files := map[string]string{"/s/db": "postgres://u:p@h/db?sslmode=require", "/s/k": "1:x", "/s/p": pepper}
+	staging := map[string]string{"TSP_ENV": "staging", "TSP_DATABASE_URL_FILE": "/s/db", "TSP_MASTER_KEYS_FILE": "/s/k",
+		"TSP_API_KEY_PEPPER_FILE": "/s/p", "TSP_PAY_BASE_URL": "https://pay.example/", "TSP_ADMIN_SETUP_BASE_URL": "https://a.example/setup/",
+		"TSP_WEBHOOK_ALLOW_LOOPBACK": "true"}
+	if _, err := Load(src(staging, files, 0o600)); err == nil || !strings.Contains(err.Error(), "TSP_WEBHOOK_ALLOW_LOOPBACK: only allowed in development") {
+		t.Fatalf("loopback webhooks accepted in staging: %v", err)
+	}
+}

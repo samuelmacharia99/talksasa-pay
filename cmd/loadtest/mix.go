@@ -18,9 +18,13 @@ const (
 	opCancel = "cancel" // POST /payment-requests/{id}/cancel
 	opTxns   = "txns"   // GET /transactions (one page)
 	opWhoami = "whoami" // GET /whoami
+	// M-Pesa (needs M-Pesa on; c2b needs -fake-daraja). Never against a
+	// real Daraja: prompts would go to real phones.
+	opSTK = "stk" // POST /payment-requests (bill) + POST /payment-requests/{id}/stk-push
+	opC2B = "c2b" // a paybill payment injected into the fake Daraja (same payers)
 )
 
-var knownOps = []string{opUpsert, opCreate, opGet, opList, opEvents, opCancel, opTxns, opWhoami}
+var knownOps = []string{opUpsert, opCreate, opGet, opList, opEvents, opCancel, opTxns, opWhoami, opSTK, opC2B}
 
 const defaultMix = "upsert=20,create=30,get=30,list=10,events=10"
 

@@ -34,7 +34,9 @@ func runWorker(ctx context.Context, logw io.Writer) error {
 	}
 	// Webhook delivery: SSRF-safe client (no private/internal addresses, no
 	// redirects); loopback is never allowed outside tests.
-	hc, err := webhook.NewHTTPClient(webhook.ClientOptions{Env: a.cfg.Env, Timeout: a.cfg.Worker.WebhookTimeout})
+	hc, err := webhook.NewHTTPClient(webhook.ClientOptions{
+		Env: a.cfg.Env, Timeout: a.cfg.Worker.WebhookTimeout, AllowLoopback: a.cfg.Worker.WebhookAllowLoopback,
+	})
 	if err != nil {
 		return err
 	}
