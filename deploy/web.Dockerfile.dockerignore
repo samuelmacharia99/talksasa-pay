@@ -1,0 +1,16 @@
+# Context for deploy/web.Dockerfile (the repository root): only the pnpm
+# workspace files and web/. BuildKit uses this instead of .dockerignore.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!.npmrc
+!web
+web/e2e
+**/node_modules
+**/.next
+**/coverage
+**/playwright-report
+**/test-results
+**/*.tsbuildinfo
+**/.env*

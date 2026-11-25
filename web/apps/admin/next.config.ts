@@ -2,8 +2,9 @@ import path from "node:path";
 
 import type { NextConfig } from "next";
 
-// Monorepo root: the standalone build must trace the workspace packages.
-const root = path.join(import.meta.dirname, "../..");
+// Workspace root (the repository root, where node_modules is): the
+// standalone build must trace the workspace packages.
+const root = path.join(import.meta.dirname, "../../..");
 
 const config: NextConfig = {
   output: "standalone",

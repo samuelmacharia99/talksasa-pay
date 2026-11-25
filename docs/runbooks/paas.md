@@ -56,9 +56,59 @@ Optional: `TSP_DATABASE_URL` / `TSP_MIGRATE_DATABASE_URL` (override
 `DATABASE_URL`), `TSP_LOG_LEVEL` (`info`), `TSP_DB_MAX_CONNS` (20; `serve`
 opens two pools, so allow 2x in the database's connection limit).
 
+## API + admin panel on one service (Talksasa Cloud split mode)
+
+Talksasa Cloud can run this repository as a Go backend plus one Next.js
+frontend behind one hostname. Redeploy dialog:
+
+| Field | Value |
+|---|---|
+| Frontend | Next.js |
+| API directory | `.` |
+| Frontend directory | `web/apps/admin` |
+
+How it fits together:
+
+- Public traffic hits the platform's edge proxy. Paths under `/api/` (and
+  `/health*`) go to the Go service, everything else to the admin panel.
+  The Go service answers every route under `/api` as well as at the root,
+  so apps call `https://<host>/api/v1/...`, Safaricom calls
+  `https://<host>/api/cb/mpesa/...`, and the platform's readiness probe
+  `/api/health` is `/readyz`.
+- The backend and frontend are separate containers. The admin panel
+  reaches the Go admin listener at `http://backend:8089`, so the listener
+  must bind all interfaces in its container (`TSP_ADMIN_ADDR`). The edge
+  only forwards to port 8000, so 8089 is not public; it is reachable only
+  from the service's own containers.
+- The frontend is built with Node 22 from the pnpm workspace at the
+  repository root (`pnpm install` there, then `pnpm --dir web/apps/admin
+  run build`) and started with `next start`.
+- The platform sets `PORT` itself (8000 for the backend, 3000 for the
+  frontend); a `PORT` you set is overridden.
+- Both containers get the same environment variables.
+- The split mode may skip the Procfile `release:` line, so
+  `scripts/paas-start.sh` runs `migrate up` before `serve` as well.
+
+Environment variables, in addition to the required ones above:
+
+| Variable | Value |
+|---|---|
+| `TSP_ADMIN_ADDR` | `0.0.0.0:8089` |
+| `TSP_ADMIN_API_URL` | `http://backend:8089/admin/v1` |
+| `TSP_ADMIN_SETUP_BASE_URL` | `https://<host>/setup/` |
+| `TSP_MPESA_CALLBACK_BASE_URL` | `https://<host>/api/` |
+
+Limits of this layout:
+
+- The checkout page (`web/apps/pay`) is not deployed; each charge's
+  `checkout_url` (`TSP_PAY_BASE_URL`) needs a second service for it.
+- The Go service sees every staff request as coming from the frontend
+  container, so the per-IP sign-in rate limit is shared by all staff, and
+  audit entries record that address instead of the staff member's.
+
 ## Not covered by this single service
 
-- The admin panel (`web/apps/admin`) and checkout page (`web/apps/pay`) are
+- Without the split mode above, the admin panel (`web/apps/admin`) and checkout page (`web/apps/pay`) are
   separate Next.js services. The admin panel talks to the Go admin listener
   (`127.0.0.1:8089`), so it must run next to the API or the listener must
   be reachable privately; never expose it publicly.

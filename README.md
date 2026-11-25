@@ -25,7 +25,7 @@ nothing about the apps' customers or invoices
 | 7–8 | Security review, go-live, manual test plan | |
 
 ## Quick start (development)
-Requires Docker and Node 24 (for pnpm via corepack). Go runs in a pinned
+Requires Docker and Node 22 or newer (for pnpm via corepack; the pnpm workspace root is the repository root, the web code is under `web/`). Go runs in a pinned
 container via `scripts/go.sh`.
 ```sh
 make up                          # postgres, migrations, api :8088, admin :3001, checkout pages :3000

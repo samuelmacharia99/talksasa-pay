@@ -214,8 +214,8 @@ services:
   admin:
     <<: *web
     build:
-      context: ./web
-      dockerfile: ../deploy/web.Dockerfile
+      context: .
+      dockerfile: deploy/web.Dockerfile
       args: { APP: admin }
     image: talksasa-pay-admin:dev
     environment:
@@ -237,8 +237,8 @@ services:
   pay:
     <<: *web
     build:
-      context: ./web
-      dockerfile: ../deploy/web.Dockerfile
+      context: .
+      dockerfile: deploy/web.Dockerfile
       args: { APP: pay }
     image: talksasa-pay-page:dev
     environment:

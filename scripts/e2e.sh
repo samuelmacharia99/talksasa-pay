@@ -107,5 +107,5 @@ docker run --rm --network host --ipc host -u "$(id -u):$(id -g)" -e HOME=/tmp \
   -e E2E_MPESA_CONSUMER_SECRET="$(cat deploy/dev-secrets/mpesa_consumer_secret)" \
   -e E2E_MPESA_PASSKEY="$(cat deploy/dev-secrets/mpesa_passkey)" \
   -e E2E_MPESA_CALLBACK_TOKEN="$(cat deploy/dev-secrets/mpesa_callback_token)" \
-  -v "$PWD/web:/web" -w /web/e2e "$PW_IMAGE" \
+  -v "$PWD:/repo" -w /repo/web/e2e "$PW_IMAGE" \
   ./node_modules/.bin/playwright test "$@"

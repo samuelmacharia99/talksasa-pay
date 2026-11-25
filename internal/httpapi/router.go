@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -89,8 +90,40 @@ const (
 // shows: secret tokens in the path are replaced with [redacted].
 var logPath = httpx.RedactSegments("/cb/mpesa/*", "/cb/**", "/public/v1/pay/*")
 
-// NewRouter builds the public API handler.
+// NewRouter builds the public API handler. Every route is also served
+// under /api (see withAPIPrefix).
 func NewRouter(d Deps) http.Handler {
+	return withAPIPrefix(newRoutes(d))
+}
+
+// APIPrefix is the path prefix some hosts route to this service (a gateway
+// that sends /api/* to the backend and everything else to a web app). The
+// path is passed through, so /api/v1/charges is /v1/charges here, and
+// /api/health (the host's readiness probe) is /readyz.
+const APIPrefix = "/api"
+
+func withAPIPrefix(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if p != APIPrefix && !strings.HasPrefix(p, APIPrefix+"/") {
+			h.ServeHTTP(w, r)
+			return
+		}
+		rest := strings.TrimPrefix(p, APIPrefix)
+		if rest == "/health" {
+			rest = "/readyz"
+		}
+		if rest == "" {
+			rest = "/"
+		}
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = rest
+		r2.URL.RawPath = ""
+		h.ServeHTTP(w, r2)
+	})
+}
+
+func newRoutes(d Deps) http.Handler {
 	if d.PayLimiter == nil {
 		d.PayLimiter = httpx.NewRateLimiter(60, 30)
 	}

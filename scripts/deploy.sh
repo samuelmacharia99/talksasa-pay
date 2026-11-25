@@ -172,8 +172,8 @@ preflight() {
 build_images() {
   say "building images $VERSION ($PLATFORM)"
   docker build --platform "$PLATFORM" -f deploy/Dockerfile --build-arg VERSION="$VERSION" -t "talksasa-pay:$VERSION" .
-  docker build --platform "$PLATFORM" -f deploy/web.Dockerfile --build-arg APP=admin -t "talksasa-pay-admin:$VERSION" web
-  docker build --platform "$PLATFORM" -f deploy/web.Dockerfile --build-arg APP=pay -t "talksasa-pay-page:$VERSION" web
+  docker build --platform "$PLATFORM" -f deploy/web.Dockerfile --build-arg APP=admin -t "talksasa-pay-admin:$VERSION" .
+  docker build --platform "$PLATFORM" -f deploy/web.Dockerfile --build-arg APP=pay -t "talksasa-pay-page:$VERSION" .
 }
 
 ship() {

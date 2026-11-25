@@ -52,9 +52,6 @@ jobs:
 
   web:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
     env:
       COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
       NEXT_TELEMETRY_DISABLED: "1"
@@ -70,4 +67,4 @@ jobs:
       - run: pnpm -r typecheck
       - run: pnpm -r lint
       - run: pnpm -r test
-      - run: pnpm -r --filter './apps/*' build
+      - run: pnpm -r --filter './web/apps/*' build

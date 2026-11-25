@@ -82,7 +82,7 @@ verify: ## everything: Go tests, lint, vuln scan, web checks, smoke, browser and
 	$(MAKE) e2e
 	$(MAKE) e2e-mpesa
 
-PNPM := cd web && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 NEXT_TELEMETRY_DISABLED=1 corepack pnpm
+PNPM := COREPACK_ENABLE_DOWNLOAD_PROMPT=0 NEXT_TELEMETRY_DISABLED=1 corepack pnpm
 
 web-install: ## install frontend dependencies (pnpm via corepack)
 	$(PNPM) install --frozen-lockfile
@@ -97,7 +97,7 @@ web-check: web-install ## frontend: generated types current, typecheck, lint, un
 	$(PNPM) -r test
 
 web-build: ## production builds of the admin and pay apps
-	$(PNPM) -r --filter './apps/*' build
+	$(PNPM) -r --filter './web/apps/*' build
 
 e2e: ## browser end-to-end tests against the Docker stack (Playwright container)
 	./scripts/e2e.sh
