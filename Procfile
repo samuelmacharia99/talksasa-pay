@@ -1,1 +1,2 @@
-web: go build -buildvcs=false -trimpath -o /tmp/tsp ./cmd/talksasa-pay && /tmp/tsp migrate up && exec /tmp/tsp serve
+release: go run -buildvcs=false ./cmd/talksasa-pay migrate up
+web: sh scripts/paas-start.sh

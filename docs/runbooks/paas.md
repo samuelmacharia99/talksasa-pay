@@ -8,11 +8,15 @@ They set plain environment variables only and route traffic to `$PORT`.
 The repository root `Procfile`:
 
 ```
-web: go build -buildvcs=false -trimpath -o /tmp/tsp ./cmd/talksasa-pay && /tmp/tsp migrate up && exec /tmp/tsp serve
+release: go run -buildvcs=false ./cmd/talksasa-pay migrate up
+web: sh scripts/paas-start.sh
 ```
 
-- `migrate up` runs on every boot. With nothing to apply it logs
-  `schema already up to date` and exits 0.
+- `release` applies migrations before each new version starts. With nothing
+  to apply it logs `schema already up to date` and exits 0.
+- `web` runs `scripts/paas-start.sh`, which builds the binary to `/tmp/tsp`
+  and then `exec`s `/tmp/tsp serve`, so the platform's stop signal reaches
+  the service directly. (The platform accepts one command per line.)
 - `serve` runs the API **and** the worker in one process. The worker
   processes M-Pesa callbacks, status checks, webhooks and charge expiry;
   without it payments would be accepted but never processed.
