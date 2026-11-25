@@ -11,7 +11,7 @@ import { docHref, GUIDES, REFERENCE, slugify } from "./developer-docs";
 const haveSources = existsSync(path.join(REPO_ROOT as string, "docs/api/README.md"));
 
 describe.skipIf(!haveSources)("developer docs module", () => {
-  it("matches docs/api and api/product.openapi.yaml (run pnpm --filter @talksasa/admin gen:docs)", () => {
+  it("matches docs/api and api/app.openapi.yaml (run pnpm --filter @talksasa/admin gen:docs)", () => {
     expect(readFileSync(OUTPUT as string, "utf8")).toBe((build as () => string)());
   });
 });
@@ -42,7 +42,7 @@ describe("developer docs", () => {
     expect(docHref("stk-push.md")).toBe("/developers/stk-push");
     expect(docHref("laravel.md#pay-invoice-button")).toBe("/developers/laravel#pay-invoice-button");
     expect(docHref("README.md")).toBe("/developers");
-    expect(docHref("../../api/product.openapi.yaml")).toBe("/developers/reference");
+    expect(docHref("../../api/app.openapi.yaml")).toBe("/developers/reference");
     expect(docHref("https://www.rfc-editor.org/rfc/rfc9457")).toBe("https://www.rfc-editor.org/rfc/rfc9457");
     expect(docHref("../runbooks/mpesa.md#development-the-fake-daraja")).toBeNull();
   });

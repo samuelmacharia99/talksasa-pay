@@ -16,7 +16,7 @@ export const log = pino({
   level: env.TSP_LOG_LEVEL,
   base: { service: "talksasa-pay-page" },
   timestamp: pino.stdTimeFunctions.isoTime,
-  // Payment-link tokens are bearer secrets for the bill and phone numbers
+  // Payment-link tokens are bearer secrets for the charge and phone numbers
   // are personal data: never log them.
   redact: { paths: ["*.token", "*.cookie", "*.authorization", "*.phone"], censor: "[REDACTED]" },
 });
@@ -33,12 +33,12 @@ async function forwardOptions(): Promise<PublicClientOptions> {
   };
 }
 
-/** Looks up the bill behind a payment link. */
+/** Looks up the charge behind a payment link. */
 export async function getPayPage(token: string): Promise<PayPageResult> {
   return fetchPayPage(await forwardOptions(), token);
 }
 
-/** Sends an M-Pesa payment prompt for the bill. Throws ApiError when the Go service refuses. */
+/** Sends an M-Pesa payment prompt for the charge. Throws ApiError when the Go service refuses. */
 export async function sendStk(token: string, phone: string): Promise<PayPageSTK> {
   return sendPayPageSTK(await forwardOptions(), token, phone);
 }

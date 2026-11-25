@@ -60,7 +60,7 @@ describe("stkView", () => {
     }
   });
 
-  it("says received on success (the bill itself flips to paid on refresh)", () => {
+  it("says received on success (the charge itself flips to paid on refresh)", () => {
     expect(stkView({ status: "succeeded", message: null }).kind).toBe("received");
   });
 
@@ -96,7 +96,7 @@ describe("sendErrorOutcome", () => {
     }
   });
 
-  it("reloads when the bill changed", () => {
+  it("reloads when the charge changed", () => {
     expect(sendErrorOutcome(409, "not_payable")).toMatchObject({ refresh: true });
     expect(sendErrorOutcome(404, "not_found")).toMatchObject({ refresh: true });
   });

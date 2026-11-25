@@ -29,7 +29,7 @@ export function ResolvePanel({ id, amountLabel, phone }: { id: string; amountLab
         ) : (
           <> ({amountLabel})</>
         )}
-        . If it is there, confirm it with its receipt: the money is then applied to the bill. If it is not, mark it as not paid.
+        . If it is there, confirm it with its receipt: the charge then succeeds and the app is told. If it is not, mark it as not paid.
       </p>
       {action === null ? (
         <div className="flex flex-wrap gap-2">
@@ -55,7 +55,7 @@ function ResolveForm({ id, action, amountLabel, onCancel }: { id: string; action
   if (state?.ok) {
     return (
       <p role="status" className="text-sm text-ok">
-        {action === "confirm" ? "Confirmed. The payment is recorded and applied to the bill." : "Marked as not paid."}
+        {action === "confirm" ? "Confirmed. The payment is recorded and the app is told." : "Marked as not paid."}
       </p>
     );
   }
@@ -119,11 +119,11 @@ function ResolveForm({ id, action, amountLabel, onCancel }: { id: string; action
           <p className="text-sm text-ink">
             {confirm ? (
               <>
-                Record receipt <span className="font-mono font-medium">{normalizeReceipt(receipt)}</span> for {amountLabel} and apply it
-                to the bill? This cannot be undone here.
+                Record receipt <span className="font-mono font-medium">{normalizeReceipt(receipt)}</span> for {amountLabel}? The charge
+                succeeds and the app is told. This cannot be undone here.
               </>
             ) : (
-              <>Mark this {amountLabel} prompt as not paid? The bill stays unpaid and the customer can pay again.</>
+              <>Mark this {amountLabel} prompt as not paid? The charge goes back to pending and the customer can pay again.</>
             )}
           </p>
           <div className="flex flex-wrap gap-2">

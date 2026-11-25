@@ -2,7 +2,7 @@ import { Wordmark } from "@talksasa/ui";
 import type { ReactNode } from "react";
 
 /**
- * The bill as a paper slip: the brand tail across the top, a perforation
+ * The charge as a paper slip: the brand tail across the top, a perforation
  * between "what you owe" and "how to pay". The one bold element on the page.
  */
 export function Slip({ top, bottom }: { top: ReactNode; bottom?: ReactNode }) {
@@ -26,7 +26,7 @@ export function Slip({ top, bottom }: { top: ReactNode; bottom?: ReactNode }) {
         ) : null}
       </article>
       <p className="mt-6 px-1 text-[0.8125rem] leading-relaxed text-muted">
-        Talksasa Home of Creatives Ltd. Keep your M-Pesa confirmation SMS until this page shows the bill as paid.
+        Talksasa Home of Creatives Ltd. Keep your M-Pesa confirmation SMS until this page shows the payment as paid.
       </p>
     </main>
   );

@@ -13,7 +13,7 @@ function answer(status: number, body: Record<string, unknown>) {
 }
 
 /**
- * Sends an M-Pesa payment prompt for the bill behind the link. The browser
+ * Sends an M-Pesa payment prompt for the charge behind the link. The browser
  * only ever talks to this same-origin handler; it forwards to the Go public
  * API server-side, so the page's CSP stays connect-src 'self'.
  *

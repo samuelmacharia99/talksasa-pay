@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { plex, plexMono, sora } from "@/lib/fonts";
 
 export const metadata: Metadata = {
-  title: { default: "Pay your Talksasa bill", template: "%s · Talksasa" },
+  title: { default: "Pay with Talksasa", template: "%s · Talksasa" },
   robots: { index: false, follow: false },
   icons: { icon: "/favicon.ico" },
 };

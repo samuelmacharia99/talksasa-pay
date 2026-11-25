@@ -10,7 +10,7 @@ export default function DevelopersHome() {
   return (
     <GuidePage
       guide={guide}
-      lead="How a Talksasa product connects to Talksasa Pay. Share these guides with the product team; their API key comes from the product's page."
+      lead="How an app connects to Talksasa Pay. Share these guides with the app's developers; their API key comes from the app's page."
       actions={devActions()}
     />
   );

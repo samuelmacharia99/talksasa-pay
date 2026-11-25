@@ -9,7 +9,7 @@ const reference = [
   { href: "/developers/reference#webhook-payload", label: "Webhook payload" },
 ];
 
-/** Developers: the product API guides from docs/api, readable by every staff role. */
+/** Developers: the app API guides from docs/api, readable by every staff role. */
 export default function DevelopersLayout({ children }: { children: ReactNode }) {
   return (
     <div className="lg:grid lg:grid-cols-[200px_minmax(0,1fr)] lg:gap-10">

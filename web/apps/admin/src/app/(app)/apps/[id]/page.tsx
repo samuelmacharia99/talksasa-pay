@@ -8,7 +8,7 @@ import { actorLabel } from "@/lib/labels";
 
 import { AllowedIPs, IssueKeyForm, RevokeKeyButton, RotateSecretForm, StatusForm, WebhookForm } from "../forms";
 
-export const metadata: Metadata = { title: "Product" };
+export const metadata: Metadata = { title: "App" };
 
 function keyState(k: { revoked_at: string | null; expires_at: string | null }): string {
   if (k.revoked_at) return "revoked";
@@ -16,18 +16,18 @@ function keyState(k: { revoked_at: string | null; expires_at: string | null }): 
   return "active";
 }
 
-export default async function ProductPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function AppPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const [p, keys, me] = await Promise.all([
-    load((c) => c.GET("/products/{id}", { params: { path: { id } } })),
-    load((c) => c.GET("/products/{id}/api-keys", { params: { path: { id } } })),
+    load((c) => c.GET("/apps/{id}", { params: { path: { id } } })),
+    load((c) => c.GET("/apps/{id}/api-keys", { params: { path: { id } } })),
     getMe(),
   ]);
-  const canManage = me.permissions.includes("products.manage");
+  const canManage = me.permissions.includes("apps.manage");
   return (
     <>
       <PageHeader
-        back={<Link href="/products" className="text-violet hover:underline">Products</Link>}
+        back={<Link href="/apps" className="text-violet hover:underline">Apps</Link>}
         title={p.name}
         lead={
           <>
@@ -42,20 +42,17 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
             items={[
               ["Account prefix", p.account_prefix],
               ["Created", <DateTime key="c" value={p.created_at} />],
-              ["Product id", <span key="i" className="font-mono text-[0.8125rem]">{p.id}</span>],
+              ["App id", <span key="i" className="font-mono text-[0.8125rem]">{p.id}</span>],
             ]}
           />
           <div className="mt-5 flex flex-wrap gap-4 text-sm">
-            <Link href={`/payers?product_id=${p.id}`} className="text-violet hover:underline">
-              Payers
+            <Link href={`/charges?app_id=${p.id}`} className="text-violet hover:underline">
+              Charges
             </Link>
-            <Link href={`/requests?product_id=${p.id}`} className="text-violet hover:underline">
-              Bills
-            </Link>
-            <Link href={`/transactions?product_id=${p.id}`} className="text-violet hover:underline">
+            <Link href={`/transactions?app_id=${p.id}`} className="text-violet hover:underline">
               Transactions
             </Link>
-            <Link href={`/webhooks?product_id=${p.id}`} className="text-violet hover:underline">
+            <Link href={`/webhooks?app_id=${p.id}`} className="text-violet hover:underline">
               Webhook deliveries
             </Link>
           </div>
@@ -63,7 +60,7 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
 
         <Panel title="API keys" flush>
           {keys.items.length === 0 ? (
-            <Empty title="No keys yet">The product needs a key to create payers and bills.</Empty>
+            <Empty title="No keys yet">The app needs a key to create charges.</Empty>
           ) : (
             <Table label="API keys">
               <thead>

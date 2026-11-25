@@ -150,7 +150,7 @@ export default function ApiReferencePage() {
     <>
       <PageHeader
         title="API reference"
-        lead={`${r.title}, version ${r.version}. Generated from api/product.openapi.yaml; if a guide disagrees, this wins.`}
+        lead={`${r.title}, version ${r.version}. Generated from api/app.openapi.yaml; if a guide disagrees, this wins.`}
         actions={
           <a href="/developers/openapi.yaml" download className={buttonClass("secondary", "sm")}>
             Download OpenAPI
@@ -191,7 +191,7 @@ export default function ApiReferencePage() {
             <h2 id="webhooks-heading" className="font-display text-[1.2rem] font-semibold text-ink">
               Webhooks
             </h2>
-            <p className="text-sm text-muted">Talksasa Pay calls your product&apos;s webhook URL. Your endpoint receives:</p>
+            <p className="text-sm text-muted">Talksasa Pay calls your app&apos;s webhook URL. Your endpoint receives:</p>
             {r.webhooks.map((op, i) => (
               <OperationCard key={op.id} op={{ ...op, path: "your webhook URL" }} base="" anchor={i === 0 ? "webhook-payload" : op.id} />
             ))}

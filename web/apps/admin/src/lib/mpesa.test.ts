@@ -1,6 +1,46 @@
 import { describe, expect, it } from "vitest";
 
-import { callbackState, mpesaAttention, normalizeReceipt, stkResult, stkStatus, validateResolve } from "./mpesa";
+import {
+  callbackState,
+  normalizeReceipt,
+  reverseConfirmWord,
+  stkResult,
+  stkStatus,
+  validateAssign,
+  validateResolve,
+  validateReverse,
+} from "./mpesa";
+
+describe("validateReverse", () => {
+  const ok = { reason: "Bank recall, ticket 4411", receipt: "SRV1ABCD23", receiptRequired: true, confirm: "skl4abcd12", expected: "SKL4ABCD12" };
+
+  it("accepts a complete form, ignoring case in the confirmation", () => {
+    expect(validateReverse(ok)).toEqual({});
+  });
+
+  it("needs the reversal receipt for M-Pesa payments only", () => {
+    expect(validateReverse({ ...ok, receipt: "" }).receipt).toBeDefined();
+    expect(validateReverse({ ...ok, receipt: "", receiptRequired: false })).toEqual({});
+    expect(validateReverse({ ...ok, receipt: "SKL-4ABCD" }).receipt).toBeDefined();
+  });
+
+  it("needs a reason and the exact confirmation", () => {
+    expect(validateReverse({ ...ok, reason: "x" }).reason).toBeDefined();
+    expect(validateReverse({ ...ok, confirm: "SKL4ABCD1" }).confirm).toBe("Type SKL4ABCD12 to confirm.");
+  });
+
+  it("asks for REVERSE when the payment has no receipt", () => {
+    expect(reverseConfirmWord(null)).toBe("REVERSE");
+    expect(reverseConfirmWord("skl4abcd12")).toBe("SKL4ABCD12");
+  });
+});
+
+describe("validateAssign", () => {
+  it("needs an app and a reason", () => {
+    expect(validateAssign({ appId: "", reason: "" })).toEqual({ app_id: expect.any(String), reason: expect.any(String) });
+    expect(validateAssign({ appId: "0193a7a4-1111-7000-8000-000000000001", reason: "Typo in prefix, confirmed" })).toEqual({});
+  });
+});
 
 describe("stkStatus", () => {
   it("labels every prompt status in plain words", () => {
@@ -52,18 +92,3 @@ describe("validateResolve", () => {
   });
 });
 
-describe("mpesaAttention", () => {
-  it("is empty when the counts are absent or zero", () => {
-    expect(mpesaAttention({})).toEqual([]);
-    expect(mpesaAttention({ unknown_stk_pushes: 0, unprocessed_callbacks: 0, inactive_product_payments: 0 })).toEqual([]);
-  });
-
-  it("lists each non-zero count with a link", () => {
-    const items = mpesaAttention({ unknown_stk_pushes: 1, unprocessed_callbacks: 3, inactive_product_payments: 2 });
-    expect(items.map((i) => i.href)).toEqual(["/transactions?status=needs_review&channel=mpesa_stk", "/mpesa/callbacks?unprocessed=true", "/transactions"]);
-    expect(items[0]?.label).toBe("1 payment prompt has no answer");
-    expect(items[1]?.label).toBe("3 M-Pesa callbacks not processed");
-    expect(items[0]?.urgent).toBe(true);
-    expect(items[2]?.urgent).toBe(false);
-  });
-});

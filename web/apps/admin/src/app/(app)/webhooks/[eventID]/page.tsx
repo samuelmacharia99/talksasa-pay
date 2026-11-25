@@ -17,8 +17,8 @@ export default async function WebhookDeliveryPage({ params }: { params: Promise<
     getMe(),
   ]);
   const d = w.delivery;
-  const canManage = me.permissions.includes("products.manage");
-  const href = subjectHref(d.subject_type, d.subject_id);
+  const canManage = me.permissions.includes("apps.manage");
+  const href = subjectHref(d.subject_type, d.subject_id, w.event.data);
   const subject = SUBJECT_LABEL[d.subject_type] ?? d.subject_type;
   // Newest attempt first: that is the one staff usually need.
   const attempts = [...w.attempts].sort((a, b) => b.attempt - a.attempt);
@@ -36,8 +36,8 @@ export default async function WebhookDeliveryPage({ params }: { params: Promise<
           <Facts
             items={[
               [
-                "Product",
-                <Link key="p" href={`/products/${d.product_id}`} className="text-violet hover:underline">
+                "App",
+                <Link key="p" href={`/apps/${d.app_id}`} className="text-violet hover:underline">
                   {d.account_prefix}
                 </Link>,
               ],
@@ -63,7 +63,7 @@ export default async function WebhookDeliveryPage({ params }: { params: Promise<
 
         {canManage && canRedeliver(d.status) ? (
           <Panel title="Redeliver">
-            <RedeliverForm eventID={d.event_id} productLabel={d.account_prefix} />
+            <RedeliverForm eventID={d.event_id} appLabel={d.account_prefix} />
           </Panel>
         ) : null}
 
@@ -106,7 +106,7 @@ export default async function WebhookDeliveryPage({ params }: { params: Promise<
 
         <Panel title="Event body">
           <p className="mb-3 text-[0.8125rem] text-muted">
-            The <span className="font-mono">data</span> the product receives, as it was when the event happened. Created{" "}
+            The <span className="font-mono">data</span> the app receives, as it was when the event happened. Created{" "}
             <DateTime value={w.event.created_at} />.
           </p>
           <pre className="overflow-x-auto rounded-md bg-wash p-4 font-mono text-[0.75rem] leading-relaxed text-ink-2">{prettyJSON(w.event.data)}</pre>
