@@ -36,7 +36,10 @@ type Deps struct {
 	// TrustedProxies may forward the end user's IP (the pay Next.js server).
 	TrustedProxies []netip.Prefix
 	// Paybill is shown on the hosted pay page ("" hides the instructions).
-	Paybill string
+	// PaybillFrom, when set, gives the paybill in effect instead (it
+	// follows the settings saved in the admin panel).
+	Paybill     string
+	PaybillFrom func() string
 	// PayLimiter throttles pay-page lookups per client IP; nil = default.
 	PayLimiter *httpx.RateLimiter
 	// PaySTKLimiter additionally throttles pay-page prompts
@@ -136,7 +139,7 @@ func NewRouter(d Deps) http.Handler {
 
 	// Safaricom callbacks: no app-API auth; the secret path token and
 	// the source-IP allow-list decide. Absent entirely while M-Pesa is off.
-	if d.STK != nil && d.STK.Available() {
+	if mountCallbacks(d) {
 		r.Route("/cb/mpesa/{token}", newCallbacks(d).routes)
 	}
 
@@ -218,8 +221,8 @@ func payPage(d Deps) http.HandlerFunc {
 			STKAvailable: stkAvailable(d, p),
 			STKPush:      latestSTK(d, r, p),
 		}
-		if d.Paybill != "" && p.Payable {
-			out.Paybill = &paybillJSON{BusinessNumber: d.Paybill, AccountNumber: p.AccountNumber}
+		if pb := d.paybill(); pb != "" && p.Payable {
+			out.Paybill = &paybillJSON{BusinessNumber: pb, AccountNumber: p.AccountNumber}
 		}
 		httpx.WriteJSON(w, http.StatusOK, out)
 	}

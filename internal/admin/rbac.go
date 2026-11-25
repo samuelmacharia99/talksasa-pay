@@ -24,10 +24,14 @@ const (
 	// PermReversePayments allows recording a reversal of a succeeded
 	// payment (money rule 9: admin only, with a reason, audited).
 	PermReversePayments Permission = "payments.reverse"
+	// PermManageSettings allows changing the M-Pesa paybill settings
+	// (credentials, environment, callback URL), testing them and
+	// registering the C2B URLs with Safaricom. Admin only; audited.
+	PermManageSettings Permission = "settings.manage"
 )
 
 // AllPermissions lists every permission (used by the RBAC matrix test).
-var AllPermissions = []Permission{PermRead, PermManageApps, PermManageUsers, PermResolvePayments, PermReversePayments}
+var AllPermissions = []Permission{PermRead, PermManageApps, PermManageUsers, PermResolvePayments, PermReversePayments, PermManageSettings}
 
 // rolePermissions is the single source of truth for what each role may do.
 // finance and approver gain money permissions (refund maker / approver,
@@ -38,6 +42,7 @@ var rolePermissions = map[store.AdminRole]map[Permission]bool{
 	store.AdminRoleApprover: {PermRead: true},
 	store.AdminRoleAdmin: {
 		PermRead: true, PermManageApps: true, PermManageUsers: true, PermResolvePayments: true, PermReversePayments: true,
+		PermManageSettings: true,
 	},
 }
 

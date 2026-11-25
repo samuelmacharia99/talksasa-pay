@@ -601,7 +601,7 @@ func (s *Service) processC2B(ctx context.Context, q *store.Queries, cb store.Mpe
 		return outcome{note: "unusable C2B confirmation: " + perr.Error()}, nil
 	}
 	attrs := []any{cbAttr, slog.String("receipt", c.Receipt), slog.Int64("amount", c.Amount), slog.String("bill_ref", c.BillRef)}
-	if s.o.ShortCode != "" && c.ShortCode != s.o.ShortCode {
+	if sc := s.paybillShortCode(); sc != "" && c.ShortCode != sc {
 		// Not our paybill: recording it would put someone else's money in
 		// our ledger. Staff check it.
 		lb.alarm("C2B confirmation for another short code; not recorded", append(attrs, slog.String("short_code", c.ShortCode))...)

@@ -615,6 +615,80 @@ paths:
                 properties:
                   items: { type: array, items: { $ref: "#/components/schemas/AuditEntry" } }
                   next_cursor: { type: string }
+  /settings/mpesa:
+    get:
+      summary: The M-Pesa paybill settings in effect (no secret values) and where they come from
+      description: |
+        `source` is `database` (saved on the Settings page), `environment`
+        (the TSP_MPESA_* fallback while nothing is saved) or `none` (M-Pesa
+        is off). Credentials are write-only: only whether each is set and,
+        for values of 12+ characters, its last 4 characters. Callback URLs
+        show the secret callback token as `[TOKEN]`.
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/MpesaSettings" } } } }
+    put:
+      summary: Save the paybill settings (admin); audited, credentials encrypted
+      description: |
+        Credentials are optional on update: empty or absent keeps the stored
+        value (all three are required the first time). When the saved or the
+        new environment is production, `confirm` must be "production".
+        Saving identical settings changes nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [environment, shortcode, callback_base_url]
+              properties:
+                environment: { type: string, enum: [sandbox, production] }
+                shortcode: { type: string, description: The paybill (5-7 digits) }
+                stk_shortcode: { type: [string, "null"], description: STK push BusinessShortCode; empty or null means the paybill }
+                callback_base_url: { type: string, description: "Public base Safaricom calls, ending in /, e.g. https://api.pay.example.com/" }
+                consumer_key: { type: [string, "null"], writeOnly: true }
+                consumer_secret: { type: [string, "null"], writeOnly: true }
+                passkey: { type: [string, "null"], writeOnly: true }
+                confirm: { type: [string, "null"], description: '"production" to save production settings' }
+      responses:
+        "200": { description: Saved, content: { application/json: { schema: { $ref: "#/components/schemas/MpesaSettings" } } } }
+        "422": { $ref: "#/components/responses/Problem" }
+  /settings/mpesa/test:
+    post:
+      summary: Ask Daraja for an OAuth token with the settings in effect (admin); the token is never returned
+      responses:
+        "200": { description: Tested (ok may be false), content: { application/json: { schema: { $ref: "#/components/schemas/MpesaSettingsTest" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+  /settings/mpesa/register-urls:
+    post:
+      summary: Register the paybill's C2B confirmation and validation URLs with Safaricom (admin); audited
+      description: ResponseType Completed (a payment is never rejected). Production settings need `confirm` "production".
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                confirm: { type: [string, "null"] }
+      responses:
+        "200":
+          description: Registered
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [registered_at, shortcode, confirmation_url, validation_url, response_type]
+                properties:
+                  registered_at: { type: string, format: date-time }
+                  shortcode: { type: string }
+                  confirmation_url: { type: string, description: "Token shown as [TOKEN]" }
+                  validation_url: { type: string }
+                  response_type: { type: string }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "502": { $ref: "#/components/responses/Problem" }
   /users:
     get:
       summary: Staff accounts (admin)
@@ -744,7 +818,7 @@ components:
         email: { type: string }
         name: { type: string }
         role: { $ref: "#/components/schemas/Role" }
-        permissions: { type: array, items: { type: string, enum: [read, apps.manage, users.manage, payments.resolve, payments.reverse] } }
+        permissions: { type: array, items: { type: string, enum: [read, apps.manage, users.manage, payments.resolve, payments.reverse, settings.manage] } }
         expires_at: { type: string, format: date-time }
         idle_expires_at: { type: string, format: date-time }
     User:
@@ -972,3 +1046,66 @@ components:
         audit_chain_ok: { type: boolean }
         first_bad_audit_id: { type: integer }
         checked_at: { type: string, format: date-time }
+    Credential:
+      type: object
+      required: [set, last4]
+      properties:
+        set: { type: boolean }
+        last4: { type: [string, "null"], description: Only for values of 12+ characters }
+    MpesaSettingsTest:
+      type: object
+      required: [ok, tested_at, message]
+      properties:
+        ok: { type: boolean }
+        tested_at: { type: string, format: date-time }
+        message: { type: [string, "null"], description: Why Safaricom refused (never secret) }
+    MpesaSettings:
+      type: object
+      required: [source, environment, shortcode, stk_shortcode, callback_base_url, credentials, callback_token_set, callback_cidrs,
+        callback_urls, version, updated_by, updated_by_name, updated_at, registration, last_test, ready, problem, environments, https_only]
+      properties:
+        source: { type: string, enum: [database, environment, none] }
+        environment: { type: [string, "null"], enum: [sandbox, production, null] }
+        shortcode: { type: [string, "null"] }
+        stk_shortcode: { type: [string, "null"], description: null when STK uses the paybill }
+        callback_base_url: { type: [string, "null"] }
+        credentials:
+          type: object
+          required: [consumer_key, consumer_secret, passkey]
+          properties:
+            consumer_key: { $ref: "#/components/schemas/Credential" }
+            consumer_secret: { $ref: "#/components/schemas/Credential" }
+            passkey: { $ref: "#/components/schemas/Credential" }
+        callback_token_set: { type: boolean, description: TSP_MPESA_CALLBACK_TOKEN (deployment configuration) }
+        callback_cidrs: { type: integer, description: Networks in TSP_MPESA_CALLBACK_CIDRS }
+        callback_urls:
+          type: [object, "null"]
+          required: [stk, confirmation, validation]
+          properties:
+            stk: { type: string }
+            confirmation: { type: string }
+            validation: { type: string }
+        version: { type: integer }
+        updated_by: { type: [string, "null"] }
+        updated_by_name: { type: [string, "null"] }
+        updated_at: { type: [string, "null"], format: date-time }
+        registration:
+          type: [object, "null"]
+          required: [registered_at, registered_by, registered_by_name, confirmation_url, shortcode, current]
+          properties:
+            registered_at: { type: string, format: date-time }
+            registered_by: { type: string }
+            registered_by_name: { type: [string, "null"] }
+            confirmation_url: { type: string }
+            shortcode: { type: string }
+            current: { type: boolean, description: For today's paybill and confirmation URL }
+        last_test:
+          type: [object, "null"]
+          required: [ok, tested_at]
+          properties:
+            ok: { type: boolean }
+            tested_at: { type: string, format: date-time }
+        ready: { type: boolean, description: Prompts can be sent with these settings }
+        problem: { type: [string, "null"] }
+        environments: { type: array, items: { type: string, enum: [sandbox, production] }, description: What this deployment may save }
+        https_only: { type: boolean }

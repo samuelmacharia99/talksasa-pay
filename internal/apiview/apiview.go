@@ -27,6 +27,9 @@ type View struct {
 	PayBaseURL string
 	// Paybill is the Talksasa paybill ("" hides instructions).
 	Paybill string
+	// PaybillFrom, when set, gives the paybill in effect instead (it
+	// follows the settings saved in the admin panel).
+	PaybillFrom func() string
 }
 
 // Paybill is how to pay manually from the M-Pesa menu.
@@ -74,8 +77,8 @@ func (v View) Charge(c store.Charge, latest *store.StkPush) Charge {
 	if len(c.Metadata) == 0 {
 		out.Metadata = json.RawMessage("null")
 	}
-	if v.Paybill != "" && (c.Status == store.ChargeStatusPending || c.Status == store.ChargeStatusNeedsReview) {
-		out.Paybill = &Paybill{BusinessNumber: v.Paybill, AccountNumber: c.AccountNumber}
+	if pb := v.paybill(); pb != "" && (c.Status == store.ChargeStatusPending || c.Status == store.ChargeStatusNeedsReview) {
+		out.Paybill = &Paybill{BusinessNumber: pb, AccountNumber: c.AccountNumber}
 	}
 	if latest != nil {
 		p := STKPushOf(*latest)

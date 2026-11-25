@@ -49,6 +49,9 @@ type Deps struct {
 	// Ledger assigns unmatched payments to apps and records reversals
 	// (*ledger.Service). nil: both answer 503 ledger_unavailable.
 	Ledger LedgerService
+	// MpesaSettings serves the Settings page (the M-Pesa paybill);
+	// *mpesasettings.Service. nil: the settings routes answer 503.
+	MpesaSettings SettingsService
 }
 
 // Route is one authenticated admin route and the permission it requires.
@@ -111,6 +114,11 @@ func Routes(d Deps) []Route {
 		{http.MethodPost, "/transactions/{id}/reverse", admin.PermReversePayments, h.reverseTransaction},
 		{http.MethodGet, "/mpesa/callbacks", admin.PermRead, h.listMpesaCallbacks},
 		{http.MethodGet, "/audit", admin.PermRead, h.listAudit},
+
+		{http.MethodGet, "/settings/mpesa", admin.PermRead, h.getMpesaSettings},
+		{http.MethodPut, "/settings/mpesa", admin.PermManageSettings, h.putMpesaSettings},
+		{http.MethodPost, "/settings/mpesa/test", admin.PermManageSettings, h.testMpesaSettings},
+		{http.MethodPost, "/settings/mpesa/register-urls", admin.PermManageSettings, h.registerMpesaURLs},
 
 		{http.MethodGet, "/users", admin.PermManageUsers, h.listUsers},
 		{http.MethodPost, "/users", admin.PermManageUsers, h.inviteUser},

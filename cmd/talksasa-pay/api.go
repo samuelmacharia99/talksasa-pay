@@ -30,16 +30,13 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 	// ready flips to draining on shutdown, before the listener closes;
 	// /readyz then answers 503 so the proxy stops routing here.
 	ready := &httpx.Readiness{}
-	// httpapi needs a nil interface (not a typed-nil service) when M-Pesa is
-	// off: no STK endpoints, no callback routes.
-	var apiSTK httpapi.STKService
-	if a.stk.Available() {
-		apiSTK = a.stk
-	}
+	// The STK service follows the M-Pesa settings at run time
+	// (Available()); PaybillFrom does the same for the pay page.
+	var apiSTK httpapi.STKService = a.stk
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger: a.logger, Pool: a.pool, Apps: a.apps, Reporting: a.reporting,
 		Metrics: metrics.NewHTTP(reg, "api"), MaxBodyBytes: a.cfg.HTTP.MaxBodyBytes, Version: version,
-		TrustedProxies: a.cfg.TrustedProxies, Paybill: a.cfg.Public.Paybill,
+		TrustedProxies: a.cfg.TrustedProxies, PaybillFrom: a.mpesa.PaybillShortCode,
 		Charges: a.charges, View: a.events.View(),
 		KeyLimiter:        httpx.NewRateLimiterPerSecond(a.cfg.API.RatePerKey, a.cfg.API.BurstPerKey),
 		APIRequestTimeout: a.cfg.API.RequestTimeout, APIMaxInFlight: a.cfg.API.MaxInFlight, Readiness: ready,
@@ -52,7 +49,7 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 	adminHandler := adminapi.NewRouter(adminapi.Deps{
 		Logger: a.logger.With(slog.String("listener", "admin")), Admin: a.admin, Apps: a.apps, Reporting: a.reporting,
 		Metrics: metrics.NewHTTP(reg, "admin"), TrustedProxies: a.cfg.TrustedProxies, MaxBodyBytes: 64 << 10,
-		Webhooks: webhook.NewDeliveries(a.pool, a.river), STK: a.stk, Ledger: a.ledger,
+		Webhooks: webhook.NewDeliveries(a.pool, a.river), STK: a.stk, Ledger: a.ledger, MpesaSettings: a.mpesaSettings,
 	})
 	adminSrv := httpx.NewServer(a.cfg.Admin.Addr, adminHandler, a.cfg.HTTP, a.logger)
 

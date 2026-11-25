@@ -41,6 +41,10 @@ admin seed demo --actor e2e >/dev/null
 email="e2e-$(date +%s)-$RANDOM@talksasa.test"
 setup_url=$(admin user invite --email "$email" --name "E2E Tester" --role admin --actor e2e | grep -oE 'http://[^ ]+/setup/[a-z2-7]{52}')
 [[ -n "$setup_url" ]] || { echo "could not create invitation"; exit 1; }
+# The Settings test signs in as its own admin.
+settings_email="e2e-settings-$(date +%s)-$RANDOM@talksasa.test"
+settings_setup_url=$(admin user invite --email "$settings_email" --name "E2E Settings" --role admin --actor e2e | grep -oE 'http://[^ ]+/setup/[a-z2-7]{52}')
+[[ -n "$settings_setup_url" ]] || { echo "could not create the settings invitation"; exit 1; }
 
 # Charges through the real app API with a throwaway key that never leaves
 # this process. The fake Daraja pays phones ending in 0 and cancels phones
@@ -84,5 +88,10 @@ docker run --rm --network host --ipc host -u "$(id -u):$(id -g)" -e HOME=/tmp \
   -e E2E_PENDING_TOKEN="$pending_token" -e E2E_SUCCEEDED_TOKEN="$paid_token" -e E2E_EXPIRED_TOKEN="$expired_token" \
   -e E2E_OPEN_TOKEN="$pending_token" -e E2E_PAID_TOKEN="$paid_token" \
   -e E2E_STK_TOKEN="$stk_token" -e E2E_STK_CANCEL_TOKEN="$stk_cancel_token" \
+  -e E2E_SETTINGS_SETUP_URL="$settings_setup_url" -e E2E_SETTINGS_EMAIL="$settings_email" \
+  -e E2E_MPESA_CONSUMER_KEY="$(cat deploy/dev-secrets/mpesa_consumer_key)" \
+  -e E2E_MPESA_CONSUMER_SECRET="$(cat deploy/dev-secrets/mpesa_consumer_secret)" \
+  -e E2E_MPESA_PASSKEY="$(cat deploy/dev-secrets/mpesa_passkey)" \
+  -e E2E_MPESA_CALLBACK_TOKEN="$(cat deploy/dev-secrets/mpesa_callback_token)" \
   -v "$PWD/web:/web" -w /web/e2e "$PW_IMAGE" \
   ./node_modules/.bin/playwright test "$@"

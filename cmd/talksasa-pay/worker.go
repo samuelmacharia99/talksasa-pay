@@ -54,9 +54,9 @@ func runWorker(ctx context.Context, logw io.Writer) error {
 		Webhook:            hookWorker,
 		MpesaConcurrency:   a.cfg.Worker.MpesaConcurrency,
 	}
-	if a.stk.Available() {
-		deps.STK = a.stk
-	}
+	// Always: the M-Pesa settings can be saved in the admin panel while the
+	// worker runs (the sweep and callbacks follow them).
+	deps.STK = a.stk
 	client, err := jobs.NewClient(deps, jobs.ClientOptions{ExpiryEvery: a.cfg.Worker.MaintenanceEvery})
 	if err != nil {
 		return err

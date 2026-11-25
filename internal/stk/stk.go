@@ -146,4 +146,4 @@ func NewService(o Options) *Service {
 }
 
 // Available reports whether pushes can be sent at all.
-func (s *Service) Available() bool { return s.o.Client != nil }
+func (s *Service) Available() bool { return s.available() }

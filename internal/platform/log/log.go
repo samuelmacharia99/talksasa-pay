@@ -24,7 +24,7 @@ const redacted = "[REDACTED]"
 var sensitiveKeyParts = []string{
 	"password", "passwd", "secret", "passkey", "token", "credential",
 	"authorization", "api_key", "apikey", "cookie", "pepper", "private",
-	"dsn", "database_url", "signature", "otp", "totp",
+	"dsn", "database_url", "signature", "otp", "totp", "consumer_key", "consumerkey",
 }
 
 var phoneKeys = map[string]struct{}{

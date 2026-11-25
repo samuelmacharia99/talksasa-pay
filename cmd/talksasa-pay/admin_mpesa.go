@@ -2,103 +2,63 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"net/url"
-	"strings"
-	"time"
-
-	"github.com/jackc/pgx/v5"
 
 	"github.com/talksasa/talksasa-pay/internal/audit"
-	"github.com/talksasa/talksasa-pay/internal/config"
-	"github.com/talksasa/talksasa-pay/internal/mpesa"
-	"github.com/talksasa/talksasa-pay/internal/platform/db"
+	"github.com/talksasa/talksasa-pay/internal/mpesasettings"
 	"github.com/talksasa/talksasa-pay/internal/store"
 )
 
-// c2bRegistrar is the part of the Daraja client the register-urls command
-// uses (*mpesa.HTTPClient implements it).
-type c2bRegistrar interface {
-	RegisterC2BURLs(ctx context.Context, req mpesa.RegisterURLsRequest) error
-	CallbackURLs() (stk, c2bConfirmation, c2bValidation string)
-}
-
-// registerURLsTimeout bounds the whole register-urls command's Daraja call.
-const registerURLsTimeout = 60 * time.Second
-
-// redactedToken replaces the callback token wherever it appears in a URL.
-const redactedToken = "[TOKEN]"
-
-// redactToken removes the secret callback token from s (raw and
-// path-escaped forms). The callback URLs carry the token in their path, so
-// they are never printed or audited as they are.
-func redactToken(s, token string) string {
-	if token == "" {
-		return s
-	}
-	s = strings.ReplaceAll(s, token, redactedToken)
-	if esc := url.PathEscape(token); esc != token {
-		s = strings.ReplaceAll(s, esc, redactedToken)
-	}
-	return s
+// urlRegistrar registers the paybill's C2B URLs (*mpesasettings.Service;
+// the admin panel's "Register URLs with Safaricom" button calls the same).
+type urlRegistrar interface {
+	RegisterURLs(ctx context.Context, actor audit.Actor, confirm string) (mpesasettings.RegisterResult, error)
 }
 
 // registerC2BURLs registers the paybill's C2B confirmation (and validation)
-// URLs with Safaricom and audits it. Done once per paybill (again only if
-// the callback base URL or token changes).
-func registerC2BURLs(ctx context.Context, c c2bRegistrar, pool db.Beginner, actor audit.Actor, paybill, token string, w io.Writer) error {
-	if paybill == "" {
-		return errors.New("TSP_MPESA_PAYBILL is not set: there is no paybill to register URLs for")
-	}
-	_, confirmation, validation := c.CallbackURLs()
-	req := mpesa.RegisterURLsRequest{
-		ShortCode: paybill, ConfirmationURL: confirmation, ValidationURL: validation,
-		// If Safaricom cannot reach the validation URL, complete the
-		// payment: we never reject money.
-		ResponseType: "Completed",
-	}
-	cctx, cancel := context.WithTimeout(ctx, registerURLsTimeout)
-	defer cancel()
-	if err := c.RegisterC2BURLs(cctx, req); err != nil {
-		// Daraja may echo the URL (with the token) back in its message.
-		return fmt.Errorf("safaricom did not register the URLs: %s", redactToken(err.Error(), token))
-	}
-	conf, val := redactToken(confirmation, token), redactToken(validation, token)
-	// Safaricom has accepted: the record must not be lost to a cancelled
-	// command context.
-	actx, acancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer acancel()
-	if err := db.WithTx(actx, pool, actor.String(), func(ctx context.Context, q *store.Queries, _ pgx.Tx) error {
-		return audit.Record(ctx, q, audit.Entry{
-			Actor: actor, Action: "mpesa.paybill_urls_registered", EntityType: "mpesa_shortcode", EntityID: paybill,
-			Details: map[string]any{"shortcode": paybill, "confirmation_url": conf, "validation_url": val, "response_type": req.ResponseType},
-		})
-	}); err != nil {
-		return fmt.Errorf("URLs were registered with Safaricom but the audit record failed: %w", err)
+// URLs with Safaricom; the service records and audits it. Done once per
+// paybill (again if the paybill, callback base URL or token changes).
+func registerC2BURLs(ctx context.Context, s urlRegistrar, actor audit.Actor, confirm string, w io.Writer) error {
+	res, err := s.RegisterURLs(ctx, actor, confirm)
+	if err != nil {
+		return err
 	}
 	fmt.Fprintf(w, "C2B URLs registered for paybill %s\n  confirmation: %s\n  validation:   %s\n  response type: %s\n(%s is the secret callback token.)\n",
-		paybill, conf, val, req.ResponseType, redactedToken)
+		res.ShortCode, res.ConfirmationURL, res.ValidationURL, res.ResponseType, mpesasettings.RedactedToken)
 	return nil
 }
 
-// printMpesaStatus prints the M-Pesa configuration (no secrets) and the
+// printMpesaStatus prints the M-Pesa settings in effect (no secrets) and the
 // counts staff should watch.
-func printMpesaStatus(ctx context.Context, cfg *config.Config, q *store.Queries, w io.Writer) error {
-	m := cfg.Mpesa
-	if !m.Enabled() {
-		fmt.Fprintln(w, "M-Pesa:          off (TSP_MPESA_ENV not set)")
-	} else {
-		fmt.Fprintf(w, "M-Pesa:          %s\n", m.Env)
-		fmt.Fprintf(w, "STK shortcode:   %s\n", orNone(m.ShortCode))
-		fmt.Fprintf(w, "C2B paybill:     %s\n", orNone(cfg.Public.Paybill))
-		fmt.Fprintf(w, "Callback base:   %s\n", orNone(redactToken(m.CallbackBaseURL, m.CallbackToken.Reveal())))
-		if len(m.CallbackCIDRs) == 0 {
+func printMpesaStatus(ctx context.Context, st mpesasettings.Status, q *store.Queries, w io.Writer) error {
+	switch st.Source {
+	case mpesasettings.SourceNone:
+		fmt.Fprintln(w, "M-Pesa:          off (nothing saved in Settings, TSP_MPESA_ENV not set)")
+	default:
+		src := "saved in the admin panel (Settings)"
+		if st.Source == mpesasettings.SourceEnvironment {
+			src = "TSP_MPESA_* configuration (nothing saved in Settings)"
+		}
+		fmt.Fprintf(w, "M-Pesa:          %s, from %s\n", st.Environment, src)
+		fmt.Fprintf(w, "C2B paybill:     %s\n", orNone(st.Paybill))
+		stk := st.STKShortCode
+		if stk == "" {
+			stk = st.Paybill
+		}
+		fmt.Fprintf(w, "STK shortcode:   %s\n", orNone(stk))
+		fmt.Fprintf(w, "Callback base:   %s\n", orNone(st.CallbackBaseURL))
+		if st.CallbackCIDRs == 0 {
 			fmt.Fprintln(w, "Callback IPs:    any (no TSP_MPESA_CALLBACK_CIDRS)")
 		} else {
-			fmt.Fprintf(w, "Callback IPs:    %d allowed network(s)\n", len(m.CallbackCIDRs))
+			fmt.Fprintf(w, "Callback IPs:    %d allowed network(s)\n", st.CallbackCIDRs)
 		}
+		if r := st.Registration; r != nil {
+			fmt.Fprintf(w, "URLs registered: %s by %s\n", r.At.UTC().Format("2006-01-02 15:04 MST"), r.By)
+		}
+	}
+	if st.Problem != "" && st.Source != mpesasettings.SourceNone {
+		fmt.Fprintf(w, "PROBLEM:         %s\n", st.Problem)
 	}
 	c, err := q.MpesaStatusCounts(ctx)
 	if err != nil {

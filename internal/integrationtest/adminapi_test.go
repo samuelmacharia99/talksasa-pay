@@ -14,7 +14,9 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/admin"
 	"github.com/talksasa/talksasa-pay/internal/adminapi"
 	"github.com/talksasa/talksasa-pay/internal/audit"
+	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/httpapi"
+	"github.com/talksasa/talksasa-pay/internal/mpesasettings"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 	"github.com/talksasa/talksasa-pay/internal/reporting"
 	"github.com/talksasa/talksasa-pay/internal/store"
@@ -37,6 +39,7 @@ func newAPIEnv(t *testing.T) *apiEnv {
 		Webhooks:       webhook.NewDeliveries(a.db.App, a.river),
 		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
 		AuthLimiter:    httpx.NewRateLimiter(6000, 6000), // tests exercise auth many times
+		MpesaSettings:  mpesasettings.NewService(mpesasettings.Options{Pool: a.db.App, Keyring: a.keyring, Env: config.EnvDevelopment, Logger: a.logger}),
 	}
 	deps.Ledger = a.ledger
 	return &apiEnv{

@@ -79,9 +79,15 @@ const (
 )
 
 // MpesaConfig configures Safaricom Daraja (STK push, STK query, C2B).
-// Env "" turns M-Pesa off: no STK push (pay page shows only the paybill
-// steps, /v1 stk-push answers 503 mpesa_unavailable) and callbacks are not
-// mounted.
+//
+// Paybill settings saved by an admin in the panel (internal/mpesasettings,
+// stored encrypted in the database) take precedence over Env, ShortCode,
+// the credentials and CallbackBaseURL here; this configuration is the
+// fallback when nothing is saved. CallbackToken, CallbackCIDRs, BaseURL and
+// the timeouts always come from here.
+//
+// With nothing saved, Env "" turns M-Pesa off: no STK push (pay page shows
+// only the paybill steps, /v1 stk-push answers 503 mpesa_unavailable).
 type MpesaConfig struct {
 	Env string // "", "sandbox" or "production" (TSP_MPESA_ENV)
 	// BaseURL overrides the Daraja base URL. Development only (fake Daraja).
@@ -277,6 +283,11 @@ func Load(src Source) (*Config, error) {
 		cfg.Mpesa.ConsumerSecret = l.secret("TSP_MPESA_CONSUMER_SECRET", cfg.Env, true)
 		cfg.Mpesa.Passkey = l.secret("TSP_MPESA_PASSKEY", cfg.Env, true)
 		cfg.Mpesa.CallbackToken = l.secret("TSP_MPESA_CALLBACK_TOKEN", cfg.Env, true)
+	} else {
+		// M-Pesa may still be configured in the admin panel (Settings,
+		// stored in the database); the callback token always comes from
+		// here.
+		cfg.Mpesa.CallbackToken = l.secret("TSP_MPESA_CALLBACK_TOKEN", cfg.Env, false)
 	}
 
 	cfg.Database = DatabaseConfig{
@@ -397,7 +408,16 @@ func (c *Config) validateMpesa() []error {
 	var errs []error
 	switch m.Env {
 	case MpesaOff:
-		return nil
+		// Settings saved in the admin panel can still turn M-Pesa on; they
+		// need a valid callback token (and, in development, may use the
+		// fake Daraja base URL).
+		if tok := m.CallbackToken.Reveal(); tok != "" && (len(tok) < 32 || !callbackTokenRe.MatchString(tok)) {
+			errs = append(errs, errors.New("TSP_MPESA_CALLBACK_TOKEN: must be at least 32 URL-safe characters (A-Z a-z 0-9 _ -)"))
+		}
+		if m.BaseURL != "" && c.Env != EnvDevelopment {
+			errs = append(errs, errors.New("TSP_MPESA_BASE_URL: only allowed in development (fake Daraja)"))
+		}
+		return errs
 	case MpesaSandbox, MpesaProduction:
 	default:
 		return []error{fmt.Errorf("TSP_MPESA_ENV: must be empty, sandbox or production, got %q", m.Env)}

@@ -1494,6 +1494,187 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/settings/mpesa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The M-Pesa paybill settings in effect (no secret values) and where they come from
+         * @description `source` is `database` (saved on the Settings page), `environment`
+         *     (the TSP_MPESA_* fallback while nothing is saved) or `none` (M-Pesa
+         *     is off). Credentials are write-only: only whether each is set and,
+         *     for values of 12+ characters, its last 4 characters. Callback URLs
+         *     show the secret callback token as `[TOKEN]`.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MpesaSettings"];
+                    };
+                };
+            };
+        };
+        /**
+         * Save the paybill settings (admin); audited, credentials encrypted
+         * @description Credentials are optional on update: empty or absent keeps the stored
+         *     value (all three are required the first time). When the saved or the
+         *     new environment is production, `confirm` must be "production".
+         *     Saving identical settings changes nothing.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        environment: "sandbox" | "production";
+                        /** @description The paybill (5-7 digits) */
+                        shortcode: string;
+                        /** @description STK push BusinessShortCode; empty or null means the paybill */
+                        stk_shortcode?: string | null;
+                        /** @description Public base Safaricom calls, ending in /, e.g. https://api.pay.example.com/ */
+                        callback_base_url: string;
+                        consumer_key?: string | null;
+                        consumer_secret?: string | null;
+                        passkey?: string | null;
+                        /** @description "production" to save production settings */
+                        confirm?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description Saved */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MpesaSettings"];
+                    };
+                };
+                422: components["responses"]["Problem"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/settings/mpesa/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ask Daraja for an OAuth token with the settings in effect (admin); the token is never returned */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Tested (ok may be false) */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MpesaSettingsTest"];
+                    };
+                };
+                409: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/settings/mpesa/register-urls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Register the paybill's C2B confirmation and validation URLs with Safaricom (admin); audited
+         * @description ResponseType Completed (a payment is never rejected). Production settings need `confirm` "production".
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        confirm?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description Registered */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: date-time */
+                            registered_at: string;
+                            shortcode: string;
+                            /** @description Token shown as [TOKEN] */
+                            confirmation_url: string;
+                            validation_url: string;
+                            response_type: string;
+                        };
+                    };
+                };
+                409: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+                502: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users": {
         parameters: {
             query?: never;
@@ -1761,7 +1942,7 @@ export interface components {
             email: string;
             name: string;
             role: components["schemas"]["Role"];
-            permissions: ("read" | "apps.manage" | "users.manage" | "payments.resolve" | "payments.reverse")[];
+            permissions: ("read" | "apps.manage" | "users.manage" | "payments.resolve" | "payments.reverse" | "settings.manage")[];
             /** Format: date-time */
             expires_at: string;
             /** Format: date-time */
@@ -2018,6 +2199,68 @@ export interface components {
             first_bad_audit_id?: number;
             /** Format: date-time */
             checked_at: string;
+        };
+        Credential: {
+            set: boolean;
+            /** @description Only for values of 12+ characters */
+            last4: string | null;
+        };
+        MpesaSettingsTest: {
+            ok: boolean;
+            /** Format: date-time */
+            tested_at: string;
+            /** @description Why Safaricom refused (never secret) */
+            message: string | null;
+        };
+        MpesaSettings: {
+            /** @enum {string} */
+            source: "database" | "environment" | "none";
+            /** @enum {string|null} */
+            environment: "sandbox" | "production" | null;
+            shortcode: string | null;
+            /** @description null when STK uses the paybill */
+            stk_shortcode: string | null;
+            callback_base_url: string | null;
+            credentials: {
+                consumer_key: components["schemas"]["Credential"];
+                consumer_secret: components["schemas"]["Credential"];
+                passkey: components["schemas"]["Credential"];
+            };
+            /** @description TSP_MPESA_CALLBACK_TOKEN (deployment configuration) */
+            callback_token_set: boolean;
+            /** @description Networks in TSP_MPESA_CALLBACK_CIDRS */
+            callback_cidrs: number;
+            callback_urls: {
+                stk: string;
+                confirmation: string;
+                validation: string;
+            } | null;
+            version: number;
+            updated_by: string | null;
+            updated_by_name: string | null;
+            /** Format: date-time */
+            updated_at: string | null;
+            registration: {
+                /** Format: date-time */
+                registered_at: string;
+                registered_by: string;
+                registered_by_name: string | null;
+                confirmation_url: string;
+                shortcode: string;
+                /** @description For today's paybill and confirmation URL */
+                current: boolean;
+            } | null;
+            last_test: {
+                ok: boolean;
+                /** Format: date-time */
+                tested_at: string;
+            } | null;
+            /** @description Prompts can be sent with these settings */
+            ready: boolean;
+            problem: string | null;
+            /** @description What this deployment may save */
+            environments: ("sandbox" | "production")[];
+            https_only: boolean;
         };
     };
     responses: {
