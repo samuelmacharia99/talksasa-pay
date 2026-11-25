@@ -2119,6 +2119,11 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
             app_name: string | null;
+            /**
+             * @description The app's status (null = unmatched); payments for a suspended app are still recorded and forwarded
+             * @enum {string|null}
+             */
+            app_status: "active" | "suspended" | null;
             /** @description Provider payload with phones masked */
             raw_payload: unknown;
             events: {
