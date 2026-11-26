@@ -97,6 +97,7 @@ Environment variables, in addition to the required ones above:
 | `TSP_ADMIN_API_URL` | `http://backend:8089/admin/v1` |
 | `TSP_ADMIN_SETUP_BASE_URL` | `https://<host>/setup/` |
 | `TSP_MPESA_CALLBACK_BASE_URL` | Leave unset: the Settings page generates `https://<host>/api/` from the address you open it on. |
+| `TSP_TRUSTED_PROXIES` | `10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1/32` (the service's private networks). Required for production M-Pesa: see "Client IP" below. |
 
 Limits of this layout:
 
@@ -115,8 +116,14 @@ Limits of this layout:
 - Until then, staff use the CLI from a shell in the service:
   `/tmp/tsp admin user invite ...`, `/tmp/tsp admin app create ...`,
   `/tmp/tsp admin key issue ...`.
-- Client IP: the service trusts the end user's IP only from
-  `X-Talksasa-Client-Ip` set by a proxy listed in `TSP_TRUSTED_PROXIES`.
-  Behind a platform proxy that does not set it, per-IP rate limits apply to
-  the proxy's address and production M-Pesa callbacks fail the
-  `TSP_MPESA_CALLBACK_CIDRS` check. Sort this out before production M-Pesa.
+- Client IP: Talksasa Cloud's host nginx appends the caller's address to
+  `X-Forwarded-For`, and the edge gateway appends its own Docker-network
+  peer. From a peer in `TSP_TRUSTED_PROXIES` the service reads
+  `X-Forwarded-For` right to left, skipping trusted (private) hops, so it
+  gets the address nginx saw; anything a caller writes into the header is
+  further left and never used, and a caller-set `X-Talksasa-Client-Ip` is
+  ignored whenever `X-Forwarded-For` is present. Without
+  `TSP_TRUSTED_PROXIES` every request looks like it comes from the edge:
+  production M-Pesa callbacks fail the `TSP_MPESA_CALLBACK_CIDRS` check
+  (log: `mpesa callback rejected`, `reason=ip_not_allowed`,
+  `remote_ip=10.x`) and the charge goes to needs review.
