@@ -296,15 +296,92 @@ func TestTestAndRegisterURLs(t *testing.T) {
 	noSecrets(t, "logs", e.logs.String())
 }
 
-func TestNoCallbackToken(t *testing.T) {
+// Without TSP_MPESA_CALLBACK_TOKEN the first save generates a token and
+// stores it encrypted; it never changes after that, is never shown, logged
+// or audited, and the provider serves it to the callback intake.
+func TestGeneratedCallbackToken(t *testing.T) {
 	e := newEnv(t, func(o *Options) { o.Mpesa.CallbackToken = config.Secret{} })
 	ctx := context.Background()
+
+	st, err := e.svc.Status(ctx)
+	if err != nil || st.CallbackTokenSet || st.CallbackTokenSource != "" {
+		t.Fatalf("before save: %+v %v", st, err)
+	}
+	st, err = e.svc.Save(ctx, actor, good())
+	if err != nil || !st.Ready || !st.CallbackTokenSet || st.CallbackTokenSource != "generated" {
+		t.Fatalf("save: %+v %v", st, err)
+	}
+	got, err := e.svc.Get(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := got.CallbackToken.Reveal()
+	if len(tok) != 43 || strings.Trim(tok, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") != "" {
+		t.Fatalf("token shape %d %q", len(tok), tok[:4])
+	}
+	var ct []byte
+	if err := e.d.Owner.QueryRow(ctx, `SELECT callback_token_ciphertext FROM mpesa_settings`).Scan(&ct); err != nil || len(ct) == 0 ||
+		bytes.Contains(ct, []byte(tok)) {
+		t.Fatalf("stored token: %d bytes, %v", len(ct), err)
+	}
+
+	// A later save, including a credential change, keeps the token.
+	s := good()
+	s.Paybill = "600111"
+	s.ConsumerKey = config.NewSecret("ck_live_ROTATED_0000_key2")
+	if _, err := e.svc.Save(ctx, actor, s); err != nil {
+		t.Fatal(err)
+	}
+	again, err := e.svc.Get(ctx)
+	if err != nil || again.CallbackToken.Reveal() != tok {
+		t.Fatalf("token changed on a later save: %v", err)
+	}
+
+	p := NewProvider(ctx, e.svc, time.Hour)
+	if p.CallbackToken().Reveal() != tok {
+		t.Fatal("provider does not serve the saved token")
+	}
+	if _, err := e.svc.Test(ctx, actor); err != nil {
+		t.Fatalf("test: %v", err)
+	}
+
+	audits := strings.Join(e.auditRows(t, "mpesa_settings.updated"), "\n")
+	if !strings.Contains(audits, `"callback_token"`) {
+		t.Fatalf("first save does not record that a token was generated: %s", audits)
+	}
+	for where, v := range map[string]string{"logs": e.logs.String(), "audit": audits} {
+		if strings.Contains(v, tok) {
+			t.Fatalf("%s contain the generated callback token", where)
+		}
+	}
+}
+
+// TSP_MPESA_CALLBACK_TOKEN, when set, is the token in effect.
+func TestDeploymentCallbackTokenWins(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
 	st, err := e.svc.Save(ctx, actor, good())
-	if err != nil || st.Ready || !strings.Contains(st.Problem, "TSP_MPESA_CALLBACK_TOKEN") {
+	if err != nil || st.CallbackTokenSource != "deployment" {
 		t.Fatalf("%+v %v", st, err)
 	}
-	if _, err := e.svc.Test(ctx, actor); !errors.Is(err, ErrNoCallbackToken) {
-		t.Fatalf("test: %v", err)
+	got, err := e.svc.Get(ctx)
+	if err != nil || got.CallbackToken.Reveal() != cbToken {
+		t.Fatalf("effective token is not the deployment's: %v", err)
+	}
+	if p := NewProvider(ctx, e.svc, time.Hour); p.CallbackToken().Reveal() != cbToken {
+		t.Fatal("provider token")
+	}
+}
+
+// TSP_MPESA_CALLBACK_BASE_URL, when set, fixes the callback base URL.
+func TestFixedCallbackBaseURL(t *testing.T) {
+	e := newEnv(t, func(o *Options) { o.Mpesa.CallbackBaseURL = "http://fixed.example:8088/" })
+	ctx := context.Background()
+	s := good()
+	s.CallbackBaseURL = "http://derived.example/api/"
+	st, err := e.svc.Save(ctx, actor, s)
+	if err != nil || !st.CallbackBaseURLFixed || st.CallbackBaseURL != "http://fixed.example:8088/" {
+		t.Fatalf("%+v %v", st, err)
 	}
 }
 

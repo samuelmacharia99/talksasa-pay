@@ -11,7 +11,7 @@ import (
 )
 
 const getMpesaSettings = `-- name: GetMpesaSettings :one
-SELECT id, environment, shortcode, stk_shortcode, consumer_key_ciphertext, consumer_secret_ciphertext, passkey_ciphertext, key_version, callback_base_url, updated_by, updated_at, version, urls_registered_at, urls_registered_by, urls_registered_url, urls_registered_shortcode, last_test_at, last_test_ok FROM mpesa_settings WHERE id = 1
+SELECT id, environment, shortcode, stk_shortcode, consumer_key_ciphertext, consumer_secret_ciphertext, passkey_ciphertext, key_version, callback_base_url, updated_by, updated_at, version, urls_registered_at, urls_registered_by, urls_registered_url, urls_registered_shortcode, last_test_at, last_test_ok, callback_token_ciphertext FROM mpesa_settings WHERE id = 1
 `
 
 func (q *Queries) GetMpesaSettings(ctx context.Context) (MpesaSetting, error) {
@@ -36,6 +36,7 @@ func (q *Queries) GetMpesaSettings(ctx context.Context) (MpesaSetting, error) {
 		&i.UrlsRegisteredShortcode,
 		&i.LastTestAt,
 		&i.LastTestOk,
+		&i.CallbackTokenCiphertext,
 	)
 	return i, err
 }
@@ -53,7 +54,7 @@ func (q *Queries) GetMpesaSettingsVersion(ctx context.Context) (int64, error) {
 }
 
 const lockMpesaSettings = `-- name: LockMpesaSettings :one
-SELECT id, environment, shortcode, stk_shortcode, consumer_key_ciphertext, consumer_secret_ciphertext, passkey_ciphertext, key_version, callback_base_url, updated_by, updated_at, version, urls_registered_at, urls_registered_by, urls_registered_url, urls_registered_shortcode, last_test_at, last_test_ok FROM mpesa_settings WHERE id = 1 FOR UPDATE
+SELECT id, environment, shortcode, stk_shortcode, consumer_key_ciphertext, consumer_secret_ciphertext, passkey_ciphertext, key_version, callback_base_url, updated_by, updated_at, version, urls_registered_at, urls_registered_by, urls_registered_url, urls_registered_shortcode, last_test_at, last_test_ok, callback_token_ciphertext FROM mpesa_settings WHERE id = 1 FOR UPDATE
 `
 
 func (q *Queries) LockMpesaSettings(ctx context.Context) (MpesaSetting, error) {
@@ -78,6 +79,7 @@ func (q *Queries) LockMpesaSettings(ctx context.Context) (MpesaSetting, error) {
 		&i.UrlsRegisteredShortcode,
 		&i.LastTestAt,
 		&i.LastTestOk,
+		&i.CallbackTokenCiphertext,
 	)
 	return i, err
 }
@@ -128,16 +130,19 @@ func (q *Queries) RecordMpesaURLsRegistered(ctx context.Context, arg RecordMpesa
 
 const upsertMpesaSettings = `-- name: UpsertMpesaSettings :one
 INSERT INTO mpesa_settings (id, environment, shortcode, stk_shortcode, consumer_key_ciphertext,
-                            consumer_secret_ciphertext, passkey_ciphertext, key_version, callback_base_url, updated_by)
+                            consumer_secret_ciphertext, passkey_ciphertext, callback_token_ciphertext,
+                            key_version, callback_base_url, updated_by)
 VALUES (1, $1, $2, $3, $4,
-        $5, $6, $7, $8, $9)
+        $5, $6, $7,
+        $8, $9, $10)
 ON CONFLICT (id) DO UPDATE
    SET environment = EXCLUDED.environment, shortcode = EXCLUDED.shortcode, stk_shortcode = EXCLUDED.stk_shortcode,
        consumer_key_ciphertext = EXCLUDED.consumer_key_ciphertext,
        consumer_secret_ciphertext = EXCLUDED.consumer_secret_ciphertext,
-       passkey_ciphertext = EXCLUDED.passkey_ciphertext, key_version = EXCLUDED.key_version,
+       passkey_ciphertext = EXCLUDED.passkey_ciphertext,
+       callback_token_ciphertext = EXCLUDED.callback_token_ciphertext, key_version = EXCLUDED.key_version,
        callback_base_url = EXCLUDED.callback_base_url, updated_by = EXCLUDED.updated_by
-RETURNING id, environment, shortcode, stk_shortcode, consumer_key_ciphertext, consumer_secret_ciphertext, passkey_ciphertext, key_version, callback_base_url, updated_by, updated_at, version, urls_registered_at, urls_registered_by, urls_registered_url, urls_registered_shortcode, last_test_at, last_test_ok
+RETURNING id, environment, shortcode, stk_shortcode, consumer_key_ciphertext, consumer_secret_ciphertext, passkey_ciphertext, key_version, callback_base_url, updated_by, updated_at, version, urls_registered_at, urls_registered_by, urls_registered_url, urls_registered_shortcode, last_test_at, last_test_ok, callback_token_ciphertext
 `
 
 type UpsertMpesaSettingsParams struct {
@@ -147,6 +152,7 @@ type UpsertMpesaSettingsParams struct {
 	ConsumerKeyCiphertext    []byte
 	ConsumerSecretCiphertext []byte
 	PasskeyCiphertext        []byte
+	CallbackTokenCiphertext  []byte
 	KeyVersion               int32
 	CallbackBaseUrl          string
 	UpdatedBy                string
@@ -161,6 +167,7 @@ func (q *Queries) UpsertMpesaSettings(ctx context.Context, arg UpsertMpesaSettin
 		arg.ConsumerKeyCiphertext,
 		arg.ConsumerSecretCiphertext,
 		arg.PasskeyCiphertext,
+		arg.CallbackTokenCiphertext,
 		arg.KeyVersion,
 		arg.CallbackBaseUrl,
 		arg.UpdatedBy,
@@ -185,6 +192,7 @@ func (q *Queries) UpsertMpesaSettings(ctx context.Context, arg UpsertMpesaSettin
 		&i.UrlsRegisteredShortcode,
 		&i.LastTestAt,
 		&i.LastTestOk,
+		&i.CallbackTokenCiphertext,
 	)
 	return i, err
 }

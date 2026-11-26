@@ -11,14 +11,17 @@ SELECT version FROM mpesa_settings WHERE id = 1;
 -- name: UpsertMpesaSettings :one
 -- The guard trigger bumps version and updated_at on an update.
 INSERT INTO mpesa_settings (id, environment, shortcode, stk_shortcode, consumer_key_ciphertext,
-                            consumer_secret_ciphertext, passkey_ciphertext, key_version, callback_base_url, updated_by)
+                            consumer_secret_ciphertext, passkey_ciphertext, callback_token_ciphertext,
+                            key_version, callback_base_url, updated_by)
 VALUES (1, @environment, @shortcode, sqlc.narg(stk_shortcode), @consumer_key_ciphertext,
-        @consumer_secret_ciphertext, @passkey_ciphertext, @key_version, @callback_base_url, @updated_by)
+        @consumer_secret_ciphertext, @passkey_ciphertext, @callback_token_ciphertext,
+        @key_version, @callback_base_url, @updated_by)
 ON CONFLICT (id) DO UPDATE
    SET environment = EXCLUDED.environment, shortcode = EXCLUDED.shortcode, stk_shortcode = EXCLUDED.stk_shortcode,
        consumer_key_ciphertext = EXCLUDED.consumer_key_ciphertext,
        consumer_secret_ciphertext = EXCLUDED.consumer_secret_ciphertext,
-       passkey_ciphertext = EXCLUDED.passkey_ciphertext, key_version = EXCLUDED.key_version,
+       passkey_ciphertext = EXCLUDED.passkey_ciphertext,
+       callback_token_ciphertext = EXCLUDED.callback_token_ciphertext, key_version = EXCLUDED.key_version,
        callback_base_url = EXCLUDED.callback_base_url, updated_by = EXCLUDED.updated_by
 RETURNING *;
 

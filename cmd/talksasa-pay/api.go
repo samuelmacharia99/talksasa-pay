@@ -40,7 +40,7 @@ func runAPI(ctx context.Context, logw io.Writer) error {
 		Charges: a.charges, View: a.events.View(),
 		KeyLimiter:        httpx.NewRateLimiterPerSecond(a.cfg.API.RatePerKey, a.cfg.API.BurstPerKey),
 		APIRequestTimeout: a.cfg.API.RequestTimeout, APIMaxInFlight: a.cfg.API.MaxInFlight, Readiness: ready,
-		STK: apiSTK, MpesaCallbackToken: a.cfg.Mpesa.CallbackToken, MpesaCallbackCIDRs: a.cfg.Mpesa.CallbackCIDRs,
+		STK: apiSTK, MpesaCallbackToken: a.cfg.Mpesa.CallbackToken, MpesaCallbackTokenFrom: a.mpesa.CallbackToken, MpesaCallbackCIDRs: a.cfg.Mpesa.CallbackCIDRs,
 	})
 	apiSrv := httpx.NewServer(a.cfg.HTTP.Addr, handler, a.cfg.HTTP, a.logger)
 

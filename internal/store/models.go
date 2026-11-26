@@ -978,6 +978,7 @@ type MpesaSetting struct {
 	UrlsRegisteredShortcode  *string
 	LastTestAt               *time.Time
 	LastTestOk               *bool
+	CallbackTokenCiphertext  []byte
 }
 
 // STK push prompts sent through Daraja. Owns the pending mpesa_stk transaction the callback completes.

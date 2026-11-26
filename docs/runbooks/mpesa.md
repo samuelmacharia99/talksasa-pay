@@ -38,11 +38,13 @@ seconds without a restart, and every change is in the audit log.
 
 **The `TSP_MPESA_*` variables are the fallback** while nothing is saved on
 the Settings page (a fresh deployment, or one that has always used SOPS).
-Three things always come from the deployment configuration, whatever is
-saved: the callback token (`TSP_MPESA_CALLBACK_TOKEN_FILE`), Safaricom's
-callback networks (`TSP_MPESA_CALLBACK_CIDRS`) and, in development only,
-`TSP_MPESA_BASE_URL`. The callback token must be set even when M-Pesa is
-configured on the Settings page; without it the page says M-Pesa stays off.
+Two things always come from the deployment configuration, whatever is
+saved: Safaricom's callback networks (`TSP_MPESA_CALLBACK_CIDRS`) and, in
+development only, `TSP_MPESA_BASE_URL`. The callback token is generated on
+the first save on the Settings page and stored encrypted, unless
+`TSP_MPESA_CALLBACK_TOKEN_FILE` (or `TSP_MPESA_CALLBACK_TOKEN`) is set,
+which wins; `TSP_MPESA_CALLBACK_BASE_URL`, when set, fixes the callback
+base URL the page saves.
 
 ## Configuration variables (fallback)
 
@@ -58,7 +60,7 @@ configured on the Settings page; without it the page says M-Pesa stays off.
 | `TSP_MPESA_CONSUMER_KEY_FILE` | yes | Daraja app consumer key. |
 | `TSP_MPESA_CONSUMER_SECRET_FILE` | yes | Daraja app consumer secret. |
 | `TSP_MPESA_PASSKEY_FILE` | yes | Lipa na M-Pesa Online passkey for the short code. |
-| `TSP_MPESA_CALLBACK_TOKEN_FILE` | yes | Random token in the callback path (at least 32 of `A-Z a-z 0-9 _ -`). Daraja does not sign callbacks; this token plus the IP allow-list is what tells a real callback from a forged one. |
+| `TSP_MPESA_CALLBACK_TOKEN_FILE` | yes | Random token in the callback path (at least 32 of `A-Z a-z 0-9 _ -`). Daraja does not sign callbacks; this token plus the IP allow-list is what tells a real callback from a forged one. Optional when the paybill is saved on the Settings page (it generates one); when set, it wins. |
 | `TSP_MPESA_REQUEST_TIMEOUT`, `TSP_MPESA_QUERY_AFTER`, `TSP_MPESA_GIVE_UP_AFTER` | no | Daraja call timeout (15 s), first status check (60 s), hand to staff after (30 min). Defaults are fine. |
 
 The service refuses to start with an incomplete M-Pesa configuration and
@@ -411,7 +413,7 @@ M-Pesa receipt is recorded once.
 
 | Symptom | Likely cause |
 |---|---|
-| `/v1` stk-push answers `503 mpesa_unavailable`; the checkout page shows no prompt form | Nothing saved on Settings and `TSP_MPESA_ENV` empty; or Settings shows a problem (usually `TSP_MPESA_CALLBACK_TOKEN` missing); or the charge is above KES 250,000 (pay page only). |
+| `/v1` stk-push answers `503 mpesa_unavailable`; the checkout page shows no prompt form | Nothing saved on Settings and `TSP_MPESA_ENV` empty; or Settings shows a problem; or the charge is above KES 250,000 (pay page only). |
 | Settings saved but the worker still uses the old ones | It re-reads them within about 5 seconds; the worker log says `mpesa: enabled` with the new `version`. A log line "could not load the saved settings" means the master keyring lacks the key they were sealed with. |
 | `502 mpesa_error` on every prompt | Wrong consumer key/secret or passkey, wrong short code for the environment, or Daraja down. The api log has Daraja's error (never the credentials). |
 | Prompts reach phones but results never arrive; everything ends "needs review" or failed after a minute | Callbacks can't reach us: wrong `TSP_MPESA_CALLBACK_BASE_URL`, tunnel closed, IP allow-list blocking Safaricom (look for the callback alarm log line), or the sandbox simply not calling back. |

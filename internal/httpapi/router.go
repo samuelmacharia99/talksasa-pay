@@ -55,7 +55,11 @@ type Deps struct {
 	STK STKService
 	// MpesaCallbackToken is the secret path segment of the callback URLs
 	// (/cb/mpesa/{token}/...). Empty rejects every callback.
-	MpesaCallbackToken config.Secret
+	// MpesaCallbackTokenFrom, when set, gives the token in effect instead,
+	// read on every callback (it follows the settings saved in the admin
+	// panel, where the token can be generated).
+	MpesaCallbackToken     config.Secret
+	MpesaCallbackTokenFrom func() config.Secret
 	// MpesaCallbackCIDRs are Safaricom's callback source networks; empty
 	// accepts any source (development and sandbox only; config enforces).
 	MpesaCallbackCIDRs []netip.Prefix

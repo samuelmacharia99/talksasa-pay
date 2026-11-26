@@ -60,21 +60,26 @@ type mpesaSettingsJSON struct {
 	STKShortcode    *string                   `json:"stk_shortcode"`
 	CallbackBaseURL *string                   `json:"callback_base_url"`
 	Credentials     map[string]credentialJSON `json:"credentials"`
-	// CallbackTokenSet / CallbackCIDRs come from the deployment
-	// configuration (SOPS), not from this page.
-	CallbackTokenSet bool              `json:"callback_token_set"`
-	CallbackCIDRs    int               `json:"callback_cidrs"`
-	CallbackURLs     *callbackURLsJSON `json:"callback_urls"`
-	Version          int64             `json:"version"`
-	UpdatedBy        *string           `json:"updated_by"`
-	UpdatedByName    *string           `json:"updated_by_name"`
-	UpdatedAt        *time.Time        `json:"updated_at"`
-	Registration     *registrationJSON `json:"registration"`
-	LastTest         *settingsTestJSON `json:"last_test"`
-	Ready            bool              `json:"ready"`
-	Problem          *string           `json:"problem"`
-	Environments     []string          `json:"environments"`
-	HTTPSOnly        bool              `json:"https_only"`
+	// CallbackTokenSource: "deployment" (TSP_MPESA_CALLBACK_TOKEN) or
+	// "generated" (made on the first save and stored encrypted); null when
+	// there is none yet. CallbackBaseURLFixed: TSP_MPESA_CALLBACK_BASE_URL
+	// sets it, so a saved value is ignored. CallbackCIDRs come from the
+	// deployment configuration.
+	CallbackTokenSet     bool              `json:"callback_token_set"`
+	CallbackTokenSource  *string           `json:"callback_token_source"`
+	CallbackBaseURLFixed bool              `json:"callback_base_url_fixed"`
+	CallbackCIDRs        int               `json:"callback_cidrs"`
+	CallbackURLs         *callbackURLsJSON `json:"callback_urls"`
+	Version              int64             `json:"version"`
+	UpdatedBy            *string           `json:"updated_by"`
+	UpdatedByName        *string           `json:"updated_by_name"`
+	UpdatedAt            *time.Time        `json:"updated_at"`
+	Registration         *registrationJSON `json:"registration"`
+	LastTest             *settingsTestJSON `json:"last_test"`
+	Ready                bool              `json:"ready"`
+	Problem              *string           `json:"problem"`
+	Environments         []string          `json:"environments"`
+	HTTPSOnly            bool              `json:"https_only"`
 }
 
 func strPtr(s string) *string {
@@ -113,7 +118,8 @@ func (h *handlers) toMpesaSettings(ctx context.Context, s mpesasettings.Status) 
 		Credentials: map[string]credentialJSON{
 			"consumer_key": toCredential(s.ConsumerKey), "consumer_secret": toCredential(s.ConsumerSecret), "passkey": toCredential(s.Passkey),
 		},
-		CallbackTokenSet: s.CallbackTokenSet, CallbackCIDRs: s.CallbackCIDRs, Version: s.Version,
+		CallbackTokenSet: s.CallbackTokenSet, CallbackTokenSource: strPtr(s.CallbackTokenSource),
+		CallbackBaseURLFixed: s.CallbackBaseURLFixed, CallbackCIDRs: s.CallbackCIDRs, Version: s.Version,
 		UpdatedBy: strPtr(s.UpdatedBy), UpdatedAt: s.UpdatedAt, Ready: s.Ready, Problem: strPtr(s.Problem),
 		Environments: s.Environments, HTTPSOnly: s.HTTPSOnly,
 	}

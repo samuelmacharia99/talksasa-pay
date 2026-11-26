@@ -45,11 +45,11 @@ saved on the admin Settings page):
 
 | Variable | What it is |
 |---|---|
-| `TSP_MPESA_CALLBACK_TOKEN` | Random string, at least 32 characters of `A-Z a-z 0-9 _ -`. It is part of the secret callback URL Safaricom calls. |
+| `TSP_MPESA_CALLBACK_TOKEN` | Optional: the Settings page generates and stores one on the first save. When set (at least 32 characters of `A-Z a-z 0-9 _ -`) it wins. It is part of the secret callback URL Safaricom calls. |
 | `TSP_MPESA_ENV` | `sandbox` or `production`. Empty = M-Pesa off unless saved on Settings. |
 | `TSP_MPESA_PAYBILL` | The paybill number (5-7 digits). |
 | `TSP_MPESA_CONSUMER_KEY`, `TSP_MPESA_CONSUMER_SECRET`, `TSP_MPESA_PASSKEY` | Daraja app credentials. |
-| `TSP_MPESA_CALLBACK_BASE_URL` | Public `https://` base Safaricom calls back, ending in `/` (this service's public URL). |
+| `TSP_MPESA_CALLBACK_BASE_URL` | Optional. Unset: the Settings page uses the address it is opened on plus `/api/`. Set (public `https://` base ending in `/`): saves always use it. |
 | `TSP_MPESA_CALLBACK_CIDRS` | Safaricom's callback source networks, comma separated. Required for production M-Pesa. |
 
 Optional: `TSP_DATABASE_URL` / `TSP_MIGRATE_DATABASE_URL` (override
@@ -96,7 +96,7 @@ Environment variables, in addition to the required ones above:
 | `TSP_ADMIN_ADDR` | `0.0.0.0:8089` |
 | `TSP_ADMIN_API_URL` | `http://backend:8089/admin/v1` |
 | `TSP_ADMIN_SETUP_BASE_URL` | `https://<host>/setup/` |
-| `TSP_MPESA_CALLBACK_BASE_URL` | `https://<host>/api/` |
+| `TSP_MPESA_CALLBACK_BASE_URL` | Leave unset: the Settings page generates `https://<host>/api/` from the address you open it on. |
 
 Limits of this layout:
 

@@ -21,6 +21,7 @@ type PaybillValues = {
   shortcode: string | null;
   stk_shortcode: string | null;
   callback_base_url: string | null;
+  callback_base_url_fixed: boolean;
   credentials: { consumer_key: Credential; consumer_secret: Credential; passkey: Credential };
 };
 
@@ -28,12 +29,13 @@ export function PaybillForm({
   current,
   savedEnvironment,
   environments,
-  httpsOnly,
+  callbackBase,
 }: {
   current: PaybillValues;
   savedEnvironment: string | null;
   environments: string[];
-  httpsOnly: boolean;
+  /** The callback base URL saving will use (generated or fixed). */
+  callbackBase: string | null;
 }) {
   const [state, action] = useActionState(saveSettings, undefined);
   const [env, setEnv] = useState(current.environment ?? environments[0] ?? "sandbox");
@@ -49,8 +51,6 @@ export function PaybillForm({
         const problem = checkSettingsForm({
           shortcode: String(fd.get("shortcode") ?? "").trim(),
           stk_shortcode: String(fd.get("stk_shortcode") ?? "").trim(),
-          callback_base_url: String(fd.get("callback_base_url") ?? "").trim(),
-          https_only: httpsOnly,
         });
         setClientError(problem);
         if (problem) e.preventDefault();
@@ -59,7 +59,9 @@ export function PaybillForm({
       autoComplete="off"
     >
       <FormError message={state && !state.ok && !state.field ? state.error : undefined} />
-      {state?.ok ? <p className="text-sm text-ok">Settings saved. The api and worker switch to them within a few seconds.</p> : null}
+      {state?.ok ? (
+        <p className="text-sm text-ok">Settings saved. The api and worker switch to them within a few seconds. Next: register the URLs with Safaricom.</p>
+      ) : null}
       <div className="grid gap-4 sm:grid-cols-2">
         <SelectField label="Environment" name="environment" value={env} onChange={(e) => setEnv(e.target.value)} error={err("environment")}>
           {environments.map((v) => (
@@ -86,16 +88,18 @@ export function PaybillForm({
           hint="Leave empty to send prompts from the paybill."
           error={err("stk_shortcode")}
         />
-        <Field
-          label="Callback base URL"
-          name="callback_base_url"
-          required
-          type="url"
-          placeholder="https://api.pay.example.com/"
-          defaultValue={current.callback_base_url ?? ""}
-          hint="The public address Safaricom calls back. Ends with /."
-          error={err("callback_base_url")}
-        />
+        <div className="grid content-start gap-1.5">
+          <span className="text-sm font-medium">Callback base URL</span>
+          <span className="break-all font-mono text-[0.8125rem]" data-testid="callback-base">
+            {callbackBase ?? "—"}
+          </span>
+          <span className="text-[0.8125rem] text-muted">
+            {current.callback_base_url_fixed
+              ? "Set by the deployment configuration (TSP_MPESA_CALLBACK_BASE_URL)."
+              : "Generated from this panel's address when you save. Safaricom calls back here."}
+          </span>
+          {err("callback_base_url") ? <span className="text-[0.8125rem] text-bad">{err("callback_base_url")}</span> : null}
+        </div>
       </div>
       <fieldset className="grid gap-4 sm:grid-cols-3">
         <legend className="mb-2 text-sm text-muted">Daraja credentials. They are stored encrypted and never shown again. Leave a field empty to keep the saved value.</legend>

@@ -5,7 +5,8 @@ import { Facts, PageHeader, Panel } from "@/components/PageHeader";
 import { ToneLabel } from "@/components/ToneLabel";
 import { actorLabel } from "@/lib/labels";
 import { load, requireMe } from "@/lib/api";
-import { credentialLabel, maskCallbackURL, SOURCE_LABEL } from "@/lib/settings";
+import { callbackTokenLabel, credentialLabel, maskCallbackURL, SOURCE_LABEL } from "@/lib/settings";
+import { callbackBaseForThisPanel } from "@/lib/settings-server";
 
 import { PaybillForm, RegisterForm, TestForm } from "./forms";
 
@@ -18,6 +19,8 @@ export default async function SettingsPage() {
   const source = SOURCE_LABEL[s.source] ?? { label: s.source, help: "" };
   const reg = s.registration;
   const who = (actor: string, name: string | null) => name ?? actorLabel(actor);
+  // What saving will use: the deployment's fixed URL, else this panel's address + /api/.
+  const callbackBase = s.callback_base_url_fixed ? s.callback_base_url : await callbackBaseForThisPanel();
 
   return (
     <>
@@ -43,7 +46,7 @@ export default async function SettingsPage() {
               current={s}
               savedEnvironment={s.source === "database" ? s.environment : null}
               environments={s.environments}
-              httpsOnly={s.https_only}
+              callbackBase={callbackBase}
             />
           ) : (
             <Facts
@@ -82,7 +85,7 @@ export default async function SettingsPage() {
                     "Confirmation URL",
                     s.callback_urls ? <span className="font-mono text-[0.8125rem]">{maskCallbackURL(s.callback_urls.confirmation)}</span> : "—",
                   ],
-                  ["Callback token", s.callback_token_set ? "Set in the deployment configuration" : "Missing (TSP_MPESA_CALLBACK_TOKEN)"],
+                  ["Callback token", callbackTokenLabel(s.callback_token_source)],
                   [
                     "Last registration",
                     reg ? (

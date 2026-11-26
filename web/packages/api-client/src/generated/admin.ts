@@ -1552,7 +1552,7 @@ export interface paths {
                         shortcode: string;
                         /** @description STK push BusinessShortCode; empty or null means the paybill */
                         stk_shortcode?: string | null;
-                        /** @description Public base Safaricom calls, ending in /, e.g. https://api.pay.example.com/ */
+                        /** @description Public base Safaricom calls, ending in /, e.g. https://pay.example.com/api/. Ignored when the deployment fixes it (callback_base_url_fixed); the admin panel derives it from its own public address. */
                         callback_base_url: string;
                         consumer_key?: string | null;
                         consumer_secret?: string | null;
@@ -2231,8 +2231,15 @@ export interface components {
                 consumer_secret: components["schemas"]["Credential"];
                 passkey: components["schemas"]["Credential"];
             };
-            /** @description TSP_MPESA_CALLBACK_TOKEN (deployment configuration) */
+            /** @description A callback token is in effect */
             callback_token_set: boolean;
+            /**
+             * @description deployment = TSP_MPESA_CALLBACK_TOKEN; generated = made by the gateway on the first save and stored encrypted with the settings; null = none yet (the next save generates one)
+             * @enum {string|null}
+             */
+            callback_token_source: "deployment" | "generated" | null;
+            /** @description TSP_MPESA_CALLBACK_BASE_URL is set, so saves use it and ignore callback_base_url */
+            callback_base_url_fixed: boolean;
             /** @description Networks in TSP_MPESA_CALLBACK_CIDRS */
             callback_cidrs: number;
             callback_urls: {

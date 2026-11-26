@@ -9,9 +9,13 @@
 //     "set" and, for long values, the last 4 characters.
 //   - Every change is audited (which fields changed, never their values).
 //   - The TSP_MPESA_* configuration (SOPS) is the fallback while nothing is
-//     saved; once saved, the database wins. The callback token, Safaricom's
-//     callback networks and the development base URL always come from the
-//     configuration.
+//     saved; once saved, the database wins. Safaricom's callback networks
+//     and the development base URL always come from the configuration.
+//   - The callback token (the secret part of the callback URLs) is
+//     generated on the first save and stored encrypted with the paybill
+//     settings; TSP_MPESA_CALLBACK_TOKEN, when set, wins. The callback base
+//     URL is fixed by TSP_MPESA_CALLBACK_BASE_URL when that is set;
+//     otherwise the admin panel derives it from its own public address.
 //
 // Provider gives the api and worker the current Daraja client and paybill,
 // rebuilding the client when the saved settings change.
@@ -19,6 +23,8 @@ package mpesasettings
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -57,7 +63,7 @@ const ConfirmProduction = "production"
 // Errors (mapped to API problems by internal/adminapi).
 var (
 	ErrNotConfigured   = errors.New("mpesasettings: M-Pesa is not configured")
-	ErrNoCallbackToken = errors.New("mpesasettings: TSP_MPESA_CALLBACK_TOKEN is not set")
+	ErrNoCallbackToken = errors.New("mpesasettings: no callback token (save the settings, or set TSP_MPESA_CALLBACK_TOKEN)")
 	ErrConfirm         = errors.New(`mpesasettings: production needs confirm: "production"`)
 )
 
@@ -157,8 +163,14 @@ type Settings struct {
 	ConsumerSecret  config.Secret
 	Passkey         config.Secret
 	CallbackBaseURL string
+	// CallbackToken is the effective callback token: TSP_MPESA_CALLBACK_TOKEN
+	// when set, else the generated one saved with the settings.
+	CallbackToken config.Secret
 	// Version of the saved row (0 when not from the database).
 	Version int64
+
+	// storedToken is the token saved with the settings (zero if none).
+	storedToken config.Secret
 
 	row *store.MpesaSetting
 }
@@ -181,12 +193,12 @@ func (s *Service) Get(ctx context.Context) (Settings, error) {
 func (s *Service) fallback() Settings {
 	m := s.o.Mpesa
 	if !m.Enabled() {
-		return Settings{Source: SourceNone, Paybill: s.o.Paybill}
+		return Settings{Source: SourceNone, Paybill: s.o.Paybill, CallbackToken: m.CallbackToken}
 	}
 	return Settings{
 		Source: SourceEnvironment, Environment: m.Env, Paybill: s.o.Paybill, STKShortCode: m.ShortCode,
 		ConsumerKey: m.ConsumerKey, ConsumerSecret: m.ConsumerSecret, Passkey: m.Passkey,
-		CallbackBaseURL: m.CallbackBaseURL,
+		CallbackBaseURL: m.CallbackBaseURL, CallbackToken: m.CallbackToken,
 	}
 }
 
@@ -202,29 +214,62 @@ func (s *Service) open(row store.MpesaSetting) (Settings, error) {
 		}
 		plain[i] = config.NewSecret(string(pt))
 	}
+	var stored config.Secret
+	if row.CallbackTokenCiphertext != nil {
+		pt, err := s.o.Keyring.Open(row.CallbackTokenCiphertext, int(row.KeyVersion), aad("callback_token"))
+		if err != nil {
+			return Settings{}, fmt.Errorf("mpesasettings: open callback_token: %w", err)
+		}
+		stored = config.NewSecret(string(pt))
+	}
 	stk := row.Shortcode
 	if row.StkShortcode != nil {
 		stk = *row.StkShortcode
 	}
-	return Settings{
+	st := Settings{
 		Source: SourceDatabase, Environment: row.Environment, Paybill: row.Shortcode, STKShortCode: stk,
 		ConsumerKey: plain[0], ConsumerSecret: plain[1], Passkey: plain[2],
-		CallbackBaseURL: row.CallbackBaseUrl, Version: row.Version, row: &row,
-	}, nil
+		CallbackBaseURL: row.CallbackBaseUrl, Version: row.Version, row: &row, storedToken: stored,
+	}
+	st.CallbackToken = s.effectiveToken(stored)
+	return st, nil
 }
+
+// effectiveToken: the deployment's TSP_MPESA_CALLBACK_TOKEN when set, else
+// the token saved with the settings.
+func (s *Service) effectiveToken(stored config.Secret) config.Secret {
+	if !s.o.Mpesa.CallbackToken.IsZero() {
+		return s.o.Mpesa.CallbackToken
+	}
+	return stored
+}
+
+// newCallbackToken returns 32 random bytes, base64url (43 characters of
+// A-Z a-z 0-9 _ -, as Daraja URLs and mpesa.ClientOptions require).
+func newCallbackToken() (config.Secret, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return config.Secret{}, fmt.Errorf("mpesasettings: generate callback token: %w", err)
+	}
+	return config.NewSecret(base64.RawURLEncoding.EncodeToString(b)), nil
+}
+
+// CallbackBaseURLFixed reports whether the deployment fixes the callback
+// base URL (TSP_MPESA_CALLBACK_BASE_URL); Save then always uses it.
+func (s *Service) CallbackBaseURLFixed() bool { return s.o.Mpesa.CallbackBaseURL != "" }
 
 // client builds a Daraja client for st. Errors never contain secrets.
 func (s *Service) client(st Settings) (*mpesa.HTTPClient, error) {
 	if st.Source == SourceNone {
 		return nil, ErrNotConfigured
 	}
-	if s.o.Mpesa.CallbackToken.IsZero() {
+	if st.CallbackToken.IsZero() {
 		return nil, ErrNoCallbackToken
 	}
 	return mpesa.NewClient(mpesa.ClientOptions{
 		Env: st.Environment, BaseURL: s.o.Mpesa.BaseURL, ShortCode: st.STKShortCode,
 		ConsumerKey: st.ConsumerKey, ConsumerSecret: st.ConsumerSecret, Passkey: st.Passkey,
-		CallbackToken: s.o.Mpesa.CallbackToken, CallbackBaseURL: st.CallbackBaseURL,
+		CallbackToken: st.CallbackToken, CallbackBaseURL: st.CallbackBaseURL,
 		Timeout: s.o.Mpesa.RequestTimeout, Logger: s.o.Logger, HTTPClient: s.o.HTTPClient,
 	})
 }
@@ -286,10 +331,16 @@ type Status struct {
 	ConsumerKey     Credential
 	ConsumerSecret  Credential
 	Passkey         Credential
+	// CallbackTokenSet: a callback token is in effect; CallbackTokenSource
+	// says where it comes from ("deployment" or "generated"; "" when none).
+	CallbackTokenSet    bool
+	CallbackTokenSource string
+	// CallbackBaseURLFixed: the deployment sets the callback base URL, so
+	// Save uses that whatever is sent.
+	CallbackBaseURLFixed bool
 	// Configuration-only settings.
-	CallbackTokenSet bool
-	CallbackCIDRs    int
-	CallbackURLs     CallbackURLs
+	CallbackCIDRs int
+	CallbackURLs  CallbackURLs
 	// Saved-row metadata (zero for the fallback).
 	Version      int64
 	UpdatedBy    string
@@ -318,12 +369,19 @@ func (s *Service) status(st Settings) Status {
 	out := Status{
 		Source: st.Source, Environment: st.Environment, Paybill: st.Paybill, CallbackBaseURL: st.CallbackBaseURL,
 		ConsumerKey: credential(st.ConsumerKey), ConsumerSecret: credential(st.ConsumerSecret), Passkey: credential(st.Passkey),
-		CallbackTokenSet: !s.o.Mpesa.CallbackToken.IsZero(), CallbackCIDRs: len(s.o.Mpesa.CallbackCIDRs),
-		CallbackURLs: maskedURLs(st.CallbackBaseURL), Version: st.Version,
+		CallbackTokenSet: !st.CallbackToken.IsZero(), CallbackBaseURLFixed: s.CallbackBaseURLFixed(),
+		CallbackCIDRs: len(s.o.Mpesa.CallbackCIDRs),
+		CallbackURLs:  maskedURLs(st.CallbackBaseURL), Version: st.Version,
 		Environments: s.environments(), HTTPSOnly: s.o.Env != config.EnvDevelopment,
 	}
 	if st.STKShortCode != st.Paybill {
 		out.STKShortCode = st.STKShortCode
+	}
+	switch {
+	case !s.o.Mpesa.CallbackToken.IsZero():
+		out.CallbackTokenSource = "deployment"
+	case !st.CallbackToken.IsZero():
+		out.CallbackTokenSource = "generated"
 	}
 	if r := st.row; r != nil {
 		out.UpdatedBy, out.UpdatedAt = r.UpdatedBy, &r.UpdatedAt
@@ -350,7 +408,7 @@ func problem(err error) string {
 	case errors.Is(err, ErrNotConfigured):
 		return "M-Pesa is off: no paybill is saved and TSP_MPESA_ENV is not set."
 	case errors.Is(err, ErrNoCallbackToken):
-		return "TSP_MPESA_CALLBACK_TOKEN is not set in the deployment configuration, so Safaricom has nowhere to call back. M-Pesa stays off until it is."
+		return "There is no callback token yet, so Safaricom has nowhere to call back. Saving the settings here generates one (or set TSP_MPESA_CALLBACK_TOKEN in the deployment configuration)."
 	}
 	return "The settings cannot be used: " + strings.TrimPrefix(err.Error(), "mpesa: ")
 }
@@ -400,6 +458,9 @@ func (s *Service) validate(p *SaveParams, first bool) error {
 	p.Paybill = strings.TrimSpace(p.Paybill)
 	p.STKShortCode = strings.TrimSpace(p.STKShortCode)
 	p.CallbackBaseURL = strings.TrimSpace(p.CallbackBaseURL)
+	if s.CallbackBaseURLFixed() {
+		p.CallbackBaseURL = s.o.Mpesa.CallbackBaseURL
+	}
 	if !slices.Contains(s.environments(), p.Environment) {
 		switch {
 		case p.Environment != config.MpesaSandbox && p.Environment != config.MpesaProduction:
@@ -484,9 +545,21 @@ func (s *Service) Save(ctx context.Context, actor audit.Actor, p SaveParams) (St
 		}
 		next := Settings{Environment: p.Environment, Paybill: p.Paybill, STKShortCode: p.STKShortCode,
 			CallbackBaseURL: p.CallbackBaseURL, ConsumerKey: p.ConsumerKey, ConsumerSecret: p.ConsumerSecret, Passkey: p.Passkey}
+		// The saved callback token is kept for ever once generated (it is
+		// in the URLs registered with Safaricom); the first save makes one.
 		var changed []string
+		if old != nil && !old.storedToken.IsZero() {
+			next.storedToken = old.storedToken
+		} else {
+			tok, err := newCallbackToken()
+			if err != nil {
+				return err
+			}
+			next.storedToken = tok
+			changed = append(changed, "callback_token")
+		}
 		if old == nil {
-			changed = []string{"environment", "shortcode", "callback_base_url", "consumer_key", "consumer_secret", "passkey"}
+			changed = append([]string{"environment", "shortcode", "callback_base_url", "consumer_key", "consumer_secret", "passkey"}, changed...)
 			if p.STKShortCode != "" {
 				changed = append(changed, "stk_shortcode")
 			}
@@ -529,12 +602,13 @@ func (s *Service) Save(ctx context.Context, actor audit.Actor, p SaveParams) (St
 			return nil
 		}
 		changedAny = true
-		var cts [3][]byte
+		var cts [4][]byte
 		ver := 0
 		for i, f := range []struct {
 			name string
 			v    config.Secret
-		}{{"consumer_key", next.ConsumerKey}, {"consumer_secret", next.ConsumerSecret}, {"passkey", next.Passkey}} {
+		}{{"consumer_key", next.ConsumerKey}, {"consumer_secret", next.ConsumerSecret}, {"passkey", next.Passkey},
+			{"callback_token", next.storedToken}} {
 			ct, v, err := s.o.Keyring.Seal([]byte(f.v.Reveal()), aad(f.name))
 			if err != nil {
 				return err
@@ -547,7 +621,7 @@ func (s *Service) Save(ctx context.Context, actor audit.Actor, p SaveParams) (St
 		}
 		row, err = q.UpsertMpesaSettings(ctx, store.UpsertMpesaSettingsParams{
 			Environment: next.Environment, Shortcode: next.Paybill, StkShortcode: stk,
-			ConsumerKeyCiphertext: cts[0], ConsumerSecretCiphertext: cts[1], PasskeyCiphertext: cts[2],
+			ConsumerKeyCiphertext: cts[0], ConsumerSecretCiphertext: cts[1], PasskeyCiphertext: cts[2], CallbackTokenCiphertext: cts[3],
 			KeyVersion: int32(ver), CallbackBaseUrl: next.CallbackBaseURL, UpdatedBy: actor.String(),
 		})
 		if err != nil {
@@ -604,7 +678,7 @@ func (s *Service) Test(ctx context.Context, actor audit.Actor) (TestResult, erro
 	res := TestResult{OK: true}
 	if derr := c.CheckCredentials(cctx); derr != nil {
 		res.OK = false
-		res.Message = RedactToken(derr.Error(), s.o.Mpesa.CallbackToken.Reveal())
+		res.Message = RedactToken(derr.Error(), st.CallbackToken.Reveal())
 	}
 	res.At = s.o.Now()
 	actx, acancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -658,7 +732,7 @@ func (s *Service) RegisterURLs(ctx context.Context, actor audit.Actor, confirm s
 	if st.Environment == config.MpesaProduction && confirm != ConfirmProduction {
 		return RegisterResult{}, ErrConfirm
 	}
-	token := s.o.Mpesa.CallbackToken.Reveal()
+	token := st.CallbackToken.Reveal()
 	_, confirmation, validation := c.CallbackURLs()
 	req := mpesa.RegisterURLsRequest{ShortCode: st.Paybill, ConfirmationURL: confirmation, ValidationURL: validation, ResponseType: "Completed"}
 	cctx, cancel := context.WithTimeout(ctx, registerTimeout)

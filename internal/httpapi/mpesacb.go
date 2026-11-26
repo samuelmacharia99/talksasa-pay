@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 	"github.com/talksasa/talksasa-pay/internal/store"
 )
@@ -46,11 +47,17 @@ type callbacks struct {
 	limiter *httpx.RateLimiter
 	cidrs   []netip.Prefix
 	// want is SHA-256 of the configured token; nil rejects everything.
-	want []byte
+	// tokenFrom, when set, replaces it: the token in effect, read per request.
+	want      []byte
+	tokenFrom func() config.Secret
 }
 
 func newCallbacks(d Deps) *callbacks {
-	c := &callbacks{stk: d.STK, logger: d.Logger, limiter: d.MpesaCallbackLimiter, cidrs: d.MpesaCallbackCIDRs}
+	c := &callbacks{stk: d.STK, logger: d.Logger, limiter: d.MpesaCallbackLimiter, cidrs: d.MpesaCallbackCIDRs,
+		tokenFrom: d.MpesaCallbackTokenFrom}
+	if c.tokenFrom != nil {
+		return c
+	}
 	if tok := d.MpesaCallbackToken.Reveal(); tok != "" {
 		sum := sha256.Sum256([]byte(tok))
 		c.want = sum[:]
@@ -86,11 +93,19 @@ func callbackKind(path string) string {
 }
 
 func (c *callbacks) tokenOK(got string) bool {
-	if c.want == nil {
+	want := c.want
+	if c.tokenFrom != nil {
+		want = nil
+		if tok := c.tokenFrom().Reveal(); tok != "" {
+			sum := sha256.Sum256([]byte(tok))
+			want = sum[:]
+		}
+	}
+	if want == nil {
 		return false
 	}
 	sum := sha256.Sum256([]byte(got))
-	return subtle.ConstantTimeCompare(sum[:], c.want) == 1
+	return subtle.ConstantTimeCompare(sum[:], want) == 1
 }
 
 func (c *callbacks) verify(next http.Handler) http.Handler {

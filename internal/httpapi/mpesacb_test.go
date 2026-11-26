@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/talksasa/talksasa-pay/internal/config"
@@ -247,4 +248,29 @@ func TestCallbacksRateLimitedPerIP(t *testing.T) {
 func TestCallbacksNeedNoAPIKey(t *testing.T) {
 	e := newCBEnv(t, nil)
 	expectAck(t, e.post("/cb/mpesa/"+cbToken+"/stk", stkBody, fromSafaricom(), withHeader("Authorization", "Bearer junk")))
+}
+
+// A token generated on the Settings page applies without a restart: the
+// intake reads the token in effect on every callback.
+func TestCallbackTokenFollowsSettings(t *testing.T) {
+	var mu sync.Mutex
+	current := config.Secret{}
+	e := newCBEnv(t, func(d *httpapi.Deps) {
+		d.MpesaCallbackToken = config.Secret{}
+		d.PaybillFrom = func() string { return "600111" }
+		d.MpesaCallbackTokenFrom = func() config.Secret { mu.Lock(); defer mu.Unlock(); return current }
+	})
+	if r := e.post("/cb/mpesa/"+cbToken+"/stk", stkBody, fromSafaricom()); r.code != 404 {
+		t.Fatalf("no token yet: %d", r.code)
+	}
+	mu.Lock()
+	current = config.NewSecret(cbToken)
+	mu.Unlock()
+	expectAck(t, e.post("/cb/mpesa/"+cbToken+"/stk", stkBody, fromSafaricom()))
+	if r := e.post("/cb/mpesa/"+cbToken+"x/stk", stkBody, fromSafaricom()); r.code != 404 {
+		t.Fatalf("wrong token: %d", r.code)
+	}
+	if n := len(e.stk.storedCallbacks()); n != 1 {
+		t.Fatalf("stored %d", n)
+	}
 }

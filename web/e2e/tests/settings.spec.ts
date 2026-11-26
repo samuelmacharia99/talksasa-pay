@@ -45,7 +45,9 @@ test("admin saves sandbox paybill settings, tests them and registers the callbac
   await page.getByLabel("Environment").selectOption("sandbox");
   await page.getByLabel("Paybill number").fill("174379");
   await page.getByLabel("STK shortcode (optional)").fill("");
-  await page.getByLabel("Callback base URL").fill("http://api:8088/");
+  // The callback base URL is not typed in: here the deployment fixes it.
+  await expect(page.getByTestId("callback-base")).toHaveText("http://api:8088/");
+  await expect(page.getByText("Set by the deployment configuration (TSP_MPESA_CALLBACK_BASE_URL).")).toBeVisible();
   await page.getByLabel("Consumer key").fill(KEY);
   await page.getByLabel("Consumer secret").fill(SECRET);
   await page.getByLabel("Passkey").fill(PASSKEY);

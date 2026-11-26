@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/mpesa"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/store"
@@ -42,6 +43,8 @@ type snapshot struct {
 	version int64
 	paybill string
 	client  *mpesa.HTTPClient // nil: not usable
+	// token is the effective callback token (zero: none).
+	token config.Secret
 }
 
 var _ mpesa.Client = (*Provider)(nil)
@@ -101,7 +104,7 @@ func (p *Provider) refreshLocked(ctx context.Context) {
 		p.log.ErrorContext(ctx, "mpesa settings: could not load the saved settings; keeping the current settings", slog.String("error", err.Error()))
 		return
 	}
-	snap := &snapshot{source: st.Source, version: st.Version, paybill: st.Paybill}
+	snap := &snapshot{source: st.Source, version: st.Version, paybill: st.Paybill, token: st.CallbackToken}
 	attrs := []any{slog.String("source", string(st.Source)), slog.Int64("version", st.Version)}
 	c, cerr := p.svc.client(st)
 	switch {
@@ -124,6 +127,12 @@ func (p *Provider) Configured() bool { return p.current().client != nil }
 // PaybillShortCode is the paybill in effect ("" when none): shown on the
 // pay page, and the only shortcode whose C2B confirmations are recorded.
 func (p *Provider) PaybillShortCode() string { return p.current().paybill }
+
+// CallbackToken is the callback token Safaricom's requests must carry now
+// (zero when there is none). The callback intake checks every request
+// against it, so a token generated on the Settings page applies without a
+// restart.
+func (p *Provider) CallbackToken() config.Secret { return p.current().token }
 
 // Source says where the settings in effect come from.
 func (p *Provider) Source() Source { return p.current().source }

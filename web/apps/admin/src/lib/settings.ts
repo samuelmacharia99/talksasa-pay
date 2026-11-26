@@ -31,22 +31,33 @@ export function needsConfirmation(saved: string | null, chosen: string): boolean
 }
 
 /** Light checks before sending; the Go service is authoritative. */
-export function checkSettingsForm(v: { shortcode: string; stk_shortcode: string; callback_base_url: string; https_only: boolean }):
-  | { field: string; message: string }
-  | undefined {
+export function checkSettingsForm(v: { shortcode: string; stk_shortcode: string }): { field: string; message: string } | undefined {
   if (!/^\d{5,7}$/.test(v.shortcode)) return { field: "shortcode", message: "The paybill number must be 5-7 digits." };
   if (v.stk_shortcode && !/^\d{5,7}$/.test(v.stk_shortcode)) {
     return { field: "stk_shortcode", message: "The STK shortcode must be 5-7 digits, or empty to use the paybill." };
   }
-  let u: URL;
-  try {
-    u = new URL(v.callback_base_url);
-  } catch {
-    return { field: "callback_base_url", message: "Enter an absolute URL such as https://api.pay.example.com/." };
-  }
-  if (u.protocol !== "https:" && (v.https_only || u.protocol !== "http:")) {
-    return { field: "callback_base_url", message: "The callback base URL must use https." };
-  }
-  if (!v.callback_base_url.endsWith("/")) return { field: "callback_base_url", message: "The callback base URL must end with /." };
   return undefined;
+}
+
+/**
+ * The callback base URL generated from this panel's own public address:
+ * the Go service answers under /api on the same host (the host's gateway
+ * routes /api/* to it). null when the address is not a plain host[:port].
+ * `host` is X-Forwarded-Host (set by the gateway) or Host; `proto` is
+ * X-Forwarded-Proto.
+ */
+export function derivedCallbackBase(host: string | null, proto: string | null): string | null {
+  const h = host?.split(",")[0]?.trim().toLowerCase() ?? "";
+  if (!/^[a-z0-9.-]+(:\d{1,5})?$/.test(h) || h.startsWith(".") || h.startsWith("-")) return null;
+  const p = proto?.split(",")[0]?.trim().toLowerCase();
+  const local = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(h);
+  const scheme = p === "http" || p === "https" ? p : local ? "http" : "https";
+  return `${scheme}://${h}/api/`;
+}
+
+/** What the Settings page says about the callback token. */
+export function callbackTokenLabel(source: string | null): string {
+  if (source === "deployment") return "Set in the deployment configuration (TSP_MPESA_CALLBACK_TOKEN)";
+  if (source === "generated") return "Generated and stored encrypted";
+  return "Generated when you save the settings";
 }

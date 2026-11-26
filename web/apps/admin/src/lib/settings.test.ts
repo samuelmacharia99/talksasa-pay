@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { checkSettingsForm, credentialLabel, maskCallbackURL, needsConfirmation } from "./settings";
+import { callbackTokenLabel, checkSettingsForm, credentialLabel, derivedCallbackBase, maskCallbackURL, needsConfirmation } from "./settings";
 
 describe("credentialLabel", () => {
   it("never shows more than the last four characters", () => {
@@ -25,16 +25,35 @@ describe("needsConfirmation", () => {
 });
 
 describe("checkSettingsForm", () => {
-  const ok = { shortcode: "174379", stk_shortcode: "", callback_base_url: "https://api.example/", https_only: true };
+  const ok = { shortcode: "174379", stk_shortcode: "" };
   it("accepts good settings", () => {
     expect(checkSettingsForm(ok)).toBeUndefined();
-    expect(checkSettingsForm({ ...ok, callback_base_url: "http://api:8088/", https_only: false })).toBeUndefined();
+    expect(checkSettingsForm({ ...ok, stk_shortcode: "600111" })).toBeUndefined();
   });
   it("points at the field to fix", () => {
     expect(checkSettingsForm({ ...ok, shortcode: "12ab" })?.field).toBe("shortcode");
     expect(checkSettingsForm({ ...ok, stk_shortcode: "1" })?.field).toBe("stk_shortcode");
-    expect(checkSettingsForm({ ...ok, callback_base_url: "http://api.example/" })?.field).toBe("callback_base_url");
-    expect(checkSettingsForm({ ...ok, callback_base_url: "https://api.example" })?.message).toContain("end with /");
-    expect(checkSettingsForm({ ...ok, callback_base_url: "not a url" })?.field).toBe("callback_base_url");
+  });
+});
+
+describe("derivedCallbackBase", () => {
+  it("is this panel's public address plus /api/", () => {
+    expect(derivedCallbackBase("user-4-service-641-go.talksasa.live", "https")).toBe("https://user-4-service-641-go.talksasa.live/api/");
+    expect(derivedCallbackBase("Pay.Example.com", null)).toBe("https://pay.example.com/api/");
+    expect(derivedCallbackBase("pay.example.com, edge", "https, http")).toBe("https://pay.example.com/api/");
+    expect(derivedCallbackBase("127.0.0.1:3001", null)).toBe("http://127.0.0.1:3001/api/");
+  });
+  it("refuses anything that is not a plain host", () => {
+    for (const h of [null, "", "evil.com/x", "a b", "user@host", ".example.com", "host:99999999"]) {
+      expect(derivedCallbackBase(h, "https")).toBeNull();
+    }
+  });
+});
+
+describe("callbackTokenLabel", () => {
+  it("says where the token comes from", () => {
+    expect(callbackTokenLabel("deployment")).toContain("TSP_MPESA_CALLBACK_TOKEN");
+    expect(callbackTokenLabel("generated")).toContain("Generated");
+    expect(callbackTokenLabel(null)).toContain("when you save");
   });
 });

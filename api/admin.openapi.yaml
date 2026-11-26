@@ -645,7 +645,7 @@ paths:
                 environment: { type: string, enum: [sandbox, production] }
                 shortcode: { type: string, description: The paybill (5-7 digits) }
                 stk_shortcode: { type: [string, "null"], description: STK push BusinessShortCode; empty or null means the paybill }
-                callback_base_url: { type: string, description: "Public base Safaricom calls, ending in /, e.g. https://api.pay.example.com/" }
+                callback_base_url: { type: string, description: "Public base Safaricom calls, ending in /, e.g. https://pay.example.com/api/. Ignored when the deployment fixes it (callback_base_url_fixed); the admin panel derives it from its own public address." }
                 consumer_key: { type: [string, "null"], writeOnly: true }
                 consumer_secret: { type: [string, "null"], writeOnly: true }
                 passkey: { type: [string, "null"], writeOnly: true }
@@ -1061,7 +1061,8 @@ components:
         message: { type: [string, "null"], description: Why Safaricom refused (never secret) }
     MpesaSettings:
       type: object
-      required: [source, environment, shortcode, stk_shortcode, callback_base_url, credentials, callback_token_set, callback_cidrs,
+      required: [source, environment, shortcode, stk_shortcode, callback_base_url, credentials, callback_token_set,
+        callback_token_source, callback_base_url_fixed, callback_cidrs,
         callback_urls, version, updated_by, updated_by_name, updated_at, registration, last_test, ready, problem, environments, https_only]
       properties:
         source: { type: string, enum: [database, environment, none] }
@@ -1076,7 +1077,16 @@ components:
             consumer_key: { $ref: "#/components/schemas/Credential" }
             consumer_secret: { $ref: "#/components/schemas/Credential" }
             passkey: { $ref: "#/components/schemas/Credential" }
-        callback_token_set: { type: boolean, description: TSP_MPESA_CALLBACK_TOKEN (deployment configuration) }
+        callback_token_set: { type: boolean, description: A callback token is in effect }
+        callback_token_source:
+          type: [string, "null"]
+          enum: [deployment, generated, null]
+          description: >-
+            deployment = TSP_MPESA_CALLBACK_TOKEN; generated = made by the gateway on the first save and
+            stored encrypted with the settings; null = none yet (the next save generates one)
+        callback_base_url_fixed:
+          type: boolean
+          description: TSP_MPESA_CALLBACK_BASE_URL is set, so saves use it and ignore callback_base_url
         callback_cidrs: { type: integer, description: Networks in TSP_MPESA_CALLBACK_CIDRS }
         callback_urls:
           type: [object, "null"]
