@@ -52,6 +52,9 @@ type Deps struct {
 	// MpesaSettings serves the Settings page (the M-Pesa paybill);
 	// *mpesasettings.Service. nil: the settings routes answer 503.
 	MpesaSettings SettingsService
+	// TestPayments runs real test payments from the Settings page
+	// (*testpay.Service). nil: those routes answer 503.
+	TestPayments TestPayments
 }
 
 // Route is one authenticated admin route and the permission it requires.
@@ -119,6 +122,8 @@ func Routes(d Deps) []Route {
 		{http.MethodPut, "/settings/mpesa", admin.PermManageSettings, h.putMpesaSettings},
 		{http.MethodPost, "/settings/mpesa/test", admin.PermManageSettings, h.testMpesaSettings},
 		{http.MethodPost, "/settings/mpesa/register-urls", admin.PermManageSettings, h.registerMpesaURLs},
+		{http.MethodGet, "/settings/mpesa/test-payments", admin.PermManageSettings, h.listTestPayments},
+		{http.MethodPost, "/settings/mpesa/test-payments", admin.PermManageSettings, h.startTestPayment},
 
 		{http.MethodGet, "/users", admin.PermManageUsers, h.listUsers},
 		{http.MethodPost, "/users", admin.PermManageUsers, h.inviteUser},

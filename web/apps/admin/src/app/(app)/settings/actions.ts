@@ -1,5 +1,6 @@
 "use server";
 
+import type { AdminSchemas } from "@talksasa/api-client/admin";
 import { revalidatePath } from "next/cache";
 
 import { act, type ActionResult } from "@/lib/api";
@@ -59,4 +60,31 @@ export async function registerURLs(_: RegisterResult, fd: FormData): Promise<Reg
   if (!r.ok) return r;
   revalidatePath("/settings");
   return { ok: true, data: { registered_at: r.data.registered_at, confirmation_url: r.data.confirmation_url } };
+}
+
+export type TestPayment = AdminSchemas["TestPayment"];
+export type TestPaymentResult = ActionResult<TestPayment> | undefined;
+
+/** Sends a real test payment prompt (admins; KES 1-1,000). */
+export async function startTestPayment(_: TestPaymentResult, fd: FormData): Promise<TestPaymentResult> {
+  const amount = Number(str(fd, "amount"));
+  const r = await act((c) =>
+    c.POST("/settings/mpesa/test-payments", {
+      body: {
+        amount: Number.isInteger(amount) ? amount : 0,
+        phone: str(fd, "phone"),
+        key: str(fd, "key"),
+        confirm: str(fd, "confirm") || null,
+      },
+    }),
+  );
+  if (!r.ok) return r;
+  revalidatePath("/settings");
+  return { ok: true, data: r.data };
+}
+
+/** The latest test payments, for the live status while a prompt is out. */
+export async function recentTestPayments(): Promise<TestPayment[]> {
+  const r = await act((c) => c.GET("/settings/mpesa/test-payments"));
+  return r.ok ? r.data.items : [];
 }

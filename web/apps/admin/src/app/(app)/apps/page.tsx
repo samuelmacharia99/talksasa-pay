@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { PageHeader, Panel } from "@/components/PageHeader";
+import { TestAppBadge } from "@/components/TestAppBadge";
 import { getMe, load } from "@/lib/api";
 
 import { CreateAppForm } from "./forms";
@@ -40,6 +41,7 @@ export default async function Apps() {
                       <Link href={`/apps/${p.id}`} className="font-medium text-ink hover:text-violet hover:underline">
                         {p.name}
                       </Link>
+                      {p.gateway_test ? <TestAppBadge /> : null}
                     </Td>
                     <Td className="font-medium">{p.account_prefix}</Td>
                     <Td>

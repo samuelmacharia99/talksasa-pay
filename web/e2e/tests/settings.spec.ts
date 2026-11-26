@@ -74,4 +74,35 @@ test("admin saves sandbox paybill settings, tests them and registers the callbac
   await expect(page.getByTestId("registration")).not.toContainText("older paybill");
   expect(await page.content()).not.toContain("/cb/mpesa/" + (process.env.E2E_MPESA_CALLBACK_TOKEN ?? "never-set"));
   await page.screenshot({ path: `${SHOTS}/settings.png`, fullPage: true });
+
+  // Test payments: the fake Daraja pays phones ending in 0 and cancels
+  // phones ending in 1. Each runs the real charge + prompt + callback path.
+  const tests = page.getByRole("form", { name: "Test payment" });
+  const before = await page.getByTestId("test-payment").count();
+  await tests.getByLabel("Amount (KES)").fill("1001");
+  await tests.getByLabel("Phone number").fill("0712345670");
+  await tests.getByRole("button", { name: "Send test payment" }).click();
+  // Over the cap: the browser refuses to submit, so no prompt is sent.
+  expect(await tests.getByLabel("Amount (KES)").evaluate((el) => (el as HTMLInputElement).validity.rangeOverflow)).toBe(true);
+  await expect(page.getByTestId("test-payment")).toHaveCount(before);
+
+  await tests.getByLabel("Amount (KES)").fill("3");
+  await tests.getByRole("button", { name: "Send test payment" }).click();
+  const paid = page.getByTestId("test-payment").first();
+  await expect(paid).toContainText("KES 3");
+  await expect(paid).toContainText("Paid", { timeout: 60_000 });
+
+  await tests.getByLabel("Amount (KES)").fill("2");
+  await tests.getByLabel("Phone number").fill("0712345671");
+  await tests.getByRole("button", { name: "Send test payment" }).click();
+  const cancelled = page.getByTestId("test-payment").first();
+  await expect(cancelled).toContainText("KES 2");
+  await expect(cancelled).toContainText("Not paid", { timeout: 60_000 });
+  await page.screenshot({ path: `${SHOTS}/settings-test-payments.png`, fullPage: true });
+
+  // The money sits on the internal Gateway test app, marked as such.
+  await paid.getByRole("link", { name: "Charge" }).click();
+  await expect(page.getByText("Gateway test").first()).toBeVisible();
+  await page.goto(`${ADMIN}/apps`);
+  await expect(page.getByRole("row", { name: /Gateway test/ })).toContainText("Test");
 });

@@ -40,6 +40,9 @@ type App struct {
 	WebhookURL    string
 	Status        store.AppStatus
 	CreatedAt     time.Time
+	// GatewayTest marks the reserved internal app that Settings test
+	// payments are charged to (see EnsureGatewayTestApp).
+	GatewayTest bool
 }
 
 // Service manages apps and API keys.
@@ -93,6 +96,63 @@ type Created struct {
 // Create registers an app and its webhook
 // signing secret, and audits the action.
 func (s *Service) Create(ctx context.Context, actor audit.Actor, p CreateParams) (Created, error) {
+	return s.create(ctx, actor, p, false)
+}
+
+// The reserved internal app for Settings test payments. Its prefix routes
+// paybill payments to GWTEST-... account numbers to it, like any app.
+const (
+	GatewayTestName   = "Gateway test"
+	GatewayTestPrefix = "GWTEST"
+)
+
+// ErrGatewayTestPrefixTaken: a real app already uses the reserved prefix.
+var ErrGatewayTestPrefixTaken = errors.New("app: the account prefix " + GatewayTestPrefix + " is used by another app; the gateway test app cannot be created")
+
+// EnsureGatewayTestApp returns the reserved "Gateway test" app, creating it
+// on first use (audited as app.created by the staff member running the
+// first test). It is an ordinary app with no API keys and no webhook URL.
+func (s *Service) EnsureGatewayTestApp(ctx context.Context, actor audit.Actor) (App, error) {
+	q := store.New(s.pool)
+	row, err := q.GetGatewayTestApp(ctx)
+	if err == nil {
+		return fromRow(row), nil
+	}
+	if !db.IsNotFound(err) {
+		return App{}, fmt.Errorf("app: load gateway test app: %w", err)
+	}
+	created, err := s.create(ctx, actor, CreateParams{Name: GatewayTestName, AccountPrefix: GatewayTestPrefix}, true)
+	switch {
+	case err == nil:
+		return created.App, nil
+	case errors.Is(err, errGatewayTestExists):
+		// A concurrent first test created it.
+		row, err := q.GetGatewayTestApp(ctx)
+		if err != nil {
+			return App{}, fmt.Errorf("app: load gateway test app: %w", err)
+		}
+		return fromRow(row), nil
+	case errors.Is(err, ErrPrefixTaken):
+		return App{}, ErrGatewayTestPrefixTaken
+	}
+	return App{}, err
+}
+
+var errGatewayTestExists = errors.New("app: gateway test app already exists")
+
+// GatewayTestApp returns the reserved app if it has been created.
+func (s *Service) GatewayTestApp(ctx context.Context) (App, bool, error) {
+	row, err := store.New(s.pool).GetGatewayTestApp(ctx)
+	if db.IsNotFound(err) {
+		return App{}, false, nil
+	}
+	if err != nil {
+		return App{}, false, fmt.Errorf("app: load gateway test app: %w", err)
+	}
+	return fromRow(row), true, nil
+}
+
+func (s *Service) create(ctx context.Context, actor audit.Actor, p CreateParams, gatewayTest bool) (Created, error) {
 	name := strings.TrimSpace(p.Name)
 	if name == "" || len(name) > 100 {
 		return Created{}, ErrInvalidName
@@ -125,17 +185,23 @@ func (s *Service) Create(ctx context.Context, actor audit.Actor, p CreateParams)
 		var err error
 		row, err = q.CreateApp(ctx, store.CreateAppParams{
 			ID: id, Name: name, AccountPrefix: prefix, WebhookUrl: hook,
-			WebhookSecretCiphertext: ct, WebhookSecretKeyVersion: int32(ver),
+			WebhookSecretCiphertext: ct, WebhookSecretKeyVersion: int32(ver), GatewayTest: gatewayTest,
 		})
 		if err != nil {
+			if db.IsUniqueViolation(err, "apps_one_gateway_test") {
+				return errGatewayTestExists
+			}
 			if db.IsUniqueViolation(err, "apps_account_prefix_key") {
 				return ErrPrefixTaken
 			}
 			return fmt.Errorf("app: insert: %w", err)
 		}
+		details := map[string]any{"name": name, "account_prefix": prefix, "webhook_url": derefStr(hook)}
+		if gatewayTest {
+			details["gateway_test"] = true
+		}
 		return audit.Record(ctx, q, audit.Entry{
-			Actor: actor, Action: "app.created", EntityType: "app", EntityID: id.String(), AppID: &id,
-			Details: map[string]any{"name": name, "account_prefix": prefix, "webhook_url": derefStr(hook)},
+			Actor: actor, Action: "app.created", EntityType: "app", EntityID: id.String(), AppID: &id, Details: details,
 		})
 	})
 	if err != nil {
@@ -339,7 +405,7 @@ func webhookSecretAAD(id uuid.UUID) []byte { return []byte("apps.webhook_secret:
 func fromRow(r store.App) App {
 	return App{
 		ID: r.ID, Name: r.Name, AccountPrefix: r.AccountPrefix, WebhookURL: derefStr(r.WebhookUrl),
-		Status: r.Status, CreatedAt: r.CreatedAt,
+		Status: r.Status, CreatedAt: r.CreatedAt, GatewayTest: r.GatewayTest,
 	}
 }
 

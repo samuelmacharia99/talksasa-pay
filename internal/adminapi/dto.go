@@ -63,11 +63,13 @@ type appJSON struct {
 	WebhookURL    string    `json:"webhook_url"`
 	Status        string    `json:"status"`
 	CreatedAt     time.Time `json:"created_at"`
+	// GatewayTest: the reserved internal app for Settings test payments.
+	GatewayTest bool `json:"gateway_test"`
 }
 
 func toApp(p app.App) appJSON {
 	return appJSON{ID: p.ID, Name: p.Name, AccountPrefix: p.AccountPrefix, WebhookURL: p.WebhookURL,
-		Status: string(p.Status), CreatedAt: p.CreatedAt}
+		Status: string(p.Status), CreatedAt: p.CreatedAt, GatewayTest: p.GatewayTest}
 }
 
 type apiKeyJSON struct {

@@ -4,13 +4,28 @@ import type { Metadata } from "next";
 import { Facts, PageHeader, Panel } from "@/components/PageHeader";
 import { ToneLabel } from "@/components/ToneLabel";
 import { actorLabel } from "@/lib/labels";
-import { load, requireMe } from "@/lib/api";
+import { api, load, requireMe } from "@/lib/api";
+import { log } from "@/lib/log";
 import { callbackTokenLabel, credentialLabel, maskCallbackURL, SOURCE_LABEL } from "@/lib/settings";
 import { callbackBaseForThisPanel } from "@/lib/settings-server";
 
+import type { TestPayment } from "./actions";
 import { PaybillForm, RegisterForm, TestForm } from "./forms";
+import { TestPaymentPanel } from "./TestPayment";
 
 export const metadata: Metadata = { title: "Settings" };
+
+/** Recent test payments; best effort, the page renders without them. */
+async function recentTests(): Promise<TestPayment[]> {
+  try {
+    const c = await api();
+    const { data } = await c.GET("/settings/mpesa/test-payments");
+    return data?.items ?? [];
+  } catch (e) {
+    log.error({ err: e instanceof Error ? e.message : String(e) }, "could not load test payments");
+    return [];
+  }
+}
 
 export default async function SettingsPage() {
   const me = await requireMe();
@@ -103,6 +118,17 @@ export default async function SettingsPage() {
             </div>
           </Panel>
         </div>
+
+        {canManage ? (
+          <Panel title="Test payment">
+            <TestPaymentPanel
+              production={s.environment === "production"}
+              ready={s.ready}
+              initial={await recentTests()}
+              initialKey={crypto.randomUUID()}
+            />
+          </Panel>
+        ) : null}
       </div>
     </>
   );

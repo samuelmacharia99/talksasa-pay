@@ -14,12 +14,15 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/admin"
 	"github.com/talksasa/talksasa-pay/internal/adminapi"
 	"github.com/talksasa/talksasa-pay/internal/audit"
+	"github.com/talksasa/talksasa-pay/internal/charge"
 	"github.com/talksasa/talksasa-pay/internal/config"
 	"github.com/talksasa/talksasa-pay/internal/httpapi"
 	"github.com/talksasa/talksasa-pay/internal/mpesasettings"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 	"github.com/talksasa/talksasa-pay/internal/reporting"
+	"github.com/talksasa/talksasa-pay/internal/stk"
 	"github.com/talksasa/talksasa-pay/internal/store"
+	"github.com/talksasa/talksasa-pay/internal/testpay"
 	"github.com/talksasa/talksasa-pay/internal/testutil/seed"
 	"github.com/talksasa/talksasa-pay/internal/webhook"
 )
@@ -42,6 +45,13 @@ func newAPIEnv(t *testing.T) *apiEnv {
 		MpesaSettings:  mpesasettings.NewService(mpesasettings.Options{Pool: a.db.App, Keyring: a.keyring, Env: config.EnvDevelopment, Logger: a.logger}),
 	}
 	deps.Ledger = a.ledger
+	// M-Pesa is off here (no client): test payments validate, then answer
+	// mpesa_not_ready, and the recent list is empty.
+	noMpesa := stk.NewService(stk.Options{Pool: a.db.App, Logger: a.logger})
+	deps.TestPayments = testpay.NewService(testpay.Options{
+		Apps: a.apps, Charges: charge.NewService(charge.Options{Pool: a.db.App, Logger: a.logger}),
+		Pushes: noMpesa, Settings: deps.MpesaSettings.(*mpesasettings.Service), Logger: a.logger,
+	})
 	return &apiEnv{
 		adminEnv: a, deps: deps, admin: adminapi.NewRouter(deps),
 		pub: httpapi.NewRouter(httpapi.Deps{Logger: a.logger, Pool: a.db.App, Apps: a.apps, Reporting: rep,

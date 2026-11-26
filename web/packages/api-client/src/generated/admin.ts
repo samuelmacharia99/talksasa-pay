@@ -1675,6 +1675,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/settings/mpesa/test-payments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The latest Settings test payments, newest first (admin)
+         * @description Empty until the first test creates the reserved Gateway test app.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            items: components["schemas"]["TestPayment"][];
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Send a real test payment prompt (admin); audited
+         * @description Creates a real charge of `amount` (KES 1 to 1,000) on the reserved
+         *     internal "Gateway test" app (created on first use, prefix GWTEST)
+         *     and sends an M-Pesa prompt to `phone`. The money is real; it is
+         *     recorded and reported under the Gateway test app. With production
+         *     settings `confirm` must be "production". The same `key` returns the
+         *     same test (a double-submitted form sends one prompt).
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        amount: number;
+                        phone: string;
+                        key: string;
+                        confirm?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description Started (the prompt may still have failed; see prompt_error and push) */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TestPayment"];
+                    };
+                };
+                409: components["responses"]["Problem"];
+                422: components["responses"]["Problem"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users": {
         parameters: {
             query?: never;
@@ -1980,6 +2060,28 @@ export interface components {
             status: "active" | "suspended";
             /** Format: date-time */
             created_at: string;
+            /** @description The reserved internal app that Settings test payments are charged to */
+            gateway_test: boolean;
+        };
+        TestPayment: {
+            /** Format: uuid */
+            charge_id: string;
+            /** Format: uuid */
+            app_id: string;
+            reference: string;
+            amount: number;
+            account_number: string;
+            /** @enum {string} */
+            charge_status: "pending" | "needs_review" | "succeeded" | "expired" | "cancelled" | "reversed";
+            /** Format: uuid */
+            transaction_id: string | null;
+            /** Format: date-time */
+            succeeded_at: string | null;
+            /** Format: date-time */
+            created_at: string;
+            push: components["schemas"]["STKPush"] | null;
+            /** @description Why the prompt could not be sent */
+            prompt_error: string | null;
         };
         APIKey: {
             key_id: string;

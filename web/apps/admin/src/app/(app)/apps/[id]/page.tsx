@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { Facts, PageHeader, Panel } from "@/components/PageHeader";
+import { TestAppBadge } from "@/components/TestAppBadge";
 import { getMe, load } from "@/lib/api";
 import { actorLabel } from "@/lib/labels";
 
@@ -28,11 +29,23 @@ export default async function AppPage({ params }: { params: Promise<{ id: string
     <>
       <PageHeader
         back={<Link href="/apps" className="text-violet hover:underline">Apps</Link>}
-        title={p.name}
-        lead={
+        title={
           <>
-            Customers pay to account numbers starting <span className="font-medium text-ink">{p.account_prefix}-</span>
+            {p.name}
+            {p.gateway_test ? <TestAppBadge /> : null}
           </>
+        }
+        lead={
+          p.gateway_test ? (
+            <>
+              Internal app for the test payments sent from <Link href="/settings" className="text-violet hover:underline">Settings</Link>. Its money is
+              test money, not a real app&apos;s revenue.
+            </>
+          ) : (
+            <>
+              Customers pay to account numbers starting <span className="font-medium text-ink">{p.account_prefix}-</span>
+            </>
+          )
         }
         actions={<Status value={p.status} className="text-sm" />}
       />

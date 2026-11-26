@@ -58,9 +58,9 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (App
 }
 
 const createApp = `-- name: CreateApp :one
-INSERT INTO apps (id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at
+INSERT INTO apps (id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, gateway_test)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at, gateway_test
 `
 
 type CreateAppParams struct {
@@ -70,6 +70,7 @@ type CreateAppParams struct {
 	WebhookUrl              *string
 	WebhookSecretCiphertext []byte
 	WebhookSecretKeyVersion int32
+	GatewayTest             bool
 }
 
 func (q *Queries) CreateApp(ctx context.Context, arg CreateAppParams) (App, error) {
@@ -80,6 +81,7 @@ func (q *Queries) CreateApp(ctx context.Context, arg CreateAppParams) (App, erro
 		arg.WebhookUrl,
 		arg.WebhookSecretCiphertext,
 		arg.WebhookSecretKeyVersion,
+		arg.GatewayTest,
 	)
 	var i App
 	err := row.Scan(
@@ -95,6 +97,7 @@ func (q *Queries) CreateApp(ctx context.Context, arg CreateAppParams) (App, erro
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.GatewayTest,
 	)
 	return i, err
 }
@@ -141,7 +144,7 @@ func (q *Queries) GetAPIKeyForAuth(ctx context.Context, keyID string) (GetAPIKey
 }
 
 const getApp = `-- name: GetApp :one
-SELECT id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at FROM apps WHERE id = $1
+SELECT id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at, gateway_test FROM apps WHERE id = $1
 `
 
 func (q *Queries) GetApp(ctx context.Context, id uuid.UUID) (App, error) {
@@ -160,12 +163,13 @@ func (q *Queries) GetApp(ctx context.Context, id uuid.UUID) (App, error) {
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.GatewayTest,
 	)
 	return i, err
 }
 
 const getAppByPrefix = `-- name: GetAppByPrefix :one
-SELECT id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at FROM apps WHERE account_prefix = $1
+SELECT id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at, gateway_test FROM apps WHERE account_prefix = $1
 `
 
 func (q *Queries) GetAppByPrefix(ctx context.Context, accountPrefix string) (App, error) {
@@ -184,6 +188,33 @@ func (q *Queries) GetAppByPrefix(ctx context.Context, accountPrefix string) (App
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.GatewayTest,
+	)
+	return i, err
+}
+
+const getGatewayTestApp = `-- name: GetGatewayTestApp :one
+SELECT id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at, gateway_test FROM apps WHERE gateway_test
+`
+
+// The reserved internal app that Settings test payments are charged to.
+func (q *Queries) GetGatewayTestApp(ctx context.Context) (App, error) {
+	row := q.db.QueryRow(ctx, getGatewayTestApp)
+	var i App
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.AccountPrefix,
+		&i.WebhookUrl,
+		&i.WebhookSecretCiphertext,
+		&i.WebhookSecretKeyVersion,
+		&i.WebhookSecretPrevCiphertext,
+		&i.WebhookSecretPrevKeyVersion,
+		&i.WebhookSecretPrevExpiresAt,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.GatewayTest,
 	)
 	return i, err
 }
@@ -226,7 +257,7 @@ func (q *Queries) ListAPIKeys(ctx context.Context, appID uuid.UUID) ([]AppApiKey
 }
 
 const listApps = `-- name: ListApps :many
-SELECT id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at FROM apps ORDER BY account_prefix
+SELECT id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at, gateway_test FROM apps ORDER BY account_prefix
 `
 
 func (q *Queries) ListApps(ctx context.Context) ([]App, error) {
@@ -251,6 +282,7 @@ func (q *Queries) ListApps(ctx context.Context) ([]App, error) {
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.GatewayTest,
 		); err != nil {
 			return nil, err
 		}
@@ -328,7 +360,7 @@ func (q *Queries) SetAPIKeyAllowedCIDRs(ctx context.Context, arg SetAPIKeyAllowe
 }
 
 const setAppStatus = `-- name: SetAppStatus :one
-UPDATE apps SET status = $1 WHERE id = $2 RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at
+UPDATE apps SET status = $1 WHERE id = $2 RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at, gateway_test
 `
 
 type SetAppStatusParams struct {
@@ -352,6 +384,7 @@ func (q *Queries) SetAppStatus(ctx context.Context, arg SetAppStatusParams) (App
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.GatewayTest,
 	)
 	return i, err
 }
@@ -377,7 +410,7 @@ UPDATE apps
        webhook_secret_ciphertext = $2,
        webhook_secret_key_version = $3
  WHERE id = $4
-RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at
+RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at, gateway_test
 `
 
 type UpdateAppWebhookSecretParams struct {
@@ -409,12 +442,13 @@ func (q *Queries) UpdateAppWebhookSecret(ctx context.Context, arg UpdateAppWebho
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.GatewayTest,
 	)
 	return i, err
 }
 
 const updateAppWebhookURL = `-- name: UpdateAppWebhookURL :one
-UPDATE apps SET webhook_url = $1 WHERE id = $2 RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at
+UPDATE apps SET webhook_url = $1 WHERE id = $2 RETURNING id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, webhook_secret_prev_ciphertext, webhook_secret_prev_key_version, webhook_secret_prev_expires_at, status, created_at, updated_at, gateway_test
 `
 
 type UpdateAppWebhookURLParams struct {
@@ -438,6 +472,7 @@ func (q *Queries) UpdateAppWebhookURL(ctx context.Context, arg UpdateAppWebhookU
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.GatewayTest,
 	)
 	return i, err
 }

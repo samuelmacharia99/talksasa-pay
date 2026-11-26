@@ -891,6 +891,7 @@ type App struct {
 	Status                      AppStatus
 	CreatedAt                   time.Time
 	UpdatedAt                   time.Time
+	GatewayTest                 bool
 }
 
 type AppApiKey struct {

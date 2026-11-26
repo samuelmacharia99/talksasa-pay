@@ -1,7 +1,11 @@
 -- name: CreateApp :one
-INSERT INTO apps (id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version)
-VALUES (@id, @name, @account_prefix, @webhook_url, @webhook_secret_ciphertext, @webhook_secret_key_version)
+INSERT INTO apps (id, name, account_prefix, webhook_url, webhook_secret_ciphertext, webhook_secret_key_version, gateway_test)
+VALUES (@id, @name, @account_prefix, @webhook_url, @webhook_secret_ciphertext, @webhook_secret_key_version, @gateway_test)
 RETURNING *;
+
+-- name: GetGatewayTestApp :one
+-- The reserved internal app that Settings test payments are charged to.
+SELECT * FROM apps WHERE gateway_test;
 
 -- name: GetApp :one
 SELECT * FROM apps WHERE id = @id;

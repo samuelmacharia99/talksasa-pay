@@ -689,6 +689,46 @@ paths:
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
         "502": { $ref: "#/components/responses/Problem" }
+  /settings/mpesa/test-payments:
+    get:
+      summary: The latest Settings test payments, newest first (admin)
+      description: Empty until the first test creates the reserved Gateway test app.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/TestPayment" } }
+    post:
+      summary: Send a real test payment prompt (admin); audited
+      description: |
+        Creates a real charge of `amount` (KES 1 to 1,000) on the reserved
+        internal "Gateway test" app (created on first use, prefix GWTEST)
+        and sends an M-Pesa prompt to `phone`. The money is real; it is
+        recorded and reported under the Gateway test app. With production
+        settings `confirm` must be "production". The same `key` returns the
+        same test (a double-submitted form sends one prompt).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [amount, phone, key]
+              properties:
+                amount: { type: integer, minimum: 1, maximum: 1000 }
+                phone: { type: string, maxLength: 20 }
+                key: { type: string, minLength: 8, maxLength: 64 }
+                confirm: { type: [string, "null"] }
+      responses:
+        "201": { description: Started (the prompt may still have failed; see prompt_error and push), content: { application/json: { schema: { $ref: "#/components/schemas/TestPayment" } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
   /users:
     get:
       summary: Staff accounts (admin)
@@ -843,7 +883,7 @@ components:
         expires_at: { type: string, format: date-time }
     App:
       type: object
-      required: [id, name, account_prefix, webhook_url, status, created_at]
+      required: [id, name, account_prefix, webhook_url, status, created_at, gateway_test]
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
@@ -851,6 +891,25 @@ components:
         webhook_url: { type: string }
         status: { type: string, enum: [active, suspended] }
         created_at: { type: string, format: date-time }
+        gateway_test: { type: boolean, description: The reserved internal app that Settings test payments are charged to }
+    TestPayment:
+      type: object
+      required: [charge_id, app_id, reference, amount, account_number, charge_status, transaction_id, succeeded_at, created_at, push, prompt_error]
+      properties:
+        charge_id: { type: string, format: uuid }
+        app_id: { type: string, format: uuid }
+        reference: { type: string }
+        amount: { type: integer }
+        account_number: { type: string }
+        charge_status: { type: string, enum: [pending, needs_review, succeeded, expired, cancelled, reversed] }
+        transaction_id: { type: [string, "null"], format: uuid }
+        succeeded_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        push:
+          oneOf:
+            - { $ref: "#/components/schemas/STKPush" }
+            - { type: "null" }
+        prompt_error: { type: [string, "null"], description: Why the prompt could not be sent }
     APIKey:
       type: object
       required: [key_id, label, created_by, created_at, expires_at, revoked_at, last_used_at]
