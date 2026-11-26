@@ -68,11 +68,11 @@ test("admin saves sandbox paybill settings, tests them and registers the callbac
 
   // Register the C2B URLs; the registration time appears.
   await page.getByRole("button", { name: "Register URLs with Safaricom" }).click();
-  await expect(page.getByText(/Safaricom accepted .*\/cb\/mpesa\/•+\/c2b\/confirmation/)).toBeVisible();
+  await expect(page.getByText(/Safaricom accepted .*\/cb\/hooks\/•+\/c2b\/confirmation/)).toBeVisible();
   await page.reload();
   await expect(page.getByTestId("registration")).toContainText(/\d{2}:\d{2}/);
   await expect(page.getByTestId("registration")).not.toContainText("older paybill");
-  expect(await page.content()).not.toContain("/cb/mpesa/" + (process.env.E2E_MPESA_CALLBACK_TOKEN ?? "never-set"));
+  expect(await page.content()).not.toContain("/cb/hooks/" + (process.env.E2E_MPESA_CALLBACK_TOKEN ?? "never-set"));
   await page.screenshot({ path: `${SHOTS}/settings.png`, fullPage: true });
 
   // Test payments: the fake Daraja pays phones ending in 0 and cancels

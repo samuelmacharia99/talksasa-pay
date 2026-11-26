@@ -12,7 +12,7 @@
 		format filter {
 			wrap json
 			fields {
-				request>uri regexp "(?i)^/+cb/+mpesa/+[^/?#]*" "/cb/mpesa/[redacted]"
+				request>uri regexp "(?i)^/+cb/+(mpesa|hooks)/+[^/?#]*" "/cb/$1/[redacted]"
 			}
 		}
 	}
@@ -28,13 +28,13 @@
 		-X-Powered-By
 	}
 	# Access log. The M-Pesa callback URLs carry a secret token in the path
-	# (/cb/mpesa/<token>/...): it is replaced before anything is written.
+	# (/cb/hooks/<token>/..., formerly /cb/mpesa/): it is replaced before anything is written.
 	log {
 		output stdout
 		format filter {
 			wrap json
 			fields {
-				request>uri regexp "(?i)^/+cb/+mpesa/+[^/?#]*" "/cb/mpesa/[redacted]"
+				request>uri regexp "(?i)^/+cb/+(mpesa|hooks)/+[^/?#]*" "/cb/$1/[redacted]"
 			}
 		}
 	}

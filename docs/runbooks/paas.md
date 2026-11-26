@@ -73,7 +73,7 @@ How it fits together:
   `/health*`) go to the Go service, everything else to the admin panel.
   The Go service answers every route under `/api` as well as at the root,
   so apps call `https://<host>/api/v1/...`, Safaricom calls
-  `https://<host>/api/cb/mpesa/...`, and the platform's readiness probe
+  `https://<host>/api/cb/hooks/...`, and the platform's readiness probe
   `/api/health` is `/readyz`.
 - The backend and frontend are separate containers. The admin panel
   reaches the Go admin listener at `http://backend:8089`, so the listener

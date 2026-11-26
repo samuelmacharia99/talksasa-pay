@@ -188,10 +188,36 @@ func newHTTPTransportClient(timeout time.Duration) *http.Client {
 	}
 }
 
+// CallbackPath is where Safaricom's callbacks are served, under the
+// callback base URL: CallbackPath + <token> + "/stk" etc. It must not
+// contain any of ForbiddenURLWords. LegacyCallbackPath is the old path,
+// still served for prompts sent before the change (Safaricom refuses to
+// register C2B URLs containing "mpesa").
+const (
+	CallbackPath       = "cb/hooks/"
+	LegacyCallbackPath = "cb/mpesa/"
+)
+
+// ForbiddenURLWords are words Daraja refuses anywhere in a callback URL
+// (matched case-insensitively), e.g. "400.003.02 Invalid ValidationURL -
+// URL has the word MPESA".
+var ForbiddenURLWords = []string{"m-pesa", "mpesa", "safaricom", "exec", "exe", "cmd", "sql", "query"}
+
+// ForbiddenURLWord returns the first word of ForbiddenURLWords in u, or "".
+func ForbiddenURLWord(u string) string {
+	l := strings.ToLower(u)
+	for _, w := range ForbiddenURLWords {
+		if strings.Contains(l, w) {
+			return w
+		}
+	}
+	return ""
+}
+
 // CallbackURLs returns the URLs Daraja is given (they contain the callback
 // token: never log them).
 func (c *HTTPClient) CallbackURLs() (stk, c2bConfirmation, c2bValidation string) {
-	p := c.cbBase + "cb/mpesa/" + c.cbToken.Reveal()
+	p := c.cbBase + CallbackPath + c.cbToken.Reveal()
 	return p + "/stk", p + "/c2b/confirmation", p + "/c2b/validation"
 }
 

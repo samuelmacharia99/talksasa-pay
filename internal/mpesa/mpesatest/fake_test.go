@@ -127,7 +127,7 @@ func TestSuccess(t *testing.T) {
 		t.Fatalf("before callback: %+v", q)
 	}
 	rc := rcv.next(t)
-	if rc.path != "/cb/mpesa/"+cbToken+"/stk" {
+	if rc.path != "/cb/hooks/"+cbToken+"/stk" {
 		t.Fatalf("path %s", rc.path)
 	}
 	r, err := mpesa.ParseSTKCallback(rc.body)
@@ -301,7 +301,7 @@ func TestC2B(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := rcv.next(t)
-	if rc.path != "/cb/mpesa/"+cbToken+"/c2b/confirmation" {
+	if rc.path != "/cb/hooks/"+cbToken+"/c2b/confirmation" {
 		t.Fatalf("path %s", rc.path)
 	}
 	cf, err := mpesa.ParseC2BConfirmation(rc.body)

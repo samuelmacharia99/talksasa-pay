@@ -693,6 +693,21 @@ func (f *Fake) handleQuery(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// refusedURLWords: like the real Daraja, register refuses URLs containing
+// these (case-insensitive). Kept apart from mpesa.ForbiddenURLWords on
+// purpose: this side plays Safaricom.
+var refusedURLWords = []string{"m-pesa", "mpesa", "safaricom", "exec", "exe", "cmd", "sql", "query"}
+
+func urlWord(u string) string {
+	l := strings.ToLower(u)
+	for _, w := range refusedURLWords {
+		if strings.Contains(l, w) {
+			return w
+		}
+	}
+	return ""
+}
+
 func (f *Fake) handleRegister(version string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var q struct {
@@ -714,6 +729,12 @@ func (f *Fake) handleRegister(version string) http.HandlerFunc {
 			return
 		case !strings.HasPrefix(q.ConfirmationURL, "http"):
 			writeErr(w, http.StatusBadRequest, "400.003.02", "Bad Request - Invalid ConfirmationURL")
+			return
+		case urlWord(q.ConfirmationURL) != "":
+			writeErr(w, http.StatusBadRequest, "400.003.02", "Bad Request - Invalid ConfirmationURL - URL has the word "+strings.ToUpper(urlWord(q.ConfirmationURL)))
+			return
+		case urlWord(q.ValidationURL) != "":
+			writeErr(w, http.StatusBadRequest, "400.003.02", "Bad Request - Invalid ValidationURL - URL has the word "+strings.ToUpper(urlWord(q.ValidationURL)))
 			return
 		}
 		f.mu.Lock()

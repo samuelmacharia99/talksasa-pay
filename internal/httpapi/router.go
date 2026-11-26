@@ -19,6 +19,7 @@ import (
 	"github.com/talksasa/talksasa-pay/internal/app"
 	"github.com/talksasa/talksasa-pay/internal/appapi"
 	"github.com/talksasa/talksasa-pay/internal/config"
+	"github.com/talksasa/talksasa-pay/internal/mpesa"
 	"github.com/talksasa/talksasa-pay/internal/platform/db"
 	"github.com/talksasa/talksasa-pay/internal/platform/httpx"
 	"github.com/talksasa/talksasa-pay/internal/platform/metrics"
@@ -92,7 +93,7 @@ const (
 
 // logPath is the path the access log (and every log line of a request)
 // shows: secret tokens in the path are replaced with [redacted].
-var logPath = httpx.RedactSegments("/cb/mpesa/*", "/cb/**", "/public/v1/pay/*")
+var logPath = httpx.RedactSegments("/cb/hooks/*", "/cb/mpesa/*", "/cb/**", "/public/v1/pay/*")
 
 // NewRouter builds the public API handler. Every route is also served
 // under /api (see withAPIPrefix).
@@ -176,8 +177,12 @@ func newRoutes(d Deps) http.Handler {
 
 	// Safaricom callbacks: no app-API auth; the secret path token and
 	// the source-IP allow-list decide. Absent entirely while M-Pesa is off.
+	// /cb/hooks is the current path; /cb/mpesa still serves prompts sent
+	// before the change (Safaricom refuses to register URLs with "mpesa").
 	if mountCallbacks(d) {
-		r.Route("/cb/mpesa/{token}", newCallbacks(d).routes)
+		cb := newCallbacks(d)
+		r.Route("/"+mpesa.CallbackPath+"{token}", cb.routes)
+		r.Route("/"+mpesa.LegacyCallbackPath+"{token}", cb.routes)
 	}
 
 	// App integration API: auth (key -> IP allow-list -> per-key rate

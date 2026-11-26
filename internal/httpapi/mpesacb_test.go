@@ -76,11 +76,11 @@ func expectAck(t *testing.T, r result) {
 
 func TestCallbacksStoreAndAck(t *testing.T) {
 	e := newCBEnv(t, nil)
-	expectAck(t, e.post("/cb/mpesa/"+cbToken+"/stk", stkBody, fromSafaricom()))
+	expectAck(t, e.post("/cb/hooks/"+cbToken+"/stk", stkBody, fromSafaricom()))
 	c2b := `{"TransactionType":"Pay Bill","TransID":"RKT1","TransAmount":"100.00","BillRefNumber":"HOST-1","MSISDN":"2547***"}`
-	expectAck(t, e.post("/cb/mpesa/"+cbToken+"/c2b/confirmation", c2b, fromSafaricom()))
+	expectAck(t, e.post("/cb/hooks/"+cbToken+"/c2b/confirmation", c2b, fromSafaricom()))
 	// Validation always accepts and stores nothing.
-	expectAck(t, e.post("/cb/mpesa/"+cbToken+"/c2b/validation", c2b, fromSafaricom()))
+	expectAck(t, e.post("/cb/hooks/"+cbToken+"/c2b/validation", c2b, fromSafaricom()))
 
 	got := e.stk.storedCallbacks()
 	if len(got) != 2 {
@@ -100,7 +100,7 @@ func TestCallbacksStoreAndAck(t *testing.T) {
 			paths = append(paths, l["path"].(string))
 		}
 	}
-	want := []string{"/cb/mpesa/[redacted]/stk", "/cb/mpesa/[redacted]/c2b/confirmation", "/cb/mpesa/[redacted]/c2b/validation"}
+	want := []string{"/cb/hooks/[redacted]/stk", "/cb/hooks/[redacted]/c2b/confirmation", "/cb/hooks/[redacted]/c2b/validation"}
 	if strings.Join(paths, ",") != strings.Join(want, ",") {
 		t.Fatalf("access log paths %v", paths)
 	}
@@ -272,5 +272,21 @@ func TestCallbackTokenFollowsSettings(t *testing.T) {
 	}
 	if n := len(e.stk.storedCallbacks()); n != 1 {
 		t.Fatalf("stored %d", n)
+	}
+}
+
+// Prompts sent before the move to /cb/hooks carry /cb/mpesa callback URLs:
+// those are still served, behind the same token and IP checks.
+func TestLegacyCallbackPathStillServed(t *testing.T) {
+	e := newCBEnv(t, nil)
+	expectAck(t, e.post("/cb/mpesa/"+cbToken+"/stk", stkBody, fromSafaricom()))
+	if got := e.stk.storedCallbacks(); len(got) != 1 {
+		t.Fatalf("stored %d callbacks", len(got))
+	}
+	if r := e.post("/cb/mpesa/"+strings.Replace(cbToken, "0", "1", 1)+"/stk", stkBody, fromSafaricom()); r.code != 404 {
+		t.Fatalf("legacy path with a wrong token: %d", r.code)
+	}
+	if r := e.post("/cb/hooks/"+cbToken+"/stk", stkBody); r.code != 404 {
+		t.Fatalf("new path from outside Safaricom: %d", r.code)
 	}
 }

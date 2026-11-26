@@ -3,7 +3,7 @@
 # (make e2e-mpesa). Everything goes through real interfaces:
 #
 #   app API (POST /v1/charges, stk-push) -> fake Daraja -> Safaricom-style
-#   callback to /cb/mpesa/... -> worker records the money and succeeds the
+#   callback to /cb/hooks/... -> worker records the money and succeeds the
 #   charge -> signed webhook -> a PHP receiver that verifies it with the PHP
 #   SDK (clients/php: Verifier; data parsed generically).
 #

@@ -245,13 +245,38 @@ func (s *Service) effectiveToken(stored config.Secret) config.Secret {
 }
 
 // newCallbackToken returns 32 random bytes, base64url (43 characters of
-// A-Z a-z 0-9 _ -, as Daraja URLs and mpesa.ClientOptions require).
+// A-Z a-z 0-9 _ -, as Daraja URLs and mpesa.ClientOptions require). A
+// token that happens to spell a word Daraja refuses in URLs ("cmd",
+// "sql"...) is drawn again.
 func newCallbackToken() (config.Secret, error) {
 	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return config.Secret{}, fmt.Errorf("mpesasettings: generate callback token: %w", err)
+	for {
+		if _, err := rand.Read(b); err != nil {
+			return config.Secret{}, fmt.Errorf("mpesasettings: generate callback token: %w", err)
+		}
+		if t := base64.RawURLEncoding.EncodeToString(b); mpesa.ForbiddenURLWord(t) == "" {
+			return config.NewSecret(t), nil
+		}
 	}
-	return config.NewSecret(base64.RawURLEncoding.EncodeToString(b)), nil
+}
+
+// checkURLWords explains, before Daraja is asked, a callback URL that
+// Safaricom would refuse for containing a forbidden word.
+func (s *Service) checkURLWords(st Settings, token, url string) error {
+	w := mpesa.ForbiddenURLWord(url)
+	if w == "" {
+		return nil
+	}
+	switch {
+	case mpesa.ForbiddenURLWord(st.CallbackBaseURL) != "":
+		return &ValidationError{"callback_base_url", fmt.Sprintf("Safaricom refuses callback URLs containing %q; use a callback base URL without it.", w)}
+	case mpesa.ForbiddenURLWord(token) != "" && !s.o.Mpesa.CallbackToken.IsZero():
+		// The deployment's token wins over a stored one: only it can be fixed.
+		return &ValidationError{"callback_token", fmt.Sprintf("TSP_MPESA_CALLBACK_TOKEN contains %q, which Safaricom refuses in URLs. Set a new token without it.", w)}
+	case mpesa.ForbiddenURLWord(token) != "":
+		return &ValidationError{"callback_token", fmt.Sprintf("The callback token happens to contain %q, which Safaricom refuses. Save the settings again to generate a new one, then register.", w)}
+	}
+	return &ValidationError{"callback_base_url", fmt.Sprintf("Safaricom refuses callback URLs containing %q.", w)}
 }
 
 // CallbackBaseURLFixed reports whether the deployment fixes the callback
@@ -300,7 +325,7 @@ func maskedURLs(base string) CallbackURLs {
 	if base == "" {
 		return CallbackURLs{}
 	}
-	p := base + "cb/mpesa/" + RedactedToken
+	p := base + mpesa.CallbackPath + RedactedToken
 	return CallbackURLs{STK: p + "/stk", Confirmation: p + "/c2b/confirmation", Validation: p + "/c2b/validation"}
 }
 
@@ -547,8 +572,10 @@ func (s *Service) Save(ctx context.Context, actor audit.Actor, p SaveParams) (St
 			CallbackBaseURL: p.CallbackBaseURL, ConsumerKey: p.ConsumerKey, ConsumerSecret: p.ConsumerSecret, Passkey: p.Passkey}
 		// The saved callback token is kept for ever once generated (it is
 		// in the URLs registered with Safaricom); the first save makes one.
+		// A stored token containing a word Daraja refuses could never have
+		// been registered, so it is replaced.
 		var changed []string
-		if old != nil && !old.storedToken.IsZero() {
+		if old != nil && !old.storedToken.IsZero() && mpesa.ForbiddenURLWord(old.storedToken.Reveal()) == "" {
 			next.storedToken = old.storedToken
 		} else {
 			tok, err := newCallbackToken()
@@ -734,6 +761,9 @@ func (s *Service) RegisterURLs(ctx context.Context, actor audit.Actor, confirm s
 	}
 	token := st.CallbackToken.Reveal()
 	_, confirmation, validation := c.CallbackURLs()
+	if err := s.checkURLWords(st, token, confirmation); err != nil {
+		return RegisterResult{}, err
+	}
 	req := mpesa.RegisterURLsRequest{ShortCode: st.Paybill, ConfirmationURL: confirmation, ValidationURL: validation, ResponseType: "Completed"}
 	cctx, cancel := context.WithTimeout(ctx, registerTimeout)
 	defer cancel()

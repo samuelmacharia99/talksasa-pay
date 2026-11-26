@@ -10,9 +10,14 @@ Talksasa Pay talks to Safaricom's Daraja API for three things:
 - **C2B confirmations**: every payment made to the paybill from the M-Pesa
   menu.
 
-Safaricom calls us back at `/cb/mpesa/<callback token>/stk` and
-`/cb/mpesa/<callback token>/c2b/confirmation` on the API domain (Caddy
-already routes `/cb/*`). Every callback is stored first and then applied by
+Safaricom calls us back at `/cb/hooks/<callback token>/stk` and
+`/cb/hooks/<callback token>/c2b/confirmation` on the API domain (Caddy
+already routes `/cb/*`). Safaricom refuses to register URLs containing
+words such as `mpesa`, `safaricom`, `exe`, `cmd`, `sql` or `query`
+(`400.003.02 ... URL has the word MPESA`), so the path avoids them, a
+generated token never contains them, and registration explains a callback
+base URL or configured token that does. The old `/cb/mpesa/...` path is
+still served for prompts sent before the change. Every callback is stored first and then applied by
 the worker, so nothing Safaricom sends is lost even if applying it fails.
 
 **Money rule:** a charge is paid only when Safaricom confirms with an M-Pesa
@@ -220,7 +225,7 @@ talksasa-pay admin mpesa register-urls --actor "Your Name" [--confirm production
 # locally: make admin ARGS='mpesa register-urls --actor "Your Name"'
 ```
 
-It registers `<callback base>/cb/mpesa/<token>/c2b/confirmation` for the
+It registers `<callback base>/cb/hooks/<token>/c2b/confirmation` for the
 paybill, with no validation URL (we accept every payment; unknown account
 numbers go to Unmatched payments) and is written to the audit log. Run it
 again whenever the callback base URL or token changes. In the sandbox you

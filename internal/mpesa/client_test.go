@@ -176,7 +176,7 @@ func TestCallbackURLs(t *testing.T) {
 		t.Fatal(err)
 	}
 	stk, conf, val := c.CallbackURLs()
-	p := testCallback + "cb/mpesa/" + testCBToken
+	p := testCallback + "cb/hooks/" + testCBToken
 	if stk != p+"/stk" || conf != p+"/c2b/confirmation" || val != p+"/c2b/validation" {
 		t.Fatalf("%s %s %s", stk, conf, val)
 	}
@@ -321,7 +321,7 @@ func TestSTKPushRequestBody(t *testing.T) {
 	want := map[string]any{
 		"BusinessShortCode": testShort, "TransactionType": "CustomerPayBillOnline", "Amount": 1500.0,
 		"PartyA": testPhone, "PartyB": testShort, "PhoneNumber": testPhone,
-		"CallBackURL":      testCallback + "cb/mpesa/" + testCBToken + "/stk",
+		"CallBackURL":      testCallback + "cb/hooks/" + testCBToken + "/stk",
 		"AccountReference": "HOST-1042-EX", "TransactionDesc": "Invoice INV-2",
 	}
 	for k, v := range want {
@@ -628,5 +628,23 @@ func TestErrorMessageTrimmed(t *testing.T) {
 	var e *mpesa.Error
 	if !errors.As(err, &e) || len(e.Message) > 200 {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestForbiddenURLWord(t *testing.T) {
+	for u, want := range map[string]string{
+		"https://pay.talksasa.com/api/cb/hooks/abc/c2b/confirmation": "",
+		"https://pay.talksasa.com/api/cb/mpesa/abc/c2b/validation":   "mpesa",
+		"https://x/cb/hooks/aBcXdZ/stk":                              "",
+		"https://x/cb/hooks/xxCmDyy/stk":                             "cmd",
+		"https://SAFARICOM.example/cb/hooks/t/stk":                   "safaricom",
+		"https://x/cb/hooks/t/stk?QUERY=1":                           "query",
+	} {
+		if got := mpesa.ForbiddenURLWord(u); got != want {
+			t.Errorf("%s: %q, want %q", u, got, want)
+		}
+	}
+	if w := mpesa.ForbiddenURLWord(mpesa.CallbackPath); w != "" {
+		t.Fatalf("CallbackPath contains %q", w)
 	}
 }

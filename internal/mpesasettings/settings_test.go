@@ -132,7 +132,7 @@ func TestSaveAndStatus(t *testing.T) {
 	}
 	if st.Source != SourceDatabase || st.Version != 1 || !st.Ready || st.Paybill != "174379" || st.STKShortCode != "" ||
 		st.ConsumerKey != (Credential{true, "key1"}) || st.ConsumerSecret != (Credential{true, "9876"}) || st.Passkey.Last4 != "c919" ||
-		st.CallbackURLs.Confirmation != "http://api:8088/cb/mpesa/[TOKEN]/c2b/confirmation" {
+		st.CallbackURLs.Confirmation != "http://api:8088/cb/hooks/[TOKEN]/c2b/confirmation" {
 		t.Fatalf("saved status %+v", st)
 	}
 
@@ -247,10 +247,10 @@ func TestTestAndRegisterURLs(t *testing.T) {
 	}
 	sent, ok := e.fake.RegisteredURLs()
 	if !ok || sent.ShortCode != "174379" || sent.ResponseType != "Completed" ||
-		sent.ConfirmationURL != "http://api:8088/cb/mpesa/"+cbToken+"/c2b/confirmation" {
+		sent.ConfirmationURL != "http://api:8088/cb/hooks/"+cbToken+"/c2b/confirmation" {
 		t.Fatalf("Daraja got %+v", sent)
 	}
-	if reg.ConfirmationURL != "http://api:8088/cb/mpesa/[TOKEN]/c2b/confirmation" {
+	if reg.ConfirmationURL != "http://api:8088/cb/hooks/[TOKEN]/c2b/confirmation" {
 		t.Fatalf("result %+v", reg)
 	}
 	st, _ = e.svc.Status(ctx)
@@ -442,5 +442,49 @@ func TestProviderUnconfigured(t *testing.T) {
 	}
 	if _, err := p.STKQuery(context.Background(), "ws_CO_1"); !errors.Is(err, mpesa.ErrUnavailable) {
 		t.Fatalf("query: %v", err)
+	}
+}
+
+// Safaricom refuses C2B URLs containing words such as "mpesa", "cmd" or
+// "sql" (400.003.02). The paths never contain them, a generated token
+// never does, and a configured token that does is explained before Daraja
+// is asked.
+func TestCallbackURLsAvoidWordsSafaricomRefuses(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t, func(o *Options) {
+		o.Mpesa.CallbackToken = config.NewSecret("cbtok_xxCmDxx_0123456789abcdefghijklmnopq")
+	})
+	if _, err := e.svc.Save(ctx, actor, good()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.svc.RegisterURLs(ctx, actor, "")
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Field != "callback_token" || !strings.Contains(ve.Message, "TSP_MPESA_CALLBACK_TOKEN") {
+		t.Fatalf("register with a refused token: %v", err)
+	}
+	if _, ok := e.fake.RegisteredURLs(); ok {
+		t.Fatal("Daraja was asked anyway")
+	}
+
+	e2 := newEnv(t)
+	p := good()
+	p.CallbackBaseURL = "http://mpesa.example:8088/"
+	if _, err := e2.svc.Save(ctx, actor, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e2.svc.RegisterURLs(ctx, actor, ""); !errors.As(err, &ve) || ve.Field != "callback_base_url" {
+		t.Fatalf("register with a refused base URL: %v", err)
+	}
+}
+
+func TestGeneratedCallbackTokensAvoidRefusedWords(t *testing.T) {
+	for range 2000 {
+		tok, err := newCallbackToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w := mpesa.ForbiddenURLWord(tok.Reveal()); w != "" {
+			t.Fatalf("token contains %q", w)
+		}
 	}
 }
